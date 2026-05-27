@@ -31,6 +31,14 @@ func ShortenToolName(name string) (short, original string) {
 	return name[:toolNameLimit], name
 }
 
+// ShortenToolNameOnly is a convenience wrapper around ShortenToolName that
+// returns only the shortened name, discarding the original. Use this for
+// request-side call sites that only need the short form.
+func ShortenToolNameOnly(name string) string {
+	short, _ := ShortenToolName(name)
+	return short
+}
+
 // BuildShortNameMap ensures uniqueness of shortened tool names within a request.
 // It returns a map from shortened name to original name. When multiple original
 // names produce the same shortened form, numeric suffixes (_1, _2, ...) are appended.
@@ -70,6 +78,18 @@ func BuildShortNameMap(names []string) map[string]string {
 	}
 
 	return m
+}
+
+// BuildOriginalToShortNameMap returns a map from original tool name to shortened
+// tool name. This is the inverse of BuildShortNameMap and is useful for request-side
+// translators that need to look up the short form of a tool name.
+func BuildOriginalToShortNameMap(names []string) map[string]string {
+	shortToOriginal := BuildShortNameMap(names)
+	result := make(map[string]string, len(shortToOriginal))
+	for short, orig := range shortToOriginal {
+		result[orig] = short
+	}
+	return result
 }
 
 // RestoreToolName looks up a shortened tool name in the map and returns the

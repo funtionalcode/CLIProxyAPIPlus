@@ -447,30 +447,6 @@ func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
 	return inputTokens, outputTokens, cachedTokens
 }
 
-// buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.
-func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[string]string {
-	tools := gjson.GetBytes(original, "tools")
-	rev := map[string]string{}
-	if !tools.IsArray() {
-		return rev
-	}
-	var names []string
-	arr := tools.Array()
-	for i := 0; i < len(arr); i++ {
-		n := arr[i].Get("name").String()
-		if n != "" {
-			names = append(names, n)
-		}
-	}
-	if len(names) > 0 {
-		m := buildShortNameMap(names)
-		for orig, short := range m {
-			rev[short] = orig
-		}
-	}
-	return rev
-}
-
 func ClaudeTokenCount(_ context.Context, count int64) []byte {
 	return translatorcommon.ClaudeInputTokensJSON(count)
 }

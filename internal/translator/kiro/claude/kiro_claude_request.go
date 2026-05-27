@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -513,28 +514,6 @@ func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
 	return false
 }
 
-// shortenToolNameIfNeeded shortens tool names that exceed 64 characters.
-// MCP tools often have long names like "mcp__server-name__tool-name".
-// This preserves the "mcp__" prefix and last segment when possible.
-func shortenToolNameIfNeeded(name string) string {
-	const limit = 64
-	if len(name) <= limit {
-		return name
-	}
-	// For MCP tools, try to preserve prefix and last segment
-	if strings.HasPrefix(name, "mcp__") {
-		idx := strings.LastIndex(name, "__")
-		if idx > 0 {
-			cand := "mcp__" + name[idx+2:]
-			if len(cand) > limit {
-				return cand[:limit]
-			}
-			return cand
-		}
-	}
-	return name[:limit]
-}
-
 func ensureKiroInputSchema(parameters interface{}) interface{} {
 	if parameters != nil {
 		return parameters
@@ -564,7 +543,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 
 		// Shorten tool name if it exceeds 64 characters (common with MCP tools)
 		originalName := name
-		name = shortenToolNameIfNeeded(name)
+		name = ir.ShortenToolNameOnly(name)
 		if name != originalName {
 			log.Debugf("kiro: shortened tool name from '%s' to '%s'", originalName, name)
 		}
