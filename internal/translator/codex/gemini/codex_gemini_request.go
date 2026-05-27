@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -59,7 +59,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			}
 		}
 		if len(names) > 0 {
-			shortMap = buildShortNameMap(names)
+			shortMap = ir.BuildOriginalToShortNameMap(names)
 		}
 	}
 
@@ -145,7 +145,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						if short, ok := shortMap[n]; ok {
 							n = short
 						} else {
-							n = shortenNameIfNeeded(n)
+							n = ir.ShortenToolNameOnly(n)
 						}
 						fn, _ = sjson.SetBytes(fn, "name", n)
 					}
@@ -212,7 +212,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					if short, ok := shortMap[name]; ok {
 						name = short
 					} else {
-						name = shortenNameIfNeeded(name)
+						name = ir.ShortenToolNameOnly(name)
 					}
 					tool, _ = sjson.SetBytes(tool, "name", name)
 				}
@@ -292,14 +292,4 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 
 	return out
-}
-
-// shortenNameIfNeeded applies the simple shortening rule for a single name.
-func shortenNameIfNeeded(name string) string {
-	return common.ShortenToolName(name)
-}
-
-// buildShortNameMap ensures uniqueness of shortened names within a request.
-func buildShortNameMap(names []string) map[string]string {
-	return common.ShortenToolNames(names)
 }

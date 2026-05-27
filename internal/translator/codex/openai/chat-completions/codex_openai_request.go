@@ -7,7 +7,7 @@
 package chat_completions
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -84,7 +84,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				}
 			}
 			if len(names) > 0 {
-				originalToolNameMap = buildShortNameMap(names)
+				originalToolNameMap = ir.BuildOriginalToShortNameMap(names)
 			}
 		}
 	}
@@ -219,7 +219,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 									if short, ok := originalToolNameMap[name]; ok {
 										name = short
 									} else {
-										name = shortenNameIfNeeded(name)
+										name = ir.ShortenToolNameOnly(name)
 									}
 									funcCall, _ = sjson.SetBytes(funcCall, "name", name)
 								}
@@ -303,7 +303,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 						if short, ok := originalToolNameMap[name]; ok {
 							name = short
 						} else {
-							name = shortenNameIfNeeded(name)
+							name = ir.ShortenToolNameOnly(name)
 						}
 						item, _ = sjson.SetBytes(item, "name", name)
 					}
@@ -337,7 +337,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					if short, ok := originalToolNameMap[name]; ok {
 						name = short
 					} else {
-						name = shortenNameIfNeeded(name)
+						name = ir.ShortenToolNameOnly(name)
 					}
 				}
 				choice := []byte(`{}`)
@@ -440,14 +440,4 @@ func appendToolOutputFallbackPart(output []byte, item gjson.Result) []byte {
 	part, _ = sjson.SetBytes(part, "text", text)
 	output, _ = sjson.SetRawBytes(output, "-1", part)
 	return output
-}
-
-// shortenNameIfNeeded applies the simple shortening rule for a single name.
-func shortenNameIfNeeded(name string) string {
-	return common.ShortenToolName(name)
-}
-
-// buildShortNameMap ensures uniqueness of shortened names within a request.
-func buildShortNameMap(names []string) map[string]string {
-	return common.ShortenToolNames(names)
 }

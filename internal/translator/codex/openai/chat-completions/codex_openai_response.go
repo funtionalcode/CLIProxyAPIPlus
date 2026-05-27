@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -485,31 +486,28 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 // from the original OpenAI-style request JSON using the same shortening logic.
 func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
 	tools := gjson.GetBytes(original, "tools")
-	rev := map[string]string{}
-	if tools.IsArray() && len(tools.Array()) > 0 {
-		var names []string
-		arr := tools.Array()
-		for i := 0; i < len(arr); i++ {
-			t := arr[i]
-			if t.Get("type").String() != "function" {
-				continue
-			}
-			fn := t.Get("function")
-			if !fn.Exists() {
-				continue
-			}
-			if v := fn.Get("name"); v.Exists() {
-				names = append(names, v.String())
-			}
+	if !tools.IsArray() || len(tools.Array()) == 0 {
+		return map[string]string{}
+	}
+	var names []string
+	arr := tools.Array()
+	for i := 0; i < len(arr); i++ {
+		t := arr[i]
+		if t.Get("type").String() != "function" {
+			continue
 		}
-		if len(names) > 0 {
-			m := buildShortNameMap(names)
-			for orig, short := range m {
-				rev[short] = orig
-			}
+		fn := t.Get("function")
+		if !fn.Exists() {
+			continue
+		}
+		if v := fn.Get("name"); v.Exists() {
+			names = append(names, v.String())
 		}
 	}
-	return rev
+	if len(names) > 0 {
+		return ir.BuildShortNameMap(names)
+	}
+	return map[string]string{}
 }
 
 func mimeTypeFromCodexOutputFormat(outputFormat string) string {

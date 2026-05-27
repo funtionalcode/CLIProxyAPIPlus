@@ -12,6 +12,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -384,9 +385,8 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 // buildReverseMapFromGeminiOriginal builds a map[short]original from original Gemini request tools.
 func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 	tools := gjson.GetBytes(original, "tools")
-	rev := map[string]string{}
 	if !tools.IsArray() {
-		return rev
+		return map[string]string{}
 	}
 	var names []string
 	tarr := tools.Array()
@@ -402,12 +402,9 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 		}
 	}
 	if len(names) > 0 {
-		m := buildShortNameMap(names)
-		for orig, short := range m {
-			rev[short] = orig
-		}
+		return ir.BuildShortNameMap(names)
 	}
-	return rev
+	return map[string]string{}
 }
 
 func GeminiTokenCount(ctx context.Context, count int64) []byte {

@@ -4,10 +4,11 @@ import "context"
 
 // RequestEnvelope represents a request in the translation pipeline.
 type RequestEnvelope struct {
-	Format Format
-	Model  string
-	Stream bool
-	Body   []byte
+	Format   Format
+	Model    string
+	Stream   bool
+	Body     []byte
+	Metadata map[string]any
 }
 
 // ResponseEnvelope represents a response in the translation pipeline.
