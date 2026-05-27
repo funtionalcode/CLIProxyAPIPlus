@@ -21,6 +21,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/middleware"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -124,7 +125,27 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+
+	var translated []byte
+	if opts.Alt == "responses/compact" {
+		// Use pipeline with CompactPassthrough middleware to preserve
+		// context_management and truncation fields through translation.
+		compactPipeline := sdktranslator.NewPipeline(nil)
+		compactPipeline.UseRequest(sdktranslator.WrapIRRequestMiddleware(middleware.CompactPassthrough()))
+		compactEnvelope, pipelineErr := compactPipeline.TranslateRequest(ctx, from, to, sdktranslator.RequestEnvelope{
+			Format:   from,
+			Model:    baseModel,
+			Stream:   opts.Stream,
+			Body:     req.Payload,
+			Metadata: map[string]any{"compact": true, "__to_format": to.String()},
+		})
+		if pipelineErr != nil {
+			return resp, fmt.Errorf("compact request translation: %w", pipelineErr)
+		}
+		translated = compactEnvelope.Body
+	} else {
+		translated = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	}
 	translated = adaptOpenAICompatTTSPayload(baseModel, from.String(), translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())

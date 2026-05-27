@@ -13,6 +13,7 @@ import (
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -32,6 +33,12 @@ type ConvertCodexResponseToClaudeParams struct {
 	ThinkingStopPending       bool
 	ThinkingSignature         string
 	ThinkingSummarySeen       bool
+	// reverseNameMap caches short→original tool name mapping built from the original request.
+	reverseNameMap map[string]string
+	// idMap caches shortened→original tool call ID mapping built from the original request.
+	idMap map[string]string
+	// mapsInitialized ensures the reverse maps are built only once per response.
+	mapsInitialized bool
 }
 
 // ConvertCodexResponseToClaude performs sophisticated streaming response format conversion.
@@ -140,11 +147,10 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			params.HasReceivedArgumentsDelta = false
 			template = []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`)
 			template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
-			template, _ = sjson.SetBytes(template, "content_block.id", shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(itemResult.Get("call_id").String())))
+			template, _ = sjson.SetBytes(template, "content_block.id", ir.RestoreToolCallID(ir.NormalizeToolCallID(util.SanitizeClaudeToolID(itemResult.Get("call_id").String()), nil), params.idMap))
 			{
 				name := itemResult.Get("name").String()
-				rev := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
-				if orig, ok := rev[name]; ok {
+				if orig, ok := params.reverseNameMap[name]; ok {
 					name = orig
 				}
 				template, _ = sjson.SetBytes(template, "content_block.name", name)
@@ -250,7 +256,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the Claude Code API format.
 func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, _ *any) []byte {
-	revNames := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
+	revNames := ir.BuildClaudeToolNameReverseMap(originalRequestRawJSON)
+	revIDs := ir.BuildClaudeToolCallIDMap(originalRequestRawJSON)
 
 	rootResult := gjson.ParseBytes(rawJSON)
 	typeStr := rootResult.Get("type").String()
@@ -345,12 +352,12 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 			case "function_call":
 				hasToolCall = true
 				name := item.Get("name").String()
-				if original, ok := revNames[name]; ok {
-					name = original
+				if orig, ok := revNames[name]; ok {
+					name = orig
 				}
 
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolBlock, _ = sjson.SetBytes(toolBlock, "id", shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(item.Get("call_id").String())))
+				toolBlock, _ = sjson.SetBytes(toolBlock, "id", ir.RestoreToolCallID(ir.NormalizeToolCallID(util.SanitizeClaudeToolID(item.Get("call_id").String()), nil), revIDs))
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", name)
 				inputRaw := "{}"
 				if argsStr := item.Get("arguments").String(); argsStr != "" && gjson.Valid(argsStr) {
