@@ -41,7 +41,7 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 		buffer = &bytes.Buffer{}
 	}
 
-	timestamp := entry.Time.Format("2006-01-02 15:04:05")
+	timestamp := entry.Time.UTC().Format("2006-01-02 15:04:05")
 	message := strings.TrimRight(entry.Message, "\r\n")
 
 	reqID := "--------"
