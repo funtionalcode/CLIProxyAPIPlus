@@ -80,6 +80,9 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	if auth := formatAuthInfo(info); auth != "" {
 		builder.WriteString(fmt.Sprintf("Auth: %s\n", auth))
 	}
+	if policy := headerPolicyForProvider(info.Provider); policy != "" {
+		builder.WriteString(fmt.Sprintf("Header Policy: %s\n", policy))
+	}
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
@@ -98,6 +101,17 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
 	updateAggregatedRequest(ginCtx, attempts)
+}
+
+func headerPolicyForProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		return ClaudeHeaderPassthroughPolicy()
+	case "codex":
+		return CodexHeaderPolicy()
+	default:
+		return ""
+	}
 }
 
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
@@ -212,6 +226,9 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 	}
 	if auth := formatAuthInfo(info); auth != "" {
 		builder.WriteString(fmt.Sprintf("Auth: %s\n", auth))
+	}
+	if policy := headerPolicyForProvider(info.Provider); policy != "" {
+		builder.WriteString(fmt.Sprintf("Header Policy: %s\n", policy))
 	}
 	builder.WriteString("Headers:\n")
 	writeHeaders(builder, info.Headers)
@@ -593,4 +610,3 @@ func CreditsUsed(ctx context.Context) bool {
 	}
 	return false
 }
-

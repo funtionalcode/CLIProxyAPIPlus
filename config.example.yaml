@@ -297,28 +297,13 @@ nonstream-keepalive-interval: 0
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
 
-# Default headers for Claude API requests. Update when Claude Code releases new versions.
-# In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
-# when the client omits them, while OS/arch remain runtime-derived. When
-# stabilize-device-profile is enabled, OS/arch stay pinned to the baseline values below,
-# while user-agent/package-version/runtime-version seed a software fingerprint that can
-# still upgrade to newer official Claude client versions.
-# claude-header-defaults:
-#   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
-#   package-version: "0.74.0"
-#   runtime-version: "v24.3.0"
-#   os: "MacOS"
-#   arch: "arm64"
-#   timeout: "600"
-#   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
-
-# Default headers for Codex OAuth model requests.
-# These are used only for file-backed/OAuth Codex requests when the client
-# does not send the header. `user-agent` applies to HTTP and websocket requests;
-# `beta-features` only applies to websocket requests. They do not apply to codex-api-key entries.
-# codex-header-defaults:
-#   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
-#   beta-features: "multi_agent"
+# Claude OAuth requests pass through the headers from each incoming Claude CLI request.
+# CPA does not pin a managed Claude version; the management page lists recent
+# Claude header observations from the current server process instead.
+# Codex OAuth requests pass through client headers when present. When the client
+# omits Codex headers, CPA uses built-in Codex Desktop/codex-proxy-compatible
+# fallback headers for OAuth/file-backed Codex requests. codex-api-key entries
+# still pass through API-key client headers without OAuth desktop fallbacks.
 
 # Codex browser OAuth settings for the management UI.
 # Useful for Docker, reverse proxies, and LAN access where the browser cannot use localhost:1455.

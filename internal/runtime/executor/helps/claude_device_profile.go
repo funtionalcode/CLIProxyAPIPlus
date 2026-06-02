@@ -369,39 +369,21 @@ func DefaultClaudeVersion(cfg *config.Config) string {
 }
 
 func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {
-	if r == nil {
+	if r == nil || ginHeaders == nil {
 		return
 	}
-	profile := defaultClaudeDeviceProfile(cfg)
-	miscEnsure := func(name, fallback string) {
+	copyHeader := func(name string) {
 		if strings.TrimSpace(r.Header.Get(name)) != "" {
 			return
 		}
-		if strings.TrimSpace(ginHeaders.Get(name)) != "" {
-			r.Header.Set(name, strings.TrimSpace(ginHeaders.Get(name)))
-			return
+		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
+			r.Header.Set(name, value)
 		}
-		r.Header.Set(name, fallback)
 	}
 
-	miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion)
-	miscEnsure("X-Stainless-Package-Version", profile.PackageVersion)
-	miscEnsure("X-Stainless-Os", mapStainlessOS())
-	miscEnsure("X-Stainless-Arch", mapStainlessArch())
-
-	// Legacy mode preserves per-auth custom header overrides. By the time we get
-	// here, ApplyCustomHeadersFromAttrs has already populated r.Header.
-	if strings.TrimSpace(r.Header.Get("User-Agent")) != "" {
-		return
-	}
-
-	clientUA := ""
-	if ginHeaders != nil {
-		clientUA = strings.TrimSpace(ginHeaders.Get("User-Agent"))
-	}
-	if isClaudeCodeClient(clientUA) {
-		r.Header.Set("User-Agent", clientUA)
-		return
-	}
-	r.Header.Set("User-Agent", profile.UserAgent)
+	copyHeader("X-Stainless-Runtime-Version")
+	copyHeader("X-Stainless-Package-Version")
+	copyHeader("X-Stainless-Os")
+	copyHeader("X-Stainless-Arch")
+	copyHeader("User-Agent")
 }

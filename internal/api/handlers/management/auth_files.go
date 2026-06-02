@@ -610,6 +610,13 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		entry["claude_header_policy"] = helps.ClaudeHeaderPassthroughPolicy()
+		entry["claude_header_observations"] = helps.RecentClaudeHeaderObservations()
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		entry["codex_header_policy"] = helps.CodexHeaderPolicy()
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
