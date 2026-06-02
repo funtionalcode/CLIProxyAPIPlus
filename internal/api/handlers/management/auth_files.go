@@ -384,10 +384,8 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 			files = append(files, entry)
 		}
 	}
-	sort.Slice(files, func(i, j int) bool {
-		nameI, _ := files[i]["name"].(string)
-		nameJ, _ := files[j]["name"].(string)
-		return strings.ToLower(nameI) < strings.ToLower(nameJ)
+	sort.SliceStable(files, func(i, j int) bool {
+		return compareAuthFileEntries(files[i], files[j]) < 0
 	})
 	c.JSON(200, gin.H{"files": files})
 }
@@ -469,6 +467,14 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
 					fileData["project_id"] = projectID
 				}
+				for _, key := range []string{"group", "plan_type", "plan", "account_type"} {
+					if value := strings.TrimSpace(gjson.GetBytes(data, key).String()); value != "" {
+						fileData[key] = value
+					}
+				}
+				if value := strings.TrimSpace(gjson.GetBytes(data, "balance.group").String()); value != "" {
+					fileData["balance"] = gin.H{"group": value}
+				}
 				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
 					switch pv.Type {
 					case gjson.Number:
@@ -499,7 +505,74 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			files = append(files, fileData)
 		}
 	}
+	sort.SliceStable(files, func(i, j int) bool {
+		return compareAuthFileEntries(files[i], files[j]) < 0
+	})
 	c.JSON(200, gin.H{"files": files})
+}
+
+func normalizeAuthFilePlan(value string) string {
+	return strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.TrimSpace(value)))
+}
+
+func authFilePlanRank(value string) int {
+	switch normalizeAuthFilePlan(value) {
+	case "pro20x":
+		return 0
+	case "pro5x":
+		return 1
+	case "plus":
+		return 2
+	case "free":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func authFilePlanValue(file gin.H) string {
+	for _, key := range []string{"group", "plan_type", "plan", "account_type"} {
+		if value := strings.TrimSpace(fmt.Sprint(file[key])); value != "" && value != "<nil>" {
+			return value
+		}
+	}
+
+	if balance, ok := file["balance"].(gin.H); ok {
+		if value := strings.TrimSpace(fmt.Sprint(balance["group"])); value != "" && value != "<nil>" {
+			return value
+		}
+	}
+	if balance, ok := file["balance"].(map[string]any); ok {
+		if value := strings.TrimSpace(fmt.Sprint(balance["group"])); value != "" && value != "<nil>" {
+			return value
+		}
+	}
+	if idToken, ok := file["id_token"].(map[string]any); ok {
+		if value := strings.TrimSpace(fmt.Sprint(idToken["plan_type"])); value != "" && value != "<nil>" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func compareAuthFileEntries(left gin.H, right gin.H) int {
+	leftPlan := authFilePlanValue(left)
+	rightPlan := authFilePlanValue(right)
+	leftRank := authFilePlanRank(leftPlan)
+	rightRank := authFilePlanRank(rightPlan)
+	if leftRank != rightRank {
+		return leftRank - rightRank
+	}
+	if leftRank == 4 && rightRank == 4 {
+		if planCompare := strings.Compare(strings.ToLower(leftPlan), strings.ToLower(rightPlan)); planCompare != 0 {
+			return planCompare
+		}
+	}
+
+	nameI, _ := left["name"].(string)
+	nameJ, _ := right["name"].(string)
+	return strings.Compare(strings.ToLower(nameI), strings.ToLower(nameJ))
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
@@ -1336,16 +1409,16 @@ func (h *Handler) RefreshOpenAICompatBalance(c *gin.Context) {
 		balance, err := helps.RefreshXiaomiBalanceWithCreds(creds, h.cfg, proxyAuth)
 		if err != nil {
 			var verReq *helps.BrowserVerificationRequired
-				if errors.As(err, &verReq) {
-					c.JSON(http.StatusOK, gin.H{
-						"need_verification": true,
-						"session_id":        verReq.SessionID,
-						"email":             verReq.Email,
-						"message":           verReq.Message,
-					})
-					return
-				}
-				c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch xiaomi balance: %v", err)})
+			if errors.As(err, &verReq) {
+				c.JSON(http.StatusOK, gin.H{
+					"need_verification": true,
+					"session_id":        verReq.SessionID,
+					"email":             verReq.Email,
+					"message":           verReq.Message,
+				})
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch xiaomi balance: %v", err)})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"balance": gin.H{
@@ -5154,9 +5227,9 @@ func (h *Handler) RefreshCodexToken(c *gin.Context) {
 	log.Infof("Codex token refreshed successfully for %s (email=%s)", name, tokenData.Email)
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":   "ok",
-		"email":    tokenData.Email,
-		"expire":   tokenData.Expire,
-		"message":  "token refreshed successfully",
+		"status":  "ok",
+		"email":   tokenData.Email,
+		"expire":  tokenData.Expire,
+		"message": "token refreshed successfully",
 	})
 }
