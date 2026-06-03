@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
@@ -92,6 +93,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
+			if messageRole == "system" {
+				messageRole = "developer"
+			}
 
 			newMessage := func() []byte {
 				msg := []byte(`{"type":"message","role":"","content":[]}`)
@@ -135,8 +139,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					return
 				}
 
-				signature := part.Get("signature").String()
-				if !isFernetLikeReasoningSignature(signature) {
+				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, part.Get("signature").String())
+				if !ok {
 					return
 				}
 
@@ -443,7 +447,6 @@ func convertClaudeWebSearchToolToCodex(tool gjson.Result) []byte {
 	}
 	return out
 }
-
 
 // normalizeToolParameters ensures object schemas contain at least an empty properties map.
 func normalizeToolParameters(raw string) string {

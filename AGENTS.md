@@ -41,8 +41,8 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `test/` — Cross-module integration tests
 
 ## Agent Constraints
-- Do NOT use parallel tasks or sub-agent mode. All work must be done sequentially by a single agent.
-- Do NOT spawn sub-agents or delegate to parallel workers.
+- Parallel tasks and sub-agent mode are allowed when the user explicitly requests them or when the task benefits from independent workstreams.
+- When using sub-agents or parallel workers, keep scopes clear, avoid overlapping file edits, and reconcile results before changing shared code.
 
 ## Code Conventions
 - Keep changes small and simple (KISS)
