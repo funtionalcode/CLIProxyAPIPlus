@@ -52,6 +52,24 @@ import (
 
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
+var authFileLocalMetadataKeys = []string{
+	"priority",
+	"note",
+	"prefix",
+	"proxy_url",
+	"headers",
+	"websockets",
+	"disabled",
+	"tool_prefix_disabled",
+	"tool-prefix-disabled",
+	"disable_cooling",
+	"disable-cooling",
+	"request_retry",
+	"request-retry",
+	"excluded_models",
+	"excluded-models",
+}
+
 const (
 	anthropicCallbackPort = 54545
 	geminiCallbackPort    = 8085
@@ -1885,7 +1903,22 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 			dst = abs
 		}
 	}
-	auth, err := h.buildAuthFromFileData(dst, data)
+
+	metadata, err := decodeAuthFileMetadata(data)
+	if err != nil {
+		return err
+	}
+	authID := h.authIDForPath(dst)
+	if authID == "" {
+		authID = dst
+	}
+	if h.mergeExistingAuthFileLocalFields(authID, metadata) {
+		data, err = marshalAuthFileMetadata(metadata)
+		if err != nil {
+			return err
+		}
+	}
+	auth, err := h.buildAuthFromFileMetadata(dst, metadata)
 	if err != nil {
 		return err
 	}
@@ -2079,9 +2112,205 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 			return nil, fmt.Errorf("failed to read auth file: %w", err)
 		}
 	}
+	metadata, err := decodeAuthFileMetadata(data)
+	if err != nil {
+		return nil, err
+	}
+	return h.buildAuthFromFileMetadata(path, metadata)
+}
+
+func decodeAuthFileMetadata(data []byte) (map[string]any, error) {
 	metadata := make(map[string]any)
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", err)
+	}
+	return metadata, nil
+}
+
+func marshalAuthFileMetadata(metadata map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(metadata); err != nil {
+		return nil, fmt.Errorf("failed to encode auth file: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func (h *Handler) mergeExistingAuthFileLocalFields(authID string, metadata map[string]any) bool {
+	if h == nil || h.authManager == nil || metadata == nil {
+		return false
+	}
+	existing, ok := h.authManager.GetByID(authID)
+	if !ok || existing == nil {
+		return false
+	}
+	return mergeAuthFileLocalFields(metadata, existing)
+}
+
+func mergeAuthFileLocalFields(metadata map[string]any, existing *coreauth.Auth) bool {
+	if metadata == nil || existing == nil {
+		return false
+	}
+	changed := false
+	for _, key := range authFileLocalMetadataKeys {
+		if _, exists := metadata[key]; exists {
+			continue
+		}
+		if existing.Metadata != nil {
+			if value, ok := existing.Metadata[key]; ok {
+				metadata[key] = cloneAuthFileMetadataValue(value)
+				changed = true
+				continue
+			}
+		}
+		if mergeAuthFileLocalFieldFromAttributes(metadata, existing, key) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func mergeAuthFileLocalFieldFromAttributes(metadata map[string]any, existing *coreauth.Auth, key string) bool {
+	if metadata == nil || existing == nil {
+		return false
+	}
+	switch key {
+	case "priority":
+		if existing.Attributes == nil {
+			return false
+		}
+		priority := strings.TrimSpace(existing.Attributes["priority"])
+		if priority == "" {
+			return false
+		}
+		metadata[key] = priority
+		return true
+	case "note":
+		if existing.Attributes == nil {
+			return false
+		}
+		note := strings.TrimSpace(existing.Attributes["note"])
+		if note == "" {
+			return false
+		}
+		metadata[key] = note
+		return true
+	case "prefix":
+		prefix := strings.TrimSpace(existing.Prefix)
+		if prefix == "" {
+			return false
+		}
+		metadata[key] = prefix
+		return true
+	case "proxy_url":
+		proxyURL := strings.TrimSpace(existing.ProxyURL)
+		if proxyURL == "" {
+			return false
+		}
+		metadata[key] = proxyURL
+		return true
+	case "headers":
+		headers := authFileHeadersFromAttributes(existing.Attributes)
+		if len(headers) == 0 {
+			return false
+		}
+		metadata[key] = headers
+		return true
+	case "websockets":
+		if existing.Attributes == nil {
+			return false
+		}
+		raw := strings.TrimSpace(existing.Attributes["websockets"])
+		if raw == "" {
+			return false
+		}
+		if parsed, errParse := strconv.ParseBool(raw); errParse == nil {
+			metadata[key] = parsed
+		} else {
+			metadata[key] = raw
+		}
+		return true
+	case "disabled":
+		if !existing.Disabled && existing.Status != coreauth.StatusDisabled {
+			return false
+		}
+		metadata[key] = true
+		return true
+	default:
+		return false
+	}
+}
+
+func authFileHeadersFromAttributes(attributes map[string]string) map[string]any {
+	if len(attributes) == 0 {
+		return nil
+	}
+	headers := make(map[string]any)
+	for key, value := range attributes {
+		if !strings.HasPrefix(key, "header:") {
+			continue
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(key, "header:"))
+		val := strings.TrimSpace(value)
+		if name == "" || val == "" {
+			continue
+		}
+		headers[name] = val
+	}
+	if len(headers) == 0 {
+		return nil
+	}
+	return headers
+}
+
+func cloneAuthFileMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, value := range typed {
+			out[key] = cloneAuthFileMetadataValue(value)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, value := range typed {
+			out[key] = value
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, value := range typed {
+			out[i] = cloneAuthFileMetadataValue(value)
+		}
+		return out
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return value
+	}
+}
+
+func authFileMetadataTouchedRoots(metadata map[string]any) map[string]struct{} {
+	if len(metadata) == 0 {
+		return nil
+	}
+	roots := make(map[string]struct{})
+	for _, key := range []string{"prefix", "proxy_url", "headers", "priority", "note", "websockets", "disabled"} {
+		if _, ok := metadata[key]; ok {
+			roots[key] = struct{}{}
+		}
+	}
+	return roots
+}
+
+func (h *Handler) buildAuthFromFileMetadata(path string, metadata map[string]any) (*coreauth.Auth, error) {
+	if path == "" {
+		return nil, fmt.Errorf("auth path is empty")
+	}
+	if metadata == nil {
+		return nil, fmt.Errorf("invalid auth file: empty metadata")
 	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
@@ -2097,6 +2326,8 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if authID == "" {
 		authID = path
 	}
+	h.mergeExistingAuthFileLocalFields(authID, metadata)
+
 	attr := map[string]string{
 		"path":   path,
 		"source": path,
@@ -2125,6 +2356,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 			auth.Runtime = existing.Runtime
 		}
 	}
+	syncAuthFileMetadataFields(auth, authFileMetadataTouchedRoots(metadata))
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
 }

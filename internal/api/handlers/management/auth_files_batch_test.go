@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -81,6 +82,122 @@ func TestUploadAuthFile_BatchMultipart(t *testing.T) {
 	auths := manager.List()
 	if len(auths) != len(files) {
 		t.Fatalf("expected %d auth entries, got %d", len(files), len(auths))
+	}
+}
+
+func TestUploadAuthFile_OverwritePreservesLocalFields(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	ctx := context.Background()
+
+	const fileName = "codex.json"
+	if err := h.writeAuthFile(ctx, fileName, []byte(`{"type":"codex","email":"user@example.com"}`)); err != nil {
+		t.Fatalf("failed to seed auth file: %v", err)
+	}
+
+	existing, ok := manager.GetByID(fileName)
+	if !ok || existing == nil {
+		t.Fatalf("expected seeded auth record")
+	}
+	existing.Prefix = "team"
+	existing.ProxyURL = "socks5://127.0.0.1:1080"
+	existing.Disabled = true
+	existing.Status = coreauth.StatusDisabled
+	existing.StatusMessage = "disabled by operator"
+	existing.Attributes["priority"] = "9"
+	existing.Attributes["note"] = "keep this account"
+	existing.Attributes["websockets"] = "false"
+	existing.Attributes["header:Cache-Control"] = "no-cache"
+	existing.Attributes["header:Accept-Encoding"] = "identity"
+	existing.Metadata["priority"] = float64(9)
+	existing.Metadata["note"] = "keep this account"
+	existing.Metadata["prefix"] = "team"
+	existing.Metadata["proxy_url"] = "socks5://127.0.0.1:1080"
+	existing.Metadata["websockets"] = false
+	existing.Metadata["disabled"] = true
+	existing.Metadata["tool_prefix_disabled"] = true
+	existing.Metadata["request_retry"] = float64(2)
+	existing.Metadata["headers"] = map[string]any{
+		"Cache-Control":   "no-cache",
+		"Accept-Encoding": "identity",
+	}
+	if _, errUpdate := manager.Update(ctx, existing); errUpdate != nil {
+		t.Fatalf("failed to update existing auth: %v", errUpdate)
+	}
+
+	if err := h.writeAuthFile(ctx, fileName, []byte(`{"type":"codex","email":"user@example.com","access_token":"new-token"}`)); err != nil {
+		t.Fatalf("failed to overwrite auth file: %v", err)
+	}
+
+	auths := manager.List()
+	if len(auths) != 1 {
+		t.Fatalf("expected one auth entry after overwrite, got %d", len(auths))
+	}
+	updated, ok := manager.GetByID(fileName)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to remain after overwrite")
+	}
+	if updated.Prefix != "team" {
+		t.Fatalf("prefix = %q, want %q", updated.Prefix, "team")
+	}
+	if updated.ProxyURL != "socks5://127.0.0.1:1080" {
+		t.Fatalf("proxy_url = %q, want %q", updated.ProxyURL, "socks5://127.0.0.1:1080")
+	}
+	if !updated.Disabled || updated.Status != coreauth.StatusDisabled {
+		t.Fatalf("disabled/status = %v/%s, want true/%s", updated.Disabled, updated.Status, coreauth.StatusDisabled)
+	}
+	if got := updated.Attributes["priority"]; got != "9" {
+		t.Fatalf("priority attr = %q, want %q", got, "9")
+	}
+	if got := updated.Attributes["note"]; got != "keep this account" {
+		t.Fatalf("note attr = %q, want %q", got, "keep this account")
+	}
+	if got := updated.Attributes["websockets"]; got != "false" {
+		t.Fatalf("websockets attr = %q, want %q", got, "false")
+	}
+	if got := updated.Attributes["header:Cache-Control"]; got != "no-cache" {
+		t.Fatalf("Cache-Control attr = %q, want %q", got, "no-cache")
+	}
+	if got := updated.Attributes["header:Accept-Encoding"]; got != "identity" {
+		t.Fatalf("Accept-Encoding attr = %q, want %q", got, "identity")
+	}
+
+	raw, errRead := os.ReadFile(filepath.Join(authDir, fileName))
+	if errRead != nil {
+		t.Fatalf("failed to read overwritten auth file: %v", errRead)
+	}
+	var disk map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &disk); errUnmarshal != nil {
+		t.Fatalf("failed to decode overwritten auth file: %v", errUnmarshal)
+	}
+	if got := disk["access_token"]; got != "new-token" {
+		t.Fatalf("disk access_token = %#v, want %q", got, "new-token")
+	}
+	if got := disk["note"]; got != "keep this account" {
+		t.Fatalf("disk note = %#v, want %q", got, "keep this account")
+	}
+	if got := disk["priority"]; got != float64(9) {
+		t.Fatalf("disk priority = %#v, want 9", got)
+	}
+	if got := disk["tool_prefix_disabled"]; got != true {
+		t.Fatalf("disk tool_prefix_disabled = %#v, want true", got)
+	}
+	if got := disk["request_retry"]; got != float64(2) {
+		t.Fatalf("disk request_retry = %#v, want 2", got)
+	}
+	headers, ok := disk["headers"].(map[string]any)
+	if !ok {
+		t.Fatalf("disk headers = %#v, want object", disk["headers"])
+	}
+	if got := headers["Cache-Control"]; got != "no-cache" {
+		t.Fatalf("disk headers.Cache-Control = %#v, want %q", got, "no-cache")
+	}
+	if got := headers["Accept-Encoding"]; got != "identity" {
+		t.Fatalf("disk headers.Accept-Encoding = %#v, want %q", got, "identity")
 	}
 }
 
