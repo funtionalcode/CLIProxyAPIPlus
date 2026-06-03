@@ -930,9 +930,14 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	r.Header.Set("Content-Type", "application/json")
 
-	// Claude OAuth headers are derived from the current incoming Claude CLI request.
-	stabilizeDeviceProfile := false
+	// Claude OAuth headers use a stable device profile while learning newer
+	// Claude Code software fingerprints from incoming official clients.
+	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg) &&
+		shouldApplyStableClientFingerprint(auth, "claude")
 	var deviceProfile helps.ClaudeDeviceProfile
+	if stabilizeDeviceProfile {
+		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
+	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
@@ -1005,6 +1010,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if stabilizeDeviceProfile {
+		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
+	}
 	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
 	// may override it with a user-configured value.  Compressed SSE breaks the line
 	// scanner regardless of user preference, so this is non-negotiable for streams.

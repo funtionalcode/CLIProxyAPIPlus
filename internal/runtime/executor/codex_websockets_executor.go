@@ -865,7 +865,14 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
 	misc.EnsureHeader(headers, ginHeaders, "Version", "")
-	if isAPIKey {
+	configUserAgent := ""
+	if cfg != nil {
+		configUserAgent = cfg.CodexHeaderDefaults.UserAgent
+	}
+	stabilizeUserAgent := shouldApplyStableClientFingerprint(auth, "codex")
+	if stabilizeUserAgent {
+		headers.Set("User-Agent", codexFixedMacUserAgent(ginHeaders, configUserAgent))
+	} else if isAPIKey {
 		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
 	} else {
 		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", "", codexUserAgent)
@@ -903,6 +910,9 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	if stabilizeUserAgent {
+		headers.Set("User-Agent", codexFixedMacUserAgent(nil, configUserAgent))
+	}
 
 	return headers
 }

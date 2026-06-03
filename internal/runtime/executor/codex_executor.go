@@ -838,6 +838,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
+	isAPIKey := codexAuthUsesAPIKey(auth)
 
 	if ginHeaders.Get("X-Codex-Beta-Features") != "" {
 		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
@@ -845,7 +846,16 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", "", codexUserAgent)
+	configUserAgent := ""
+	if cfg != nil {
+		configUserAgent = cfg.CodexHeaderDefaults.UserAgent
+	}
+	stabilizeUserAgent := shouldApplyStableClientFingerprint(auth, "codex")
+	if stabilizeUserAgent {
+		r.Header.Set("User-Agent", codexFixedMacUserAgent(ginHeaders, configUserAgent))
+	} else {
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", "", codexUserAgent)
+	}
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
 		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
@@ -858,12 +868,6 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	r.Header.Set("Connection", "Keep-Alive")
 
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {
@@ -881,6 +885,9 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if stabilizeUserAgent {
+		r.Header.Set("User-Agent", codexFixedMacUserAgent(nil, configUserAgent))
+	}
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {

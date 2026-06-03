@@ -203,10 +203,9 @@ type UsagePersistenceConfig struct {
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
-// In legacy mode, UserAgent/PackageVersion/RuntimeVersion/Timeout act as fallbacks when
-// the client omits them, while OS/Arch remain runtime-derived. When stabilized device
-// profiles are enabled, OS/Arch become the pinned platform baseline, while
-// UserAgent/PackageVersion/RuntimeVersion seed the upgradeable software fingerprint.
+// By default, UserAgent/PackageVersion/RuntimeVersion seed the upgradeable
+// software fingerprint while OS/Arch pin the stable platform baseline. Legacy
+// mode can be enabled by explicitly setting StabilizeDeviceProfile to false.
 type ClaudeHeaderDefaults struct {
 	UserAgent              string `yaml:"user-agent" json:"user-agent"`
 	PackageVersion         string `yaml:"package-version" json:"package-version"`

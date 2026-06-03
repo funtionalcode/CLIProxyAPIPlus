@@ -80,7 +80,7 @@ type claudeDeviceProfileCacheEntry struct {
 
 func ClaudeDeviceProfileStabilizationEnabled(cfg *config.Config) bool {
 	if cfg == nil || cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile == nil {
-		return false
+		return true
 	}
 	return *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile
 }
