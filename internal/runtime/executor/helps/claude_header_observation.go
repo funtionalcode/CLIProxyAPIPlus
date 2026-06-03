@@ -116,9 +116,9 @@ func sortClaudeHeaderObservations(items []ClaudeHeaderObservation) {
 }
 
 func ClaudeHeaderPassthroughPolicy() string {
-	return "Claude headers: pass through per incoming Claude CLI request; no CPA-managed Claude Header Defaults are applied"
+	return "Claude headers: stable CPA-managed macOS Claude Code device profile; official client header versions can upgrade the cached software fingerprint"
 }
 
 func CodexHeaderPolicy() string {
-	return "Codex headers: pass through client headers when present; otherwise use built-in Codex Desktop/codex-proxy-compatible fallback headers"
+	return "Codex headers: stable CPA-managed macOS codex_cli_rs device profile; official client User-Agent versions can upgrade the cached software fingerprint"
 }

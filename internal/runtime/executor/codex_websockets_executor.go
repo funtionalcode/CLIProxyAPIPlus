@@ -30,7 +30,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-	"golang.org/x/net/proxy"
 )
 
 const (
@@ -729,13 +728,14 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
 	dialer := &websocket.Dialer{
-		Proxy:             http.ProxyFromEnvironment,
+		Proxy:             nil,
 		HandshakeTimeout:  codexResponsesWebsocketHandshakeTO,
 		EnableCompression: true,
 		NetDialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		NetDialTLSContext: helps.CodexFingerprintDialTLSContext(cfg, auth),
 	}
 
 	proxyURL := ""
@@ -749,42 +749,18 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 		return dialer
 	}
 
-	setting, errParse := proxyutil.Parse(proxyURL)
-	if errParse != nil {
-		log.Errorf("codex websockets executor: %v", errParse)
+	proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+	if errBuild != nil {
+		log.Errorf("codex websockets executor: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
 		return dialer
 	}
-
-	switch setting.Mode {
-	case proxyutil.ModeDirect:
-		dialer.Proxy = nil
-		return dialer
-	case proxyutil.ModeProxy:
-	default:
+	if mode == proxyutil.ModeDirect {
 		return dialer
 	}
-
-	switch setting.URL.Scheme {
-	case "socks5", "socks5h":
-		var proxyAuth *proxy.Auth
-		if setting.URL.User != nil {
-			username := setting.URL.User.Username()
-			password, _ := setting.URL.User.Password()
-			proxyAuth = &proxy.Auth{User: username, Password: password}
-		}
-		socksDialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, proxy.Direct)
-		if errSOCKS5 != nil {
-			log.Errorf("codex websockets executor: create SOCKS5 dialer failed: %v", errSOCKS5)
-			return dialer
-		}
-		dialer.Proxy = nil
+	if mode == proxyutil.ModeProxy && proxyDialer != nil {
 		dialer.NetDialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
-			return socksDialer.Dial(network, addr)
+			return proxyDialer.Dial(network, addr)
 		}
-	case "http", "https":
-		dialer.Proxy = http.ProxyURL(setting.URL)
-	default:
-		log.Errorf("codex websockets executor: unsupported proxy scheme: %s", setting.URL.Scheme)
 	}
 
 	return dialer
@@ -890,7 +866,9 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ensureHeaderCasePreserved(headers, ginHeaders, "session_id", "", uuid.NewString())
 	}
 	ensureHeaderCasePreserved(headers, ginHeaders, "session_id", "", "")
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
+	if stabilizeUserAgent {
+		headers.Set("Originator", codexOriginator)
+	} else if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		headers.Set("Originator", originator)
 	} else if !isAPIKey {
 		headers.Set("Originator", codexOriginator)
@@ -912,6 +890,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
 	if stabilizeUserAgent {
 		headers.Set("User-Agent", codexFixedMacUserAgent(nil, configUserAgent))
+		headers.Set("Originator", codexOriginator)
 	}
 
 	return headers

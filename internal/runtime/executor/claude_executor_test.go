@@ -606,6 +606,57 @@ func TestClaudeDeviceProfileStabilizationEnabled_DefaultTrue(t *testing.T) {
 	}
 }
 
+func TestNormalizeClaudeMetadataDeviceIDRewritesOnlyDeviceID(t *testing.T) {
+	userIDJSON := `{"session_id":"sess-client","device_id":"device-client","account_id":"acct-client"}`
+	payload, _ := sjson.SetBytes([]byte(`{"metadata":{}}`), "metadata.user_id", userIDJSON)
+	auth := &cliproxyauth.Auth{ID: "auth-device-1"}
+
+	first := normalizeClaudeMetadataDeviceID(payload, auth, "token-1")
+	second := normalizeClaudeMetadataDeviceID(payload, auth, "token-1")
+	other := normalizeClaudeMetadataDeviceID(payload, &cliproxyauth.Auth{ID: "auth-device-2"}, "token-2")
+
+	firstUserID := gjson.GetBytes(first, "metadata.user_id").String()
+	secondUserID := gjson.GetBytes(second, "metadata.user_id").String()
+	otherUserID := gjson.GetBytes(other, "metadata.user_id").String()
+
+	firstMeta := gjson.Parse(firstUserID)
+	secondMeta := gjson.Parse(secondUserID)
+	otherMeta := gjson.Parse(otherUserID)
+
+	if got := firstMeta.Get("session_id").String(); got != "sess-client" {
+		t.Fatalf("session_id = %q, want sess-client", got)
+	}
+	if got := firstMeta.Get("account_id").String(); got != "acct-client" {
+		t.Fatalf("account_id = %q, want acct-client", got)
+	}
+	if got := firstMeta.Get("device_id").String(); got == "" || got == "device-client" {
+		t.Fatalf("device_id = %q, want rewritten non-empty value", got)
+	}
+	if firstMeta.Get("device_id").String() != secondMeta.Get("device_id").String() {
+		t.Fatalf("expected stable device_id for same auth, got %q and %q", firstMeta.Get("device_id").String(), secondMeta.Get("device_id").String())
+	}
+	if firstMeta.Get("device_id").String() == otherMeta.Get("device_id").String() {
+		t.Fatalf("expected different device_id for different auth, got %q", firstMeta.Get("device_id").String())
+	}
+}
+
+func TestApplyCloakingRewritesClaudeCodeDeviceIDWhenCloakSkipped(t *testing.T) {
+	userIDJSON := `{"session_id":"sess-client","device_id":"device-client"}`
+	payload, _ := sjson.SetBytes([]byte(`{"messages":[{"role":"user","content":"hi"}],"metadata":{}}`), "metadata.user_id", userIDJSON)
+	ctx := contextWithGinHeaders(map[string]string{"User-Agent": "claude-cli/2.1.80 (external, cli)"})
+
+	out := applyCloaking(ctx, &config.Config{}, &cliproxyauth.Auth{ID: "auth-claude-code-device"}, payload, "claude-3-5-sonnet", "token-claude-code")
+	userID := gjson.GetBytes(out, "metadata.user_id").String()
+	meta := gjson.Parse(userID)
+
+	if got := meta.Get("device_id").String(); got == "" || got == "device-client" {
+		t.Fatalf("device_id = %q, want rewritten non-empty value", got)
+	}
+	if !gjson.GetBytes(out, "messages.0.content").Exists() {
+		t.Fatal("expected original message content to remain present")
+	}
+}
+
 func TestApplyClaudeToolPrefix(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")

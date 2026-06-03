@@ -1566,6 +1566,41 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	return payload
 }
 
+func normalizeClaudeMetadataDeviceID(payload []byte, auth *cliproxyauth.Auth, apiKey string) []byte {
+	userID := gjson.GetBytes(payload, "metadata.user_id")
+	if !userID.Exists() || userID.Type != gjson.String {
+		return payload
+	}
+
+	userIDJSON := strings.TrimSpace(userID.String())
+	if userIDJSON == "" {
+		return payload
+	}
+	metadata := gjson.Parse(userIDJSON)
+	if !metadata.IsObject() || !metadata.Get("device_id").Exists() {
+		return payload
+	}
+
+	updatedUserIDJSON, errSet := sjson.Set(userIDJSON, "device_id", helps.CachedDeviceID(claudeDeviceIDScope(auth, apiKey)))
+	if errSet != nil {
+		return payload
+	}
+	payload, _ = sjson.SetBytes(payload, "metadata.user_id", updatedUserIDJSON)
+	return payload
+}
+
+func claudeDeviceIDScope(auth *cliproxyauth.Auth, apiKey string) string {
+	if auth != nil {
+		if id := strings.TrimSpace(auth.ID); id != "" {
+			return "auth:" + id
+		}
+	}
+	if key := strings.TrimSpace(apiKey); key != "" {
+		return "api_key:" + key
+	}
+	return ""
+}
+
 // fingerprintSalt is the salt used by Claude Code to compute the 3-char build fingerprint.
 const fingerprintSalt = "59cf53e54c78"
 
@@ -1783,6 +1818,8 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
+	payload = normalizeClaudeMetadataDeviceID(payload, auth, apiKey)
+
 	clientUserAgent := getClientUserAgent(ctx)
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
 	oauthToken := isClaudeOAuthToken(apiKey)

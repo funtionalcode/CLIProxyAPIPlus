@@ -10,16 +10,17 @@ import (
 )
 
 var (
-	codexCLIUserAgentVersionPattern = regexp.MustCompile(`\bcodex_cli_rs/(\d+)\.(\d+)\.(\d+)`)
+	codexCLIUserAgentVersionPattern = regexp.MustCompile(`(?i)\b(?:codex_cli_rs|codex-tui|codex desktop)/(\d+)\.(\d+)\.(\d+)(-[0-9a-z.]+)?`)
 
 	codexLatestUserAgentVersionMu sync.RWMutex
 	codexLatestUserAgentVersion   = codexCLIUserAgentVersion{major: 0, minor: 118, patch: 0}
 )
 
 type codexCLIUserAgentVersion struct {
-	major int
-	minor int
-	patch int
+	major  int
+	minor  int
+	patch  int
+	suffix string
 }
 
 func (v codexCLIUserAgentVersion) Compare(other codexCLIUserAgentVersion) int {
@@ -39,18 +40,28 @@ func (v codexCLIUserAgentVersion) Compare(other codexCLIUserAgentVersion) int {
 			return 1
 		}
 		return -1
+	case v.suffix == other.suffix:
+		return 0
+	case v.suffix == "":
+		return 1
+	case other.suffix == "":
+		return -1
+	case v.suffix > other.suffix:
+		return 1
+	case v.suffix < other.suffix:
+		return -1
 	default:
 		return 0
 	}
 }
 
 func (v codexCLIUserAgentVersion) String() string {
-	return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+	return fmt.Sprintf("%d.%d.%d%s", v.major, v.minor, v.patch, v.suffix)
 }
 
 func parseCodexCLIUserAgentVersion(userAgent string) (codexCLIUserAgentVersion, bool) {
 	matches := codexCLIUserAgentVersionPattern.FindStringSubmatch(strings.TrimSpace(userAgent))
-	if len(matches) != 4 {
+	if len(matches) != 5 {
 		return codexCLIUserAgentVersion{}, false
 	}
 	major, errMajor := strconv.Atoi(matches[1])
@@ -65,7 +76,7 @@ func parseCodexCLIUserAgentVersion(userAgent string) (codexCLIUserAgentVersion, 
 	if errPatch != nil {
 		return codexCLIUserAgentVersion{}, false
 	}
-	return codexCLIUserAgentVersion{major: major, minor: minor, patch: patch}, true
+	return codexCLIUserAgentVersion{major: major, minor: minor, patch: patch, suffix: matches[4]}, true
 }
 
 func observeCodexUserAgentVersion(userAgent string) {

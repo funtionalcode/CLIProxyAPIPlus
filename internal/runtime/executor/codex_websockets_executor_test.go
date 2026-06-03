@@ -204,8 +204,8 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
 
-	if got := headers.Get("Originator"); got != "Codex Desktop" {
-		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
 	}
 	if got := headers.Get("User-Agent"); got != codexUserAgent {
 		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
@@ -311,6 +311,34 @@ func TestApplyCodexWebsocketHeadersLearnsLatestClientUserAgentVersion(t *testing
 	}
 }
 
+func TestApplyCodexWebsocketHeadersLearnsDesktopAndTUIUserAgentVersions(t *testing.T) {
+	resetCodexFixedMacUserAgentForTest()
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+
+	desktopCtx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "Codex Desktop/0.136.0-alpha.2 (Mac OS 26.3.1; arm64) unknown (Codex Desktop; 26.601.21317)",
+	})
+	desktopHeaders := applyCodexWebsocketHeaders(desktopCtx, http.Header{}, auth, "", nil)
+	if got := desktopHeaders.Get("User-Agent"); got != "codex_cli_rs/0.136.0-alpha.2 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("desktop User-Agent = %s", got)
+	}
+
+	tuiCtx := contextWithGinHeaders(map[string]string{
+		"Originator": "codex-tui",
+		"User-Agent": "codex-tui/0.136.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.9 (codex-tui; 0.136.0)",
+	})
+	tuiHeaders := applyCodexWebsocketHeaders(tuiCtx, http.Header{}, auth, "", nil)
+	if got := tuiHeaders.Get("User-Agent"); got != "codex_cli_rs/0.136.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("tui User-Agent = %s", got)
+	}
+	if got := tuiHeaders.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 	resetCodexFixedMacUserAgentForTest()
 	cfg := &config.Config{
@@ -332,8 +360,8 @@ func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 	if got := headers.Get("x-codex-beta-features"); got != "multi_agent" {
 		t.Fatalf("x-codex-beta-features = %q, want multi_agent", got)
 	}
-	if got := headers.Get("Originator"); got != "" {
-		t.Fatalf("Originator = %s, want empty", got)
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
 	}
 }
 
@@ -347,8 +375,8 @@ func TestApplyCodexWebsocketHeadersStabilizesExplicitAPIKeyUserAgent(t *testing.
 	if got := headers.Get("User-Agent"); got != codexUserAgent {
 		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
 	}
-	if got := headers.Get("Originator"); got != "explicit-origin" {
-		t.Fatalf("Originator = %s, want explicit-origin", got)
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
 	}
 }
 
@@ -509,8 +537,8 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 
 	applyCodexHeaders(req, auth, "oauth-token", true, nil)
 
-	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
-		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
+	if got := req.Header.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
 	}
 	if got := req.Header.Get("Version"); got != "0.115.0-alpha.27" {
 		t.Fatalf("Version = %s, want %s", got, "0.115.0-alpha.27")

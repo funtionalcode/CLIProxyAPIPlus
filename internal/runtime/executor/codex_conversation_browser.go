@@ -15,10 +15,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -83,7 +82,7 @@ func ensureCodexConversationSession(ctx context.Context, client *http.Client, au
 	builtCookieHeader := buildCodexConversationCookieHeader(auth, deviceID, "")
 	cookieHeader := mergeCodexConversationCookies(req.Header.Get("Cookie"), builtCookieHeader)
 
-	// 如果 cookie 中没有 cf_clearance，自动获取
+	// Fetch cf_clearance automatically when the cookie does not already contain it.
 	if !strings.Contains(cookieHeader, "cf_clearance=") {
 		authID := ""
 		if auth != nil {
@@ -160,15 +159,7 @@ func newCodexConversationHTTPClient(ctx context.Context, cfg *config.Config, aut
 		return helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 	}
 
-	sdkCfg := &config.SDKConfig{}
-	if cfg != nil {
-		*sdkCfg = cfg.SDKConfig
-	}
-	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
-		sdkCfg.ProxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-
-	return claudeauth.NewAnthropicHttpClient(sdkCfg)
+	return helps.NewCodexFingerprintHTTPClient(ctx, cfg, auth, 0)
 }
 
 func (e *CodexExecutor) resolveCodexConversationBearerToken(ctx context.Context, auth *cliproxyauth.Auth, targetURL string) (string, error) {
