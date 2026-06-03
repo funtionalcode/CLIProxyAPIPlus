@@ -148,7 +148,7 @@ func TestAttachWebsocketLogSourcesUsesLoggerLogsDir(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	logsDir := t.TempDir()
-	logger := logging.NewFileRequestLogger(true, logsDir, "", 0)
+	logger := logging.NewFileRequestLogger(true, logsDir, "", 0, 0)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)

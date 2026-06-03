@@ -53,14 +53,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	httpClientCacheMutex.RLock()
 	if cachedClient, ok := httpClientCache[cacheKey]; ok {
 		httpClientCacheMutex.RUnlock()
-		// Return a wrapper with the requested timeout but shared transport
-		if timeout > 0 {
-			return &http.Client{
-				Transport: cachedClient.Transport,
-				Timeout:   timeout,
-			}
-		}
-		return cachedClient
+		return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, cachedClient, timeout)
 	}
 	httpClientCacheMutex.RUnlock()
 
@@ -79,7 +72,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 			httpClientCacheMutex.Lock()
 			httpClientCache[cacheKey] = httpClient
 			httpClientCacheMutex.Unlock()
-			return httpClient
+			return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, httpClient, timeout)
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
@@ -97,7 +90,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClientCacheMutex.Unlock()
 	}
 
-	return httpClient
+	return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, httpClient, timeout)
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

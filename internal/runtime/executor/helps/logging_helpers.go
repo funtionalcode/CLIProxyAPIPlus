@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -112,6 +114,83 @@ func headerPolicyForProvider(provider string) string {
 	default:
 		return ""
 	}
+}
+
+// RecordAPIHTTPRequest stores the outbound HTTP request when an executor did not
+// already record a richer provider-specific request for the current attempt.
+func RecordAPIHTTPRequest(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, req *http.Request) {
+	if cfg == nil || !cfg.RequestLog || req == nil {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil || !shouldRecordHTTPAttempt(ginCtx) {
+		return
+	}
+
+	var authID, authLabel, authType, authValue string
+	provider := ""
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+		provider = auth.Provider
+	}
+	RecordAPIRequest(ctx, cfg, UpstreamRequestLog{
+		URL:       requestURLForLog(req),
+		Method:    req.Method,
+		Headers:   req.Header.Clone(),
+		Body:      requestBodyForLog(req),
+		Provider:  provider,
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+}
+
+func shouldRecordHTTPAttempt(ginCtx *gin.Context) bool {
+	attempts := getAttempts(ginCtx)
+	if len(attempts) == 0 {
+		return true
+	}
+	last := attempts[len(attempts)-1]
+	if last == nil {
+		return true
+	}
+	if strings.TrimSpace(last.request) == "" {
+		return true
+	}
+	if last.response == nil {
+		return false
+	}
+	return strings.TrimSpace(last.response.String()) != ""
+}
+
+func requestURLForLog(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	return req.URL.String()
+}
+
+func requestBodyForLog(req *http.Request) []byte {
+	if req == nil || req.GetBody == nil {
+		return nil
+	}
+	body, errBody := req.GetBody()
+	if errBody != nil || body == nil {
+		return nil
+	}
+	defer func() {
+		if errClose := body.Close(); errClose != nil {
+			log.Debugf("failed to close request log body copy: %v", errClose)
+		}
+	}()
+	data, errRead := io.ReadAll(body)
+	if errRead != nil {
+		return nil
+	}
+	return data
 }
 
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.

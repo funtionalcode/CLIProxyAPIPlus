@@ -351,7 +351,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	if timeout > 0 {
 		client.Timeout = timeout
 	}
-	return client
+	return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, client, timeout)
 }
 
 func NewCodexFingerprintHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
@@ -368,14 +368,14 @@ func NewCodexFingerprintHTTPClient(ctx context.Context, cfg *config.Config, auth
 			if timeout > 0 {
 				client.Timeout = timeout
 			}
-			return client
+			return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, client, timeout)
 		}
 	}
 	client := &http.Client{Transport: newUtlsHTTP1RoundTripper(proxyURL, utlsProfileCodexCLI)}
 	if timeout > 0 {
 		client.Timeout = timeout
 	}
-	return client
+	return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, client, timeout)
 }
 
 func CodexFingerprintDialTLSContext(cfg *config.Config, auth *cliproxyauth.Auth) func(context.Context, string, string) (net.Conn, error) {
