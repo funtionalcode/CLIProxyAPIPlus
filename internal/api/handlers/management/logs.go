@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	defaultLogFileName      = "main.log"
-	logScannerInitialBuffer = 64 * 1024
-	logScannerMaxBuffer     = 8 * 1024 * 1024
+	defaultLogFileName               = "main.log"
+	logScannerInitialBuffer          = 64 * 1024
+	logScannerMaxBuffer              = 8 * 1024 * 1024
+	formattedRequestLogMaxSize int64 = 64 * 1024 * 1024
 )
 
 // GetLogs returns log lines with optional incremental loading.
@@ -298,49 +299,17 @@ func (h *Handler) DownloadRequestSuccessLog(c *gin.Context) {
 		return
 	}
 
-	dir := h.logDirectory()
-	if strings.TrimSpace(dir) == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+	fullPath, _, ok := h.resolveRequestLogPath(c, "success-")
+	if !ok {
 		return
 	}
 
-	name := strings.TrimSpace(c.Param("name"))
-	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file name"})
-		return
-	}
-	if !strings.HasPrefix(name, "success-") || !strings.HasSuffix(name, ".log") {
-		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-		return
-	}
+	c.FileAttachment(fullPath, strings.TrimSpace(c.Param("name")))
+}
 
-	dirAbs, errAbs := filepath.Abs(dir)
-	if errAbs != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
-		return
-	}
-	fullPath := filepath.Clean(filepath.Join(dirAbs, name))
-	prefix := dirAbs + string(os.PathSeparator)
-	if !strings.HasPrefix(fullPath, prefix) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
-		return
-	}
-
-	info, errStat := os.Stat(fullPath)
-	if errStat != nil {
-		if os.IsNotExist(errStat) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
-		return
-	}
-	if info.IsDir() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
-		return
-	}
-
-	c.FileAttachment(fullPath, name)
+// DownloadFormattedRequestSuccessLog downloads a readable text view of a success request log.
+func (h *Handler) DownloadFormattedRequestSuccessLog(c *gin.Context) {
+	h.downloadFormattedRequestLog(c, "success-")
 }
 
 // GetRequestLogByID finds and downloads a request log file by its request ID.
@@ -442,49 +411,119 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 		return
 	}
 
+	fullPath, _, ok := h.resolveRequestLogPath(c, "error-")
+	if !ok {
+		return
+	}
+
+	c.FileAttachment(fullPath, strings.TrimSpace(c.Param("name")))
+}
+
+// DownloadFormattedRequestErrorLog downloads a readable text view of an error request log.
+func (h *Handler) DownloadFormattedRequestErrorLog(c *gin.Context) {
+	h.downloadFormattedRequestLog(c, "error-")
+}
+
+func (h *Handler) downloadFormattedRequestLog(c *gin.Context, requiredPrefix string) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	fullPath, info, ok := h.resolveRequestLogPath(c, requiredPrefix)
+	if !ok {
+		return
+	}
+	if info.Size() > formattedRequestLogMaxSize {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "log file too large to format"})
+		return
+	}
+
+	data, errRead := os.ReadFile(fullPath)
+	if errRead != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errRead)})
+		return
+	}
+
+	name := strings.TrimSpace(c.Param("name"))
+	formattedName := formattedRequestLogFileName(name)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", formattedName))
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(formatRequestLog(string(data), name)))
+}
+
+func formattedRequestLogFileName(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if strings.HasSuffix(strings.ToLower(trimmed), ".log") {
+		return trimmed[:len(trimmed)-len(".log")] + ".formatted.txt"
+	}
+	if trimmed == "" {
+		return "request-log.formatted.txt"
+	}
+	return trimmed + ".formatted.txt"
+}
+
+func (h *Handler) resolveRequestLogPath(c *gin.Context, requiredPrefix string) (string, os.FileInfo, bool) {
 	dir := h.logDirectory()
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
-		return
+		return "", nil, false
 	}
 
 	name := strings.TrimSpace(c.Param("name"))
 	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file name"})
-		return
+		return "", nil, false
 	}
-	if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
+	if !strings.HasPrefix(name, requiredPrefix) || !strings.HasSuffix(name, ".log") {
 		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-		return
+		return "", nil, false
 	}
 
 	dirAbs, errAbs := filepath.Abs(dir)
 	if errAbs != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
-		return
+		return "", nil, false
 	}
 	fullPath := filepath.Clean(filepath.Join(dirAbs, name))
 	prefix := dirAbs + string(os.PathSeparator)
 	if !strings.HasPrefix(fullPath, prefix) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
-		return
+		return "", nil, false
+	}
+
+	linkInfo, errLstat := os.Lstat(fullPath)
+	if errLstat != nil {
+		if os.IsNotExist(errLstat) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
+			return "", nil, false
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errLstat)})
+		return "", nil, false
+	}
+	if linkInfo.Mode()&os.ModeSymlink != 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
+		return "", nil, false
 	}
 
 	info, errStat := os.Stat(fullPath)
 	if errStat != nil {
 		if os.IsNotExist(errStat) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-			return
+			return "", nil, false
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
-		return
+		return "", nil, false
 	}
 	if info.IsDir() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
-		return
+		return "", nil, false
 	}
 
-	c.FileAttachment(fullPath, name)
+	return fullPath, info, true
 }
 
 func (h *Handler) logDirectory() string {
