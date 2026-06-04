@@ -256,6 +256,38 @@ func TestRewriteModelForAuth_UsesAuthScopedModelAlias(t *testing.T) {
 	}
 }
 
+func TestRewriteModelForAuth_UsesRootMetadataModelAlias(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"model_aliases": "gpt-5.3-codex-spark=gpt-5.4",
+		},
+	}
+
+	if got := rewriteModelForAuth("gpt-5.3-codex-spark", auth); got != "gpt-5.4" {
+		t.Fatalf("rewriteModelForAuth() = %q, want gpt-5.4", got)
+	}
+}
+
+func TestRewriteModelForAuth_UsesNestedMetadataAttributesModelAlias(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"attributes": map[string]any{
+				"model_aliases": "gpt-5.3-codex-spark=gpt-5.4",
+			},
+		},
+	}
+
+	if got := rewriteModelForAuth("gpt-5.3-codex-spark(high)", auth); got != "gpt-5.4(high)" {
+		t.Fatalf("rewriteModelForAuth() = %q, want gpt-5.4(high)", got)
+	}
+}
+
 func TestRewriteModelForAuth_UsesAuthScopedJSONModelAlias(t *testing.T) {
 	t.Parallel()
 
@@ -263,6 +295,23 @@ func TestRewriteModelForAuth_UsesAuthScopedJSONModelAlias(t *testing.T) {
 		Provider: "codex",
 		Attributes: map[string]string{
 			"model_rewrite": `{"gpt-5.3-codex-spark":"gpt-5.4"}`,
+		},
+	}
+
+	if got := rewriteModelForAuth("gpt-5.3-codex-spark", auth); got != "gpt-5.4" {
+		t.Fatalf("rewriteModelForAuth() = %q, want gpt-5.4", got)
+	}
+}
+
+func TestRewriteModelForAuth_UsesRootMetadataJSONModelAlias(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"model_rewrite": map[string]any{
+				"gpt-5.3-codex-spark": "gpt-5.4",
+			},
 		},
 	}
 

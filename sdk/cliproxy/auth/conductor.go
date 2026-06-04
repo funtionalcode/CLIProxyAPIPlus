@@ -1962,7 +1962,7 @@ func rewriteModelForAuth(model string, auth *Auth) string {
 }
 
 func resolveAuthModelAlias(auth *Auth, requestedModel string) string {
-	if auth == nil || len(auth.Attributes) == 0 {
+	if auth == nil {
 		return ""
 	}
 	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
@@ -1970,15 +1970,74 @@ func resolveAuthModelAlias(auth *Auth, requestedModel string) string {
 		return ""
 	}
 	for _, key := range []string{"model_aliases", "model_alias", "model_rewrites", "model_rewrite"} {
-		raw := strings.TrimSpace(auth.Attributes[key])
-		if raw == "" {
-			continue
-		}
-		if resolved := resolveAuthModelAliasSpec(raw, candidates); resolved != "" {
-			return preserveResolvedModelSuffix(resolved, requestResult)
+		for _, raw := range authModelAliasSpecValues(auth, key) {
+			if resolved := resolveAuthModelAliasSpec(raw, candidates); resolved != "" {
+				return preserveResolvedModelSuffix(resolved, requestResult)
+			}
 		}
 	}
 	return ""
+}
+
+func authModelAliasSpecValues(auth *Auth, key string) []string {
+	if auth == nil {
+		return nil
+	}
+	values := make([]string, 0, 3)
+	if len(auth.Attributes) > 0 {
+		if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
+			values = append(values, raw)
+		}
+	}
+	if len(auth.Metadata) > 0 {
+		if raw := authModelAliasSpecValue(auth.Metadata[key]); raw != "" {
+			values = append(values, raw)
+		}
+		if nested, ok := auth.Metadata["attributes"]; ok {
+			if raw := authNestedModelAliasSpecValue(nested, key); raw != "" {
+				values = append(values, raw)
+			}
+		}
+	}
+	return values
+}
+
+func authNestedModelAliasSpecValue(value any, key string) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		return authModelAliasSpecValue(typed[key])
+	case map[string]string:
+		return strings.TrimSpace(typed[key])
+	default:
+		return ""
+	}
+}
+
+func authModelAliasSpecValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]string:
+		if len(typed) == 0 {
+			return ""
+		}
+		raw, errMarshal := json.Marshal(typed)
+		if errMarshal != nil {
+			return ""
+		}
+		return string(raw)
+	case map[string]any:
+		if len(typed) == 0 {
+			return ""
+		}
+		raw, errMarshal := json.Marshal(typed)
+		if errMarshal != nil {
+			return ""
+		}
+		return string(raw)
+	default:
+		return ""
+	}
 }
 
 func resolveAuthModelAliasSpec(raw string, candidates []string) string {

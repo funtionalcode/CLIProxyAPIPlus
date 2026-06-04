@@ -5629,6 +5629,7 @@ func (h *Handler) RefreshCodexToken(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to parse auth file: %v", err)})
 		return
 	}
+	preservedMetadata := codexRefreshPreservedMetadata(fileData)
 
 	refreshToken := strings.TrimSpace(tokenStorage.RefreshToken)
 	if refreshToken == "" {
@@ -5650,6 +5651,7 @@ func (h *Handler) RefreshCodexToken(c *gin.Context) {
 
 	// Update token storage
 	openaiAuth.UpdateTokenStorage(&tokenStorage, tokenData)
+	tokenStorage.SetMetadata(preservedMetadata)
 
 	// Save updated token to file
 	if err := tokenStorage.SaveTokenToFile(authFilePath); err != nil {
@@ -5674,4 +5676,27 @@ func (h *Handler) RefreshCodexToken(c *gin.Context) {
 		"expire":  tokenData.Expire,
 		"message": "token refreshed successfully",
 	})
+}
+
+func codexRefreshPreservedMetadata(fileData []byte) map[string]any {
+	metadata, err := decodeAuthFileMetadata(fileData)
+	if err != nil || len(metadata) == 0 {
+		return nil
+	}
+	for _, key := range []string{
+		"id_token",
+		"access_token",
+		"refresh_token",
+		"account_id",
+		"last_refresh",
+		"email",
+		"type",
+		"expired",
+	} {
+		delete(metadata, key)
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
 }

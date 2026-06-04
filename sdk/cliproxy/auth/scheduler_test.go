@@ -383,7 +383,9 @@ func TestManager_PickNextMixed_UsesAuthScopedModelAlias(t *testing.T) {
 		ID:       authID,
 		Provider: "codex",
 		Attributes: map[string]string{
-			"plan_type":     "plus",
+			"plan_type": "plus",
+		},
+		Metadata: map[string]any{
 			"model_aliases": routeModel + "=" + upstreamModel,
 		},
 	}); errRegister != nil {
