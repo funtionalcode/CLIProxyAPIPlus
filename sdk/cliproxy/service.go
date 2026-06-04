@@ -1643,22 +1643,35 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if model.Image {
 			modelType = registry.OpenAIImageModelType
 		}
-		thinking := model.Thinking
-		if thinking == nil && !model.Image {
-			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+		info := buildConfigModelInfo(modelID, strings.TrimSpace(model.Name), compat.Name, modelType, now)
+		info.DisplayName = modelID
+		info.UserDefined = false
+		if model.Image {
+			info.Thinking = nil
+		} else if model.Thinking != nil {
+			info.Thinking = model.Thinking
+		} else if info.Thinking == nil {
+			info.Thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
-		models = append(models, &ModelInfo{
-			ID:          modelID,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     compat.Name,
-			Type:        modelType,
-			DisplayName: modelID,
-			UserDefined: false,
-			Thinking:    thinking,
-		})
+		models = append(models, info)
 	}
 	return models
+}
+
+func buildConfigModelInfo(alias, name, ownedBy, modelType string, created int64) *ModelInfo {
+	info := registry.LookupStaticModelInfo(name)
+	if info == nil {
+		info = &ModelInfo{}
+	}
+	info.ID = alias
+	info.Object = "model"
+	info.Created = created
+	info.OwnedBy = ownedBy
+	info.Type = modelType
+	info.DisplayName = alias
+	info.Name = rewriteModelInfoName(info.Name, name, alias)
+	info.UserDefined = true
+	return info
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
@@ -1687,20 +1700,8 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		if display == "" {
 			display = alias
 		}
-		info := &ModelInfo{
-			ID:          alias,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     ownedBy,
-			Type:        modelType,
-			DisplayName: display,
-			UserDefined: true,
-		}
-		if name != "" {
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
-				info.Thinking = upstream.Thinking
-			}
-		}
+		info := buildConfigModelInfo(alias, name, ownedBy, modelType, now)
+		info.DisplayName = display
 		out = append(out, info)
 	}
 	return out

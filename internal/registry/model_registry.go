@@ -536,6 +536,9 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	if len(model.SupportedParameters) > 0 {
 		copyModel.SupportedParameters = append([]string(nil), model.SupportedParameters...)
 	}
+	if len(model.SupportedEndpoints) > 0 {
+		copyModel.SupportedEndpoints = append([]string(nil), model.SupportedEndpoints...)
+	}
 	if len(model.SupportedInputModalities) > 0 {
 		copyModel.SupportedInputModalities = append([]string(nil), model.SupportedInputModalities...)
 	}
@@ -1166,6 +1169,19 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if model.DisplayName != "" {
 			result["display_name"] = model.DisplayName
+		}
+		if model.ContextLength > 0 {
+			result["context_length"] = model.ContextLength
+			result["context_window"] = model.ContextLength
+			result["context_window_size"] = model.ContextLength
+			result["context_window_tokens"] = model.ContextLength
+			result["contextWindow"] = model.ContextLength
+			result["max_context_window"] = model.ContextLength
+		}
+		if model.MaxCompletionTokens > 0 {
+			result["max_completion_tokens"] = model.MaxCompletionTokens
+			result["max_output_tokens"] = model.MaxCompletionTokens
+			result["output_token_limit"] = model.MaxCompletionTokens
 		}
 		// Add thinking support for Claude Code client
 		// Claude Code checks for "thinking" field (simple boolean) to enable tab toggle
