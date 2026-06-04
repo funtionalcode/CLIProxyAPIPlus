@@ -36,6 +36,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -730,7 +731,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/auth-files/deepseek-balance/refresh", s.mgmt.RefreshDeepSeekBalance)
 		mgmt.POST("/auth-files/codex-token/refresh", s.mgmt.RefreshCodexToken)
 		mgmt.POST("/openai-compat/balance/refresh", s.mgmt.RefreshOpenAICompatBalance)
-			mgmt.POST("/xiaomi/verify", s.mgmt.SubmitXiaomiVerification)
+		mgmt.POST("/xiaomi/verify", s.mgmt.SubmitXiaomiVerification)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
@@ -925,8 +926,8 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		userAgent := c.GetHeader("User-Agent")
 
-		// Route to Claude handler if User-Agent starts with "claude-cli"
-		if strings.HasPrefix(userAgent, "claude-cli") {
+		// Route Claude Code clients to the Claude-compatible model schema.
+		if isClaudeCodeUserAgent(userAgent) {
 			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
 			claudeHandler.ClaudeModels(c)
 		} else {
@@ -934,6 +935,13 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+func isClaudeCodeUserAgent(userAgent string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(userAgent))
+	return strings.HasPrefix(normalized, "claude-cli") ||
+		strings.HasPrefix(normalized, "claude-code") ||
+		strings.Contains(normalized, "claude code")
 }
 
 func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
@@ -958,6 +966,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 			model["display_name"] = entry.displayName
 			model["description"] = entry.displayName
 		}
+		applyHomeModelTokenMetadata(model, entry)
 		models = append(models, model)
 	}
 
@@ -987,10 +996,12 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.Ha
 }
 
 type homeModelEntry struct {
-	id          string
-	created     int64
-	ownedBy     string
-	displayName string
+	id                  string
+	created             int64
+	ownedBy             string
+	displayName         string
+	contextLength       int
+	maxCompletionTokens int
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
@@ -1016,6 +1027,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 			if entry.displayName != "" {
 				model["display_name"] = entry.displayName
 			}
+			applyHomeModelTokenMetadata(model, entry)
 			out = append(out, model)
 		}
 		firstID := ""
@@ -1049,6 +1061,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		if entry.ownedBy != "" {
 			model["owned_by"] = entry.ownedBy
 		}
+		applyHomeModelTokenMetadata(model, entry)
 		filtered = append(filtered, model)
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -1166,6 +1179,22 @@ func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
 	return action == id || action == "models/"+id || normalizedAction == normalizedID
 }
 
+func applyHomeModelTokenMetadata(model map[string]any, entry homeModelEntry) {
+	if entry.contextLength > 0 {
+		model["context_length"] = entry.contextLength
+		model["context_window"] = entry.contextLength
+		model["context_window_size"] = entry.contextLength
+		model["context_window_tokens"] = entry.contextLength
+		model["contextWindow"] = entry.contextLength
+		model["max_context_window"] = entry.contextLength
+	}
+	if entry.maxCompletionTokens > 0 {
+		model["max_completion_tokens"] = entry.maxCompletionTokens
+		model["max_output_tokens"] = entry.maxCompletionTokens
+		model["output_token_limit"] = entry.maxCompletionTokens
+	}
+}
+
 func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("home models payload is empty")
@@ -1221,11 +1250,24 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				displayName = strings.TrimSpace(displayName)
 			}
 
+			contextLength := intFromHomeModel(model, "context_length", "context_window", "context_window_size", "context_window_tokens", "contextWindow", "max_context_window")
+			maxCompletionTokens := intFromHomeModel(model, "max_completion_tokens", "max_output_tokens", "output_token_limit")
+			if info := registry.LookupModelInfo(id); info != nil {
+				if contextLength == 0 {
+					contextLength = info.ContextLength
+				}
+				if maxCompletionTokens == 0 {
+					maxCompletionTokens = info.MaxCompletionTokens
+				}
+			}
+
 			out = append(out, homeModelEntry{
-				id:          id,
-				created:     created,
-				ownedBy:     ownedBy,
-				displayName: displayName,
+				id:                  id,
+				created:             created,
+				ownedBy:             ownedBy,
+				displayName:         displayName,
+				contextLength:       contextLength,
+				maxCompletionTokens: maxCompletionTokens,
 			})
 		}
 	}
@@ -1235,6 +1277,24 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 		return nil, fmt.Errorf("home models payload contains no models")
 	}
 	return out, nil
+}
+
+func intFromHomeModel(model map[string]any, keys ...string) int {
+	for _, key := range keys {
+		switch value := model[key].(type) {
+		case float64:
+			return int(value)
+		case int64:
+			return int(value)
+		case int:
+			return value
+		case json.Number:
+			if n, err := value.Int64(); err == nil {
+				return int(n)
+			}
+		}
+	}
+	return 0
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.

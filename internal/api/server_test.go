@@ -319,6 +319,12 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if _, ok := gpt55["minimal_client_version"]; !ok {
 		t.Fatal("expected minimal_client_version in codex catalog")
 	}
+	if got, _ := gpt55["context_window"].(float64); got != 272000 {
+		t.Fatalf("gpt-5.5 context_window = %v, want 272000", gpt55["context_window"])
+	}
+	if got, _ := gpt55["max_context_window"].(float64); got != 272000 {
+		t.Fatalf("gpt-5.5 max_context_window = %v, want 272000", gpt55["max_context_window"])
+	}
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
 	if !ok || len(serviceTiers) != 1 {
 		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
@@ -376,6 +382,113 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
 		}
+	}
+}
+
+func TestUnifiedModelsIncludesContextMetadataForPlainModels(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-plain-model-context-metadata"
+	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{{
+		ID:                  "gpt-5.5",
+		Object:              "model",
+		Created:             1776902400,
+		OwnedBy:             "openai",
+		Type:                "openai",
+		DisplayName:         "GPT 5.5",
+		ContextLength:       272000,
+		MaxCompletionTokens: 128000,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("openai status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var openAIResp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &openAIResp); err != nil {
+		t.Fatalf("parse openai response: %v body=%s", err, rr.Body.String())
+	}
+	openAIModel := findModelByID(openAIResp.Data, "gpt-5.5")
+	if openAIModel == nil {
+		t.Fatal("expected gpt-5.5 in OpenAI model list")
+	}
+	assertJSONNumberField(t, openAIModel, "context_window", 272000)
+	assertJSONNumberField(t, openAIModel, "max_output_tokens", 128000)
+
+	claudeReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	claudeReq.Header.Set("Authorization", "Bearer test-key")
+	claudeReq.Header.Set("User-Agent", "Claude-Code/1.0")
+	claudeRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(claudeRR, claudeReq)
+
+	if claudeRR.Code != http.StatusOK {
+		t.Fatalf("claude status = %d, want %d body=%s", claudeRR.Code, http.StatusOK, claudeRR.Body.String())
+	}
+	var claudeResp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(claudeRR.Body.Bytes(), &claudeResp); err != nil {
+		t.Fatalf("parse claude response: %v body=%s", err, claudeRR.Body.String())
+	}
+	claudeModel := findModelByID(claudeResp.Data, "gpt-5.5")
+	if claudeModel == nil {
+		t.Fatal("expected gpt-5.5 in Claude model list")
+	}
+	assertJSONNumberField(t, claudeModel, "context_window", 272000)
+	assertJSONNumberField(t, claudeModel, "max_output_tokens", 128000)
+}
+
+func TestDecodeHomeModelsBackfillsStaticTokenMetadata(t *testing.T) {
+	entries, err := decodeHomeModels([]byte(`{"codex":[{"id":"gpt-5.5","owned_by":"openai"}]}`))
+	if err != nil {
+		t.Fatalf("decode home models: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if entries[0].contextLength != 272000 {
+		t.Fatalf("context length = %d, want 272000", entries[0].contextLength)
+	}
+	if entries[0].maxCompletionTokens != 128000 {
+		t.Fatalf("max completion tokens = %d, want 128000", entries[0].maxCompletionTokens)
+	}
+
+	model := map[string]any{"id": entries[0].id}
+	applyHomeModelTokenMetadata(model, entries[0])
+	assertJSONIntField(t, model, "context_window", 272000)
+	assertJSONIntField(t, model, "max_output_tokens", 128000)
+}
+
+func findModelByID(models []map[string]any, id string) map[string]any {
+	for _, model := range models {
+		if got, _ := model["id"].(string); got == id {
+			return model
+		}
+	}
+	return nil
+}
+
+func assertJSONNumberField(t *testing.T, model map[string]any, key string, want float64) {
+	t.Helper()
+	if got, _ := model[key].(float64); got != want {
+		t.Fatalf("%s = %#v, want %.0f", key, model[key], want)
+	}
+}
+
+func assertJSONIntField(t *testing.T, model map[string]any, key string, want int) {
+	t.Helper()
+	if got, _ := model[key].(int); got != want {
+		t.Fatalf("%s = %#v, want %d", key, model[key], want)
 	}
 }
 

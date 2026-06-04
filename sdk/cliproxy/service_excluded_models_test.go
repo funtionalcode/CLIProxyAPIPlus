@@ -219,6 +219,49 @@ func TestRegisterModelsForAuth_CodexPrefixedConfigModelKeepsStaticTokenMetadata(
 	}
 }
 
+func TestRegisterModelsForAuth_CodexConfigModelKeepsStaticTokenMetadata(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			CodexKey: []config.CodexKey{{
+				APIKey:  "test-key",
+				BaseURL: "https://example.com",
+				Models: []internalconfig.CodexModel{{
+					Name: "gpt-5.5",
+				}},
+			}},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-codex-plain-gpt55",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "api_key",
+			"api_key":   "test-key",
+			"base_url":  "https://example.com",
+		},
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(auth)
+
+	info := modelRegistry.GetModelInfo("gpt-5.5", "codex")
+	if info == nil {
+		t.Fatal("expected gpt-5.5 model to be registered")
+	}
+	if info.ContextLength != 272000 {
+		t.Fatalf("context length = %d, want 272000", info.ContextLength)
+	}
+	if info.MaxCompletionTokens != 128000 {
+		t.Fatalf("max completion tokens = %d, want 128000", info.MaxCompletionTokens)
+	}
+}
+
 func stringValue(value any) string {
 	if value == nil {
 		return ""

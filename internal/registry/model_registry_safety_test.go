@@ -135,6 +135,34 @@ func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 	}
 }
 
+func TestOpenAIAvailableModelsIncludeContextMetadata(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "codex", []*ModelInfo{{
+		ID:                  "gpt-5.5",
+		OwnedBy:             "openai",
+		DisplayName:         "GPT 5.5",
+		ContextLength:       272000,
+		MaxCompletionTokens: 128000,
+	}})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("expected one model, got %d", len(models))
+	}
+
+	model := models[0]
+	for _, key := range []string{"context_length", "context_window", "context_window_size", "context_window_tokens", "contextWindow", "max_context_window"} {
+		if got, ok := model[key].(int); !ok || got != 272000 {
+			t.Fatalf("%s = %#v, want 272000", key, model[key])
+		}
+	}
+	for _, key := range []string{"max_completion_tokens", "max_output_tokens", "output_token_limit"} {
+		if got, ok := model[key].(int); !ok || got != 128000 {
+			t.Fatalf("%s = %#v, want 128000", key, model[key])
+		}
+	}
+}
+
 func TestClaudeAvailableModelsIncludeContextMetadata(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "codex", []*ModelInfo{{

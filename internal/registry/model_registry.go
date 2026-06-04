@@ -1142,9 +1142,16 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if model.ContextLength > 0 {
 			result["context_length"] = model.ContextLength
+			result["context_window"] = model.ContextLength
+			result["context_window_size"] = model.ContextLength
+			result["context_window_tokens"] = model.ContextLength
+			result["contextWindow"] = model.ContextLength
+			result["max_context_window"] = model.ContextLength
 		}
 		if model.MaxCompletionTokens > 0 {
 			result["max_completion_tokens"] = model.MaxCompletionTokens
+			result["max_output_tokens"] = model.MaxCompletionTokens
+			result["output_token_limit"] = model.MaxCompletionTokens
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)

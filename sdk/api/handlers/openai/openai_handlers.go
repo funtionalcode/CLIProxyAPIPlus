@@ -86,6 +86,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
+		copyOpenAIModelMetadata(filteredModel, model)
 		filteredModels[i] = filteredModel
 	}
 
@@ -93,6 +94,27 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		"object": "list",
 		"data":   filteredModels,
 	})
+}
+
+func copyOpenAIModelMetadata(dst, src map[string]any) {
+	for _, key := range []string{
+		"type",
+		"display_name",
+		"description",
+		"context_length",
+		"context_window",
+		"context_window_size",
+		"context_window_tokens",
+		"contextWindow",
+		"max_context_window",
+		"max_completion_tokens",
+		"max_output_tokens",
+		"output_token_limit",
+	} {
+		if value, exists := src[key]; exists {
+			dst[key] = value
+		}
+	}
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.
