@@ -555,7 +555,7 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 			return []string{homeModel}
 		}
 	}
-	requestedModel := rewriteModelForAuth(routeModel, auth)
+	requestedModel := m.rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
@@ -572,7 +572,7 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 }
 
 func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
-	requestedModel := rewriteModelForAuth(routeModel, auth)
+	requestedModel := m.rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {
 		requestedModel = strings.TrimSpace(routeModel)
 	}
@@ -1956,6 +1956,14 @@ func rewriteModelForAuth(model string, auth *Auth) string {
 		}
 	}
 	if alias := resolveAuthModelAlias(auth, rewritten); alias != "" {
+		return alias
+	}
+	return rewritten
+}
+
+func (m *Manager) rewriteModelForAuth(model string, auth *Auth) string {
+	rewritten := rewriteModelForAuth(model, auth)
+	if alias := m.resolveConfigAuthModelAlias(auth, rewritten); alias != "" {
 		return alias
 	}
 	return rewritten

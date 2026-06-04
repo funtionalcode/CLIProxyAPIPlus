@@ -55,6 +55,68 @@ func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) 
 	}
 }
 
+func TestSanitizeOAuthAuthModelAlias_NormalizesRules(t *testing.T) {
+	cfg := &Config{
+		OAuthAuthModelAlias: map[string][]OAuthAuthModelAlias{
+			" CoDeX ": {
+				{
+					PlanType: " Plus ",
+					Account:  " user@example.com ",
+					AuthID:   " codex-user-plus.json ",
+					Aliases: []OAuthModelAlias{
+						{Name: " gpt-5.4 ", Alias: " gpt-5.3-codex-spark "},
+						{Name: "gpt-5.4", Alias: "gpt-5.3-codex-spark"},
+					},
+				},
+				{
+					PlanType: "pro",
+				},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthAuthModelAlias()
+
+	rules := cfg.OAuthAuthModelAlias["codex"]
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 sanitized rule, got %d", len(rules))
+	}
+	rule := rules[0]
+	if rule.PlanType != "plus" || rule.Account != "user@example.com" || rule.AuthID != "codex-user-plus.json" {
+		t.Fatalf("unexpected selector: plan=%q account=%q authID=%q", rule.PlanType, rule.Account, rule.AuthID)
+	}
+	if len(rule.Aliases) != 1 {
+		t.Fatalf("expected 1 alias, got %d", len(rule.Aliases))
+	}
+	if rule.Aliases[0].Name != "gpt-5.4" || rule.Aliases[0].Alias != "gpt-5.3-codex-spark" {
+		t.Fatalf("unexpected alias: %#v", rule.Aliases[0])
+	}
+}
+
+func TestParseConfigBytes_OAuthAuthModelAlias(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte(`
+oauth-auth-model-alias:
+  codex:
+    - plan-type: plus
+      aliases:
+        - name: gpt-5.4
+          alias: gpt-5.3-codex-spark
+`))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", err)
+	}
+	rules := cfg.OAuthAuthModelAlias["codex"]
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].PlanType != "plus" {
+		t.Fatalf("plan type = %q, want plus", rules[0].PlanType)
+	}
+	if len(rules[0].Aliases) != 1 || rules[0].Aliases[0].Name != "gpt-5.4" || rules[0].Aliases[0].Alias != "gpt-5.3-codex-spark" {
+		t.Fatalf("unexpected aliases: %#v", rules[0].Aliases)
+	}
+}
+
 func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 	// When no kiro aliases are configured, defaults should be injected
 	cfg := &Config{

@@ -273,6 +273,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if entries, _ := DiffOAuthModelAliasChanges(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
+	if !reflect.DeepEqual(oldCfg.OAuthAuthModelAlias, newCfg.OAuthAuthModelAlias) {
+		changes = append(changes, fmt.Sprintf("oauth-auth-model-alias: updated (%d -> %d rules)", countOAuthAuthModelAliasRules(oldCfg.OAuthAuthModelAlias), countOAuthAuthModelAliasRules(newCfg.OAuthAuthModelAlias)))
+	}
 
 	// Remote management (never print the key)
 	if oldCfg.RemoteManagement.AllowRemote != newCfg.RemoteManagement.AllowRemote {
@@ -464,6 +467,14 @@ func equalStringSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func countOAuthAuthModelAliasRules(entries map[string][]config.OAuthAuthModelAlias) int {
+	total := 0
+	for _, rules := range entries {
+		total += len(rules)
+	}
+	return total
 }
 
 // equalUpstreamAPIKeys compares two slices of AmpUpstreamAPIKeyEntry for equality.

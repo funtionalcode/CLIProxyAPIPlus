@@ -176,6 +176,10 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// OAuthAuthModelAlias defines model aliases that only apply when the selected OAuth/file-backed
+	// auth matches the configured selector (for example, Codex plan-type plus).
+	OAuthAuthModelAlias map[string][]OAuthAuthModelAlias `yaml:"oauth-auth-model-alias,omitempty" json:"oauth-auth-model-alias,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -358,6 +362,14 @@ type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+}
+
+// OAuthAuthModelAlias defines a selected-auth-scoped model alias rule.
+type OAuthAuthModelAlias struct {
+	PlanType string            `yaml:"plan-type,omitempty" json:"plan_type,omitempty"`
+	Account  string            `yaml:"account,omitempty" json:"account,omitempty"`
+	AuthID   string            `yaml:"auth-id,omitempty" json:"auth_id,omitempty"`
+	Aliases  []OAuthModelAlias `yaml:"aliases" json:"aliases"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -956,6 +968,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+	cfg.SanitizeOAuthAuthModelAlias()
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
@@ -1103,29 +1116,72 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			out[channel] = nil
 			continue
 		}
-		seenAlias := make(map[string]struct{}, len(aliases))
-		clean := make([]OAuthModelAlias, 0, len(aliases))
-		for _, entry := range aliases {
-			name := strings.TrimSpace(entry.Name)
-			alias := strings.TrimSpace(entry.Alias)
-			if name == "" || alias == "" {
-				continue
-			}
-			if strings.EqualFold(name, alias) {
-				continue
-			}
-			aliasKey := strings.ToLower(alias)
-			if _, ok := seenAlias[aliasKey]; ok {
-				continue
-			}
-			seenAlias[aliasKey] = struct{}{}
-			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
-		}
+		clean := sanitizeOAuthModelAliasList(aliases)
 		if len(clean) > 0 {
 			out[channel] = clean
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// SanitizeOAuthAuthModelAlias normalizes selected-auth-scoped OAuth model aliases.
+func (cfg *Config) SanitizeOAuthAuthModelAlias() {
+	if cfg == nil || len(cfg.OAuthAuthModelAlias) == 0 {
+		return
+	}
+	out := make(map[string][]OAuthAuthModelAlias, len(cfg.OAuthAuthModelAlias))
+	for rawChannel, rules := range cfg.OAuthAuthModelAlias {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" || len(rules) == 0 {
+			continue
+		}
+		cleanRules := make([]OAuthAuthModelAlias, 0, len(rules))
+		for _, rule := range rules {
+			cleanAliases := sanitizeOAuthModelAliasList(rule.Aliases)
+			if len(cleanAliases) == 0 {
+				continue
+			}
+			cleanRules = append(cleanRules, OAuthAuthModelAlias{
+				PlanType: strings.ToLower(strings.TrimSpace(rule.PlanType)),
+				Account:  strings.TrimSpace(rule.Account),
+				AuthID:   strings.TrimSpace(rule.AuthID),
+				Aliases:  cleanAliases,
+			})
+		}
+		if len(cleanRules) > 0 {
+			out[channel] = cleanRules
+		}
+	}
+	if len(out) == 0 {
+		cfg.OAuthAuthModelAlias = nil
+		return
+	}
+	cfg.OAuthAuthModelAlias = out
+}
+
+func sanitizeOAuthModelAliasList(aliases []OAuthModelAlias) []OAuthModelAlias {
+	if len(aliases) == 0 {
+		return nil
+	}
+	seenAlias := make(map[string]struct{}, len(aliases))
+	clean := make([]OAuthModelAlias, 0, len(aliases))
+	for _, entry := range aliases {
+		name := strings.TrimSpace(entry.Name)
+		alias := strings.TrimSpace(entry.Alias)
+		if name == "" || alias == "" {
+			continue
+		}
+		if strings.EqualFold(name, alias) {
+			continue
+		}
+		aliasKey := strings.ToLower(alias)
+		if _, ok := seenAlias[aliasKey]; ok {
+			continue
+		}
+		seenAlias[aliasKey] = struct{}{}
+		clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
+	}
+	return clean
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are

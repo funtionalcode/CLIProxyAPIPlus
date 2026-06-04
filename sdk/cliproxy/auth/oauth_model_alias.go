@@ -1,8 +1,10 @@
 package auth
 
 import (
+	"path/filepath"
 	"strings"
 
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
@@ -78,6 +80,162 @@ func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string
 		return requestedModel
 	}
 	return upstreamModel
+}
+
+func (m *Manager) resolveConfigAuthModelAlias(auth *Auth, requestedModel string) string {
+	if m == nil || auth == nil {
+		return ""
+	}
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
+	if len(candidates) == 0 {
+		return ""
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || len(cfg.OAuthAuthModelAlias) == 0 {
+		return ""
+	}
+	channel := modelAliasChannel(auth)
+	if channel == "" {
+		return ""
+	}
+	for _, rule := range cfg.OAuthAuthModelAlias[channel] {
+		if !oauthAuthModelAliasRuleMatches(auth, rule) {
+			continue
+		}
+		if resolved := resolveOAuthAuthModelAliasRule(rule, candidates); resolved != "" {
+			return preserveResolvedModelSuffix(resolved, requestResult)
+		}
+	}
+	return ""
+}
+
+func resolveOAuthAuthModelAliasRule(rule internalconfig.OAuthAuthModelAlias, candidates []string) string {
+	if len(rule.Aliases) == 0 || len(candidates) == 0 {
+		return ""
+	}
+	for _, candidate := range candidates {
+		for _, alias := range rule.Aliases {
+			if strings.EqualFold(strings.TrimSpace(alias.Alias), candidate) {
+				return strings.TrimSpace(alias.Name)
+			}
+		}
+	}
+	return ""
+}
+
+func oauthAuthModelAliasRuleMatches(auth *Auth, rule internalconfig.OAuthAuthModelAlias) bool {
+	if auth == nil {
+		return false
+	}
+	if planType := strings.TrimSpace(rule.PlanType); planType != "" && !strings.EqualFold(authPlanType(auth), planType) {
+		return false
+	}
+	if account := strings.TrimSpace(rule.Account); account != "" && !strings.EqualFold(authAccountIdentity(auth), account) {
+		return false
+	}
+	if authID := strings.TrimSpace(rule.AuthID); authID != "" && !authIDMatches(auth, authID) {
+		return false
+	}
+	return true
+}
+
+func authPlanType(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	for _, attrs := range []map[string]string{auth.Attributes, metadataStringMap(auth.Metadata)} {
+		for _, key := range []string{"plan_type", "plan", "account_type"} {
+			if attrs != nil {
+				if value := strings.TrimSpace(attrs[key]); value != "" {
+					return strings.ToLower(value)
+				}
+			}
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if idToken := strings.TrimSpace(metadataStringValue(auth.Metadata, "id_token")); idToken != "" {
+			if claims, errParse := codexauth.ParseJWTToken(idToken); errParse == nil && claims != nil {
+				if planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); planType != "" {
+					return strings.ToLower(planType)
+				}
+			}
+		}
+	}
+	return authPlanTypeFromName(auth)
+}
+
+func authPlanTypeFromName(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	names := []string{auth.ID, auth.FileName, auth.Label}
+	for _, name := range names {
+		normalized := strings.ToLower(filepath.Base(strings.TrimSpace(name)))
+		if normalized == "" {
+			continue
+		}
+		for _, plan := range []string{"prolite", "plus", "pro", "team", "free"} {
+			for _, marker := range []string{"-" + plan + ".", "-" + plan + "-", "_" + plan + ".", "_" + plan + "-", "." + plan + "."} {
+				if strings.Contains(normalized, marker) {
+					return plan
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func authAccountIdentity(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if _, account := auth.AccountInfo(); strings.TrimSpace(account) != "" {
+		return strings.TrimSpace(account)
+	}
+	for _, key := range []string{"email", "account_id", "username", "name"} {
+		if value := strings.TrimSpace(metadataStringValue(auth.Metadata, key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func authIDMatches(auth *Auth, expected string) bool {
+	if auth == nil {
+		return false
+	}
+	expected = strings.TrimSpace(expected)
+	for _, candidate := range []string{auth.ID, auth.FileName, filepath.Base(auth.ID), filepath.Base(auth.FileName)} {
+		if strings.EqualFold(strings.TrimSpace(candidate), expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func metadataStringMap(metadata map[string]any) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, key := range []string{"plan_type", "plan", "account_type"} {
+		if value := metadataStringValue(metadata, key); value != "" {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func metadataStringValue(metadata map[string]any, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	switch value := metadata[key].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
 }
 
 func modelAliasLookupCandidates(requestedModel string) (thinking.SuffixResult, []string) {

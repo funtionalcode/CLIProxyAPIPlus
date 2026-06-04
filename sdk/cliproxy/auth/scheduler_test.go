@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -408,6 +409,61 @@ func TestManager_PickNextMixed_UsesAuthScopedModelAlias(t *testing.T) {
 	models := manager.prepareExecutionModels(got, routeModel)
 	if len(models) != 1 || models[0] != upstreamModel {
 		t.Fatalf("prepareExecutionModels() = %#v, want [%q]", models, upstreamModel)
+	}
+}
+
+func TestManager_PickNextMixed_UsesConfigAuthScopedModelAliasForPlusPlan(t *testing.T) {
+	routeModel := "gpt-5.3-codex-spark"
+	upstreamModel := "gpt-5.4"
+	plusAuthID := "codex-user-plus.json"
+	proAuthID := "codex-user-pro.json"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(plusAuthID, "codex", []*registry.ModelInfo{{ID: upstreamModel}})
+	reg.RegisterClient(proAuthID, "codex", []*registry.ModelInfo{{ID: routeModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(plusAuthID)
+		reg.UnregisterClient(proAuthID)
+	})
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		OAuthAuthModelAlias: map[string][]internalconfig.OAuthAuthModelAlias{
+			"codex": {
+				{
+					PlanType: "plus",
+					Aliases: []internalconfig.OAuthModelAlias{
+						{Name: upstreamModel, Alias: routeModel},
+					},
+				},
+			},
+		},
+	})
+	manager.executors["codex"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: plusAuthID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", plusAuthID, errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: proAuthID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", proAuthID, errRegister)
+	}
+
+	plusAuth, ok := manager.GetByID(plusAuthID)
+	if !ok {
+		t.Fatalf("plus auth not registered")
+	}
+	proAuth, ok := manager.GetByID(proAuthID)
+	if !ok {
+		t.Fatalf("pro auth not registered")
+	}
+	if got := manager.selectionModelForAuth(plusAuth, routeModel); got != upstreamModel {
+		t.Fatalf("plus selectionModelForAuth() = %q, want %q", got, upstreamModel)
+	}
+	if got := manager.selectionModelForAuth(proAuth, routeModel); got != routeModel {
+		t.Fatalf("pro selectionModelForAuth() = %q, want %q", got, routeModel)
+	}
+	models := manager.prepareExecutionModels(plusAuth, routeModel)
+	if len(models) != 1 || models[0] != upstreamModel {
+		t.Fatalf("plus prepareExecutionModels() = %#v, want [%q]", models, upstreamModel)
 	}
 }
 
