@@ -1944,18 +1944,99 @@ func publishSelectedAuthMetadata(meta map[string]any, authID string) {
 }
 
 func rewriteModelForAuth(model string, auth *Auth) string {
-	if auth == nil || model == "" {
+	if auth == nil || strings.TrimSpace(model) == "" {
 		return model
 	}
+	rewritten := model
 	prefix := strings.TrimSpace(auth.Prefix)
-	if prefix == "" {
-		return model
+	if prefix != "" {
+		needle := prefix + "/"
+		if strings.HasPrefix(rewritten, needle) {
+			rewritten = strings.TrimPrefix(rewritten, needle)
+		}
 	}
-	needle := prefix + "/"
-	if !strings.HasPrefix(model, needle) {
-		return model
+	if alias := resolveAuthModelAlias(auth, rewritten); alias != "" {
+		return alias
 	}
-	return strings.TrimPrefix(model, needle)
+	return rewritten
+}
+
+func resolveAuthModelAlias(auth *Auth, requestedModel string) string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return ""
+	}
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
+	if len(candidates) == 0 {
+		return ""
+	}
+	for _, key := range []string{"model_aliases", "model_alias", "model_rewrites", "model_rewrite"} {
+		raw := strings.TrimSpace(auth.Attributes[key])
+		if raw == "" {
+			continue
+		}
+		if resolved := resolveAuthModelAliasSpec(raw, candidates); resolved != "" {
+			return preserveResolvedModelSuffix(resolved, requestResult)
+		}
+	}
+	return ""
+}
+
+func resolveAuthModelAliasSpec(raw string, candidates []string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(candidates) == 0 {
+		return ""
+	}
+	if strings.HasPrefix(raw, "{") {
+		var aliases map[string]string
+		if err := json.Unmarshal([]byte(raw), &aliases); err == nil {
+			if resolved := lookupAuthModelAliasMap(aliases, candidates); resolved != "" {
+				return resolved
+			}
+		}
+	}
+
+	aliases := make(map[string]string)
+	for _, entry := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n'
+	}) {
+		name, alias := splitAuthModelAliasEntry(entry)
+		if name == "" || alias == "" {
+			continue
+		}
+		aliases[name] = alias
+	}
+	return lookupAuthModelAliasMap(aliases, candidates)
+}
+
+func splitAuthModelAliasEntry(entry string) (string, string) {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return "", ""
+	}
+	for _, sep := range []string{"=>", "=", ":"} {
+		if before, after, ok := strings.Cut(entry, sep); ok {
+			name := strings.TrimSpace(before)
+			alias := strings.TrimSpace(after)
+			if name != "" && alias != "" {
+				return name, alias
+			}
+		}
+	}
+	return "", ""
+}
+
+func lookupAuthModelAliasMap(aliases map[string]string, candidates []string) string {
+	if len(aliases) == 0 || len(candidates) == 0 {
+		return ""
+	}
+	for _, candidate := range candidates {
+		for name, alias := range aliases {
+			if strings.EqualFold(strings.TrimSpace(name), candidate) {
+				return strings.TrimSpace(alias)
+			}
+		}
+	}
+	return ""
 }
 
 func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) string {

@@ -366,6 +366,49 @@ func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) 
 	}
 }
 
+func TestManager_PickNextMixed_UsesAuthScopedModelAlias(t *testing.T) {
+	routeModel := "gpt-5.3-codex-spark"
+	upstreamModel := "gpt-5.4"
+	authID := "codex-plus-auth-scoped-alias"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: upstreamModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       authID,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"plan_type":     "plus",
+			"model_aliases": routeModel + "=" + upstreamModel,
+		},
+	}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", authID, errRegister)
+	}
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"codex"}, routeModel, cliproxyexecutor.Options{}, map[string]struct{}{})
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickNextMixed() auth = nil")
+	}
+	if got.ID != authID {
+		t.Fatalf("pickNextMixed() auth.ID = %q, want %q", got.ID, authID)
+	}
+	if provider != "codex" {
+		t.Fatalf("pickNextMixed() provider = %q, want codex", provider)
+	}
+	models := manager.prepareExecutionModels(got, routeModel)
+	if len(models) != 1 || models[0] != upstreamModel {
+		t.Fatalf("prepareExecutionModels() = %#v, want [%q]", models, upstreamModel)
+	}
+}
+
 func TestSchedulerPick_SessionAffinitySticksWithinHighestPriority(t *testing.T) {
 	model := "claude-3"
 	registerSchedulerModels(t, "claude", model, "sticky-low", "sticky-high-a", "sticky-high-b")

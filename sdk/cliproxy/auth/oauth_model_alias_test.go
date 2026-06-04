@@ -237,3 +237,36 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestRewriteModelForAuth_UsesAuthScopedModelAlias(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"model_aliases": "gpt-5.3-codex-spark=gpt-5.4",
+		},
+	}
+
+	if got := rewriteModelForAuth("gpt-5.3-codex-spark", auth); got != "gpt-5.4" {
+		t.Fatalf("rewriteModelForAuth() = %q, want gpt-5.4", got)
+	}
+	if got := rewriteModelForAuth("gpt-5.3-codex-spark(high)", auth); got != "gpt-5.4(high)" {
+		t.Fatalf("rewriteModelForAuth() with suffix = %q, want gpt-5.4(high)", got)
+	}
+}
+
+func TestRewriteModelForAuth_UsesAuthScopedJSONModelAlias(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"model_rewrite": `{"gpt-5.3-codex-spark":"gpt-5.4"}`,
+		},
+	}
+
+	if got := rewriteModelForAuth("gpt-5.3-codex-spark", auth); got != "gpt-5.4" {
+		t.Fatalf("rewriteModelForAuth() = %q, want gpt-5.4", got)
+	}
+}
