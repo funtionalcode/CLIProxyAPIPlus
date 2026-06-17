@@ -89,6 +89,18 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 			},
 		},
 		{
+			name: "gemini key with weight",
+			geminiKeys: []config.GeminiKey{
+				{APIKey: "test-key-123", Weight: 3},
+			},
+			wantLen: 1,
+			validate: func(t *testing.T, auths []*coreauth.Auth) {
+				if got := auths[0].Attributes["weight"]; got != "3" {
+					t.Errorf("expected weight 3, got %q", got)
+				}
+			},
+		},
+		{
 			name: "gemini key with base url and proxy",
 			geminiKeys: []config.GeminiKey{
 				{

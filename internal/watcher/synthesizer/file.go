@@ -149,6 +149,20 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	// Read weight from auth file.
+	if rawWeight, ok := metadata["weight"]; ok {
+		switch v := rawWeight.(type) {
+		case float64:
+			if v > 0 {
+				a.Attributes["weight"] = strconv.Itoa(int(v))
+			}
+		case string:
+			weight := strings.TrimSpace(v)
+			if parsed, errAtoi := strconv.Atoi(weight); errAtoi == nil && parsed > 0 {
+				a.Attributes["weight"] = weight
+			}
+		}
+	}
 	// Read note from auth file.
 	if rawNote, ok := metadata["note"]; ok {
 		if note, isStr := rawNote.(string); isStr {
@@ -229,6 +243,10 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 		// Propagate priority from primary auth to virtual auths
 		if priorityVal, hasPriority := primary.Attributes["priority"]; hasPriority && priorityVal != "" {
 			attrs["priority"] = priorityVal
+		}
+		// Propagate weight from primary auth to virtual auths
+		if weightVal, hasWeight := primary.Attributes["weight"]; hasWeight && weightVal != "" {
+			attrs["weight"] = weightVal
 		}
 		// Propagate note from primary auth to virtual auths
 		if noteVal, hasNote := primary.Attributes["note"]; hasNote && noteVal != "" {

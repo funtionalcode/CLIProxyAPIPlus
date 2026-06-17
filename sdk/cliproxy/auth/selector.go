@@ -28,6 +28,8 @@ type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
 	maxKeys int
+	// Weighted enables weighted round-robin within the highest available priority bucket.
+	Weighted bool
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -126,6 +128,59 @@ func authPriority(auth *Auth) int {
 		return 0
 	}
 	return parsed
+}
+
+func authWeight(auth *Auth) int {
+	if auth == nil {
+		return 1
+	}
+	if auth.Attributes != nil {
+		if parsed, ok := parsePositiveInt(auth.Attributes["weight"]); ok {
+			return parsed
+		}
+	}
+	if auth.Metadata != nil {
+		if parsed, ok := metadataPositiveInt(auth.Metadata["weight"]); ok {
+			return parsed
+		}
+	}
+	return 1
+}
+
+func parsePositiveInt(raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func metadataPositiveInt(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		if typed > 0 {
+			return typed, true
+		}
+	case int64:
+		if typed > 0 {
+			return int(typed), true
+		}
+	case float64:
+		if typed > 0 {
+			return int(typed), true
+		}
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil && parsed > 0 {
+			return int(parsed), true
+		}
+	case string:
+		return parsePositiveInt(typed)
+	}
+	return 0, false
 }
 
 func canonicalModelKey(model string) string {
@@ -267,6 +322,9 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model) + priorityCursorSuffix(available)
+	if s.Weighted {
+		key += ":weighted"
+	}
 	s.mu.Lock()
 	if s.cursors == nil {
 		s.cursors = make(map[string]int)
@@ -291,9 +349,11 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		if groupIndex >= 2_147_483_640 {
 			groupIndex = 0
 		}
-		s.cursors[groupKey] = groupIndex + 1
-
 		selectedParent := parentOrder[groupIndex%len(parentOrder)]
+		if s.Weighted {
+			selectedParent, groupIndex = pickWeightedParent(parentOrder, groups, groupIndex)
+		}
+		s.cursors[groupKey] = groupIndex + 1
 		group := groups[selectedParent]
 
 		// Second level: round-robin within the selected credential group.
@@ -314,9 +374,70 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if index >= 2_147_483_640 {
 		index = 0
 	}
+	if s.Weighted {
+		var picked *Auth
+		picked, index = pickWeightedAuth(available, index)
+		s.cursors[key] = index + 1
+		s.mu.Unlock()
+		return picked, nil
+	}
 	s.cursors[key] = index + 1
 	s.mu.Unlock()
 	return available[index%len(available)], nil
+}
+
+func pickWeightedAuth(auths []*Auth, cursor int) (*Auth, int) {
+	total := 0
+	for _, auth := range auths {
+		total += authWeight(auth)
+	}
+	if total <= 0 {
+		if len(auths) == 0 {
+			return nil, cursor
+		}
+		return auths[0], cursor
+	}
+	slot := normalizeCursor(cursor, total)
+	running := 0
+	for _, auth := range auths {
+		running += authWeight(auth)
+		if slot < running {
+			return auth, slot
+		}
+	}
+	return auths[0], 0
+}
+
+func pickWeightedParent(parentOrder []string, groups map[string][]*Auth, cursor int) (string, int) {
+	total := 0
+	for _, parent := range parentOrder {
+		total += groupAuthWeight(groups[parent])
+	}
+	if total <= 0 {
+		if len(parentOrder) == 0 {
+			return "", cursor
+		}
+		return parentOrder[0], cursor
+	}
+	slot := normalizeCursor(cursor, total)
+	running := 0
+	for _, parent := range parentOrder {
+		running += groupAuthWeight(groups[parent])
+		if slot < running {
+			return parent, slot
+		}
+	}
+	return parentOrder[0], 0
+}
+
+func groupAuthWeight(auths []*Auth) int {
+	weight := 1
+	for _, auth := range auths {
+		if candidate := authWeight(auth); candidate > weight {
+			weight = candidate
+		}
+	}
+	return weight
 }
 
 func priorityCursorSuffix(auths []*Auth) string {

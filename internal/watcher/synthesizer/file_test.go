@@ -379,6 +379,83 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_WeightParsing(t *testing.T) {
+	tests := []struct {
+		name     string
+		weight   any
+		want     string
+		hasValue bool
+	}{
+		{
+			name:     "string with spaces",
+			weight:   " 3 ",
+			want:     "3",
+			hasValue: true,
+		},
+		{
+			name:     "number",
+			weight:   4,
+			want:     "4",
+			hasValue: true,
+		},
+		{
+			name:     "zero ignored",
+			weight:   0,
+			hasValue: false,
+		},
+		{
+			name:     "invalid string",
+			weight:   "x",
+			hasValue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			authData := map[string]any{
+				"type":   "claude",
+				"weight": tt.weight,
+			}
+			data, _ := json.Marshal(authData)
+			errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+			if errWriteFile != nil {
+				t.Fatalf("failed to write auth file: %v", errWriteFile)
+			}
+
+			synth := NewFileSynthesizer()
+			ctx := &SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}
+
+			auths, errSynthesize := synth.Synthesize(ctx)
+			if errSynthesize != nil {
+				t.Fatalf("unexpected error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+
+			value, ok := auths[0].Attributes["weight"]
+			if tt.hasValue {
+				if !ok {
+					t.Fatal("expected weight attribute to be set")
+				}
+				if value != tt.want {
+					t.Fatalf("expected weight %q, got %q", tt.want, value)
+				}
+				return
+			}
+			if ok {
+				t.Fatalf("expected weight attribute to be absent, got %q", value)
+			}
+		})
+	}
+}
+
 func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{

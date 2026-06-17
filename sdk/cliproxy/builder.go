@@ -209,10 +209,12 @@ func (b *Builder) Build() (*Service, error) {
 		}
 
 		strategy := ""
+		weighted := false
 		sessionAffinity := false
 		sessionAffinityTTL := time.Hour
 		if b.cfg != nil {
 			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
+			weighted = b.cfg.Routing.Weighted
 			// Support both legacy ClaudeCodeSessionAffinity and new universal SessionAffinity
 			sessionAffinity = b.cfg.Routing.SessionAffinity
 			if ttlStr := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttlStr != "" {
@@ -226,7 +228,7 @@ func (b *Builder) Build() (*Service, error) {
 		case "fill-first", "fillfirst", "ff":
 			selector = &coreauth.FillFirstSelector{}
 		default:
-			selector = &coreauth.RoundRobinSelector{}
+			selector = &coreauth.RoundRobinSelector{Weighted: weighted}
 		}
 
 		// Wrap with session affinity if enabled (failover is always on)

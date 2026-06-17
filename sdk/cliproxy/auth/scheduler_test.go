@@ -96,6 +96,30 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_RoundRobinWeightedByAuthWeight(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{Weighted: true},
+		&Auth{ID: "a", Provider: "gemini", Attributes: map[string]string{"weight": "2"}},
+		&Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{"weight": "1"}},
+	)
+
+	want := []string{"a", "a", "b", "a", "a", "b"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
 func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	t.Parallel()
 
@@ -506,6 +530,46 @@ func TestSchedulerPick_SessionAffinitySticksWithinHighestPriority(t *testing.T) 
 		}
 		if got.ID != first.ID {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, first.ID)
+		}
+	}
+}
+
+func TestSchedulerPick_SessionAffinityNewBindingsUseWeight(t *testing.T) {
+	model := "claude-3"
+	registerSchedulerModels(t, "claude", model, "weighted-a", "weighted-b")
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{Weighted: true},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	scheduler := newSchedulerForTest(
+		selector,
+		&Auth{ID: "weighted-a", Provider: "claude", Attributes: map[string]string{"weight": "2"}},
+		&Auth{ID: "weighted-b", Provider: "claude", Attributes: map[string]string{"weight": "1"}},
+	)
+
+	want := []string{"weighted-a", "weighted-a", "weighted-b"}
+	for index, wantID := range want {
+		headers := http.Header{}
+		headers.Set("X-Session-ID", "scheduler-weighted-session-"+string(rune('a'+index)))
+		opts := cliproxyexecutor.Options{Headers: headers}
+		got, errPick := scheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+
+		again, errAgain := scheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+		if errAgain != nil {
+			t.Fatalf("pickSingle() #%d repeat error = %v", index, errAgain)
+		}
+		if again == nil || again.ID != wantID {
+			t.Fatalf("pickSingle() #%d repeat auth = %v, want %q", index, again, wantID)
 		}
 	}
 }

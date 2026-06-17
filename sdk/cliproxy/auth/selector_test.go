@@ -61,6 +61,30 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_WeightedCyclesByAuthWeight(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{Weighted: true}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{"weight": "2"}},
+		{ID: "b", Attributes: map[string]string{"weight": "1"}},
+	}
+
+	want := []string{"a", "a", "b", "a", "a", "b"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+	}
+}
+
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	t.Parallel()
 
@@ -779,6 +803,45 @@ func TestSessionAffinitySelector_StickyWithinHighestPriorityBucket(t *testing.T)
 		}
 		if got.ID != first.ID {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q", index, got.ID, first.ID)
+		}
+	}
+}
+
+func TestSessionAffinitySelector_NewBindingsUseWeightedFallback(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{Weighted: true},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a", Attributes: map[string]string{"weight": "2"}},
+		{ID: "auth-b", Attributes: map[string]string{"weight": "1"}},
+	}
+
+	want := []string{"auth-a", "auth-a", "auth-b"}
+	for i, id := range want {
+		headers := http.Header{}
+		headers.Set("X-Session-ID", fmt.Sprintf("weighted-session-%d", i))
+		got, err := selector.Pick(context.Background(), "claude", "claude-3", cliproxyexecutor.Options{Headers: headers}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+
+		again, errAgain := selector.Pick(context.Background(), "claude", "claude-3", cliproxyexecutor.Options{Headers: headers}, auths)
+		if errAgain != nil {
+			t.Fatalf("Pick() #%d repeat error = %v", i, errAgain)
+		}
+		if again == nil || again.ID != id {
+			t.Fatalf("Pick() #%d repeat auth = %v, want %q", i, again, id)
 		}
 	}
 }

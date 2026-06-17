@@ -54,6 +54,7 @@ var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at
 
 var authFileLocalMetadataKeys = []string{
 	"priority",
+	"weight",
 	"note",
 	"prefix",
 	"proxy_url",
@@ -503,6 +504,16 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						}
 					}
 				}
+				if wv := gjson.GetBytes(data, "weight"); wv.Exists() {
+					switch wv.Type {
+					case gjson.Number:
+						fileData["weight"] = int(wv.Int())
+					case gjson.String:
+						if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(wv.String())); errAtoi == nil {
+							fileData["weight"] = parsed
+						}
+					}
+				}
 				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
 					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
 						fileData["note"] = trimmed
@@ -709,6 +720,24 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			case string:
 				if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 					entry["priority"] = parsed
+				}
+			}
+		}
+	}
+	if w := strings.TrimSpace(authAttribute(auth, "weight")); w != "" {
+		if parsed, err := strconv.Atoi(w); err == nil {
+			entry["weight"] = parsed
+		}
+	} else if auth.Metadata != nil {
+		if rawWeight, ok := auth.Metadata["weight"]; ok {
+			switch v := rawWeight.(type) {
+			case float64:
+				entry["weight"] = int(v)
+			case int:
+				entry["weight"] = v
+			case string:
+				if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+					entry["weight"] = parsed
 				}
 			}
 		}
@@ -2187,6 +2216,16 @@ func mergeAuthFileLocalFieldFromAttributes(metadata map[string]any, existing *co
 		}
 		metadata[key] = priority
 		return true
+	case "weight":
+		if existing.Attributes == nil {
+			return false
+		}
+		weight := strings.TrimSpace(existing.Attributes["weight"])
+		if weight == "" {
+			return false
+		}
+		metadata[key] = weight
+		return true
 	case "note":
 		if existing.Attributes == nil {
 			return false
@@ -2297,7 +2336,7 @@ func authFileMetadataTouchedRoots(metadata map[string]any) map[string]struct{} {
 		return nil
 	}
 	roots := make(map[string]struct{})
-	for _, key := range []string{"prefix", "proxy_url", "headers", "priority", "note", "websockets", "disabled"} {
+	for _, key := range []string{"prefix", "proxy_url", "headers", "priority", "weight", "note", "websockets", "disabled"} {
 		if _, ok := metadata[key]; ok {
 			roots[key] = struct{}{}
 		}
@@ -2667,6 +2706,9 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["priority"]; ok {
 		syncAuthFilePriorityAttribute(auth)
 	}
+	if _, ok := touchedRoots["weight"]; ok {
+		syncAuthFileWeightAttribute(auth)
+	}
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
 	}
@@ -2712,6 +2754,21 @@ func syncAuthFilePriorityAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes["priority"] = strconv.Itoa(priority)
+}
+
+func syncAuthFileWeightAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	weight, ok := authFileIntValue(auth.Metadata["weight"])
+	if !ok || weight <= 0 {
+		delete(auth.Attributes, "weight")
+		return
+	}
+	auth.Attributes["weight"] = strconv.Itoa(weight)
 }
 
 func authFileIntValue(value any) (int, bool) {
