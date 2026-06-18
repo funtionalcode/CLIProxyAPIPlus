@@ -382,6 +382,7 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		})
 		return
 	}
+	rawJSON = repairOpenAIResponsesHTTPRequestToolCalls(c.Request, rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")

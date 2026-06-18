@@ -22,6 +22,7 @@ type compactCaptureExecutor struct {
 	alt          string
 	sourceFormat string
 	calls        int
+	payload      []byte
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -30,6 +31,7 @@ func (e *compactCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Aut
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
+	e.payload = append(e.payload[:0], req.Payload...)
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 

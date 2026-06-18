@@ -233,7 +233,29 @@ func repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache *websock
 	if sessionKey == "" || outputCache == nil || len(payload) == 0 {
 		return payload
 	}
+	return repairOpenAIResponsesToolCallsWithCaches(outputCache, callCache, sessionKey, payload)
+}
 
+func repairOpenAIResponsesHTTPRequestToolCalls(req *http.Request, payload []byte) []byte {
+	return repairOpenAIResponsesToolCallsWithCaches(
+		defaultWebsocketToolOutputCache,
+		defaultWebsocketToolCallCache,
+		openAIResponsesHTTPRequestSessionKey(req, payload),
+		payload,
+	)
+}
+
+func openAIResponsesHTTPRequestSessionKey(req *http.Request, payload []byte) string {
+	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()); promptCacheKey != "" {
+		return promptCacheKey
+	}
+	return websocketDownstreamSessionKey(req)
+}
+
+func repairOpenAIResponsesToolCallsWithCaches(outputCache, callCache *websocketToolOutputCache, sessionKey string, payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
 	input := gjson.GetBytes(payload, "input")
 	if !input.Exists() || !input.IsArray() {
 		return payload
