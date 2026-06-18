@@ -342,8 +342,8 @@ type RoutingConfig struct {
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// Weighted enables weighted round-robin when Strategy is round-robin.
-	// Auths with a positive "weight" value are selected proportionally within
-	// the highest available priority bucket. Defaults to false.
+	// Auths with a positive "weight" value are selected proportionally across
+	// all available auths, and priority is ignored. Defaults to false.
 	Weighted bool `yaml:"weighted,omitempty" json:"weighted,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.

@@ -28,7 +28,7 @@ type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
 	maxKeys int
-	// Weighted enables weighted round-robin within the highest available priority bucket.
+	// Weighted enables weighted round-robin across all available auths, ignoring priority.
 	Weighted bool
 }
 
@@ -252,14 +252,25 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
-	available = make(map[int][]*Auth)
+func getAvailableAuths(auths []*Auth, provider, model string, now time.Time, ignorePriority bool) ([]*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+
+	availableByPriority := make(map[int][]*Auth)
+	available := make([]*Auth, 0, len(auths))
+	cooldownCount := 0
+	var earliest time.Time
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
-			available[priority] = append(available[priority], candidate)
+			if ignorePriority {
+				available = append(available, candidate)
+			} else {
+				priority := authPriority(candidate)
+				availableByPriority[priority] = append(availableByPriority[priority], candidate)
+			}
 			continue
 		}
 		if reason == blockReasonCooldown {
@@ -269,44 +280,58 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 			}
 		}
 	}
-	return available, cooldownCount, earliest
+
+	if ignorePriority && len(available) > 0 {
+		if len(available) > 1 {
+			sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+		}
+		return available, nil
+	}
+
+	if !ignorePriority && len(availableByPriority) > 0 {
+		bestPriority := 0
+		found := false
+		for priority := range availableByPriority {
+			if !found || priority > bestPriority {
+				bestPriority = priority
+				found = true
+			}
+		}
+
+		available = availableByPriority[bestPriority]
+		if len(available) > 1 {
+			sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+		}
+		return available, nil
+	}
+
+	if cooldownCount == len(auths) && !earliest.IsZero() {
+		providerForError := provider
+		if providerForError == "mixed" {
+			providerForError = ""
+		}
+		resetIn := earliest.Sub(now)
+		if resetIn < 0 {
+			resetIn = 0
+		}
+		return nil, newModelCooldownError(model, providerForError, resetIn)
+	}
+	return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	if len(auths) == 0 {
-		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
-	}
+func getPriorityAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	return getAvailableAuths(auths, provider, model, now, false)
+}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
-	if len(availableByPriority) == 0 {
-		if cooldownCount == len(auths) && !earliest.IsZero() {
-			providerForError := provider
-			if providerForError == "mixed" {
-				providerForError = ""
-			}
-			resetIn := earliest.Sub(now)
-			if resetIn < 0 {
-				resetIn = 0
-			}
-			return nil, newModelCooldownError(model, providerForError, resetIn)
-		}
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
-	}
+func getWeightedAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	return getAvailableAuths(auths, provider, model, now, true)
+}
 
-	bestPriority := 0
-	found := false
-	for priority := range availableByPriority {
-		if !found || priority > bestPriority {
-			bestPriority = priority
-			found = true
-		}
+func getAvailableAuthsForSelector(selector Selector, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	if selectorWeighted(selector) {
+		return getWeightedAvailableAuths(auths, provider, model, now)
 	}
-
-	available := availableByPriority[bestPriority]
-	if len(available) > 1 {
-		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
-	}
-	return available, nil
+	return getPriorityAvailableAuths(auths, provider, model, now)
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
@@ -316,12 +341,15 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuthsForSelector(s, auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	key := provider + ":" + canonicalModelKey(model) + priorityCursorSuffix(available)
+	key := provider + ":" + canonicalModelKey(model)
+	if !s.Weighted {
+		key += priorityCursorSuffix(available)
+	}
 	if s.Weighted {
 		key += ":weighted"
 	}
@@ -492,7 +520,7 @@ func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getPriorityAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
@@ -636,7 +664,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuthsForSelector(s.fallback, auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}

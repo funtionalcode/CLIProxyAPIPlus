@@ -120,6 +120,30 @@ func TestSchedulerPick_RoundRobinWeightedByAuthWeight(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_RoundRobinWeightedIgnoresPriority(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{Weighted: true},
+		&Auth{ID: "high", Provider: "gemini", Attributes: map[string]string{"priority": "10", "weight": "1"}},
+		&Auth{ID: "low", Provider: "gemini", Attributes: map[string]string{"priority": "0", "weight": "2"}},
+	)
+
+	want := []string{"high", "low", "low", "high", "low", "low"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
 func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	t.Parallel()
 
@@ -570,6 +594,38 @@ func TestSchedulerPick_SessionAffinityNewBindingsUseWeight(t *testing.T) {
 		}
 		if again == nil || again.ID != wantID {
 			t.Fatalf("pickSingle() #%d repeat auth = %v, want %q", index, again, wantID)
+		}
+	}
+}
+
+func TestSchedulerPick_SessionAffinityWeightedNewBindingsIgnorePriority(t *testing.T) {
+	model := "claude-3-priority-weight"
+	registerSchedulerModels(t, "claude", model, "high", "low")
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{Weighted: true},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	scheduler := newSchedulerForTest(
+		selector,
+		&Auth{ID: "high", Provider: "claude", Attributes: map[string]string{"priority": "10", "weight": "1"}},
+		&Auth{ID: "low", Provider: "claude", Attributes: map[string]string{"priority": "0", "weight": "2"}},
+	)
+
+	want := []string{"high", "low", "low"}
+	for index, wantID := range want {
+		headers := http.Header{}
+		headers.Set("X-Session-ID", "scheduler-weighted-priority-session-"+string(rune('a'+index)))
+		opts := cliproxyexecutor.Options{Headers: headers}
+		got, errPick := scheduler.pickSingle(context.Background(), "claude", model, opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
 		}
 	}
 }

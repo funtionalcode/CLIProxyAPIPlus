@@ -85,6 +85,30 @@ func TestRoundRobinSelectorPick_WeightedCyclesByAuthWeight(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_WeightedIgnoresPriorityBuckets(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{Weighted: true}
+	auths := []*Auth{
+		{ID: "high", Attributes: map[string]string{"priority": "10", "weight": "1"}},
+		{ID: "low", Attributes: map[string]string{"priority": "0", "weight": "2"}},
+	}
+
+	want := []string{"high", "low", "low", "high", "low", "low"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+	}
+}
+
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	t.Parallel()
 
@@ -842,6 +866,37 @@ func TestSessionAffinitySelector_NewBindingsUseWeightedFallback(t *testing.T) {
 		}
 		if again == nil || again.ID != id {
 			t.Fatalf("Pick() #%d repeat auth = %v, want %q", i, again, id)
+		}
+	}
+}
+
+func TestSessionAffinitySelector_WeightedNewBindingsIgnorePriority(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{Weighted: true},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "high", Attributes: map[string]string{"priority": "10", "weight": "1"}},
+		{ID: "low", Attributes: map[string]string{"priority": "0", "weight": "2"}},
+	}
+
+	want := []string{"high", "low", "low"}
+	for i, id := range want {
+		headers := http.Header{}
+		headers.Set("X-Session-ID", fmt.Sprintf("weighted-priority-session-%d", i))
+		got, err := selector.Pick(context.Background(), "claude", "claude-3", cliproxyexecutor.Options{Headers: headers}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
 		}
 	}
 }

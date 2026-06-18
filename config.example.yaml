@@ -197,7 +197,8 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: 'round-robin' # round-robin (default), fill-first
-  # Enable weighted round-robin inside the highest priority bucket.
+  # Enable weighted round-robin across all available auths. When enabled,
+  # priority is ignored.
   # Set per-account auth file root field `weight: 3` or API key config `weight: 3`.
   # Values <= 0 are treated as the default weight 1.
   weighted: false # default: false

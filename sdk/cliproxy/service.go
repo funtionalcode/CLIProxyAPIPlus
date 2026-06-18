@@ -510,11 +510,13 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	previousStrategy := ""
 	var previousSessionAffinity bool
 	var previousSessionAffinityTTL string
+	var previousWeighted bool
 	s.cfgMu.RLock()
 	if s.cfg != nil {
 		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 		previousSessionAffinity = s.cfg.Routing.SessionAffinity
 		previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+		previousWeighted = s.cfg.Routing.Weighted
 	}
 	s.cfgMu.RUnlock()
 
@@ -541,8 +543,10 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 
 	nextSessionAffinity := newCfg.Routing.SessionAffinity
 	nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+	nextWeighted := newCfg.Routing.Weighted
 
 	selectorChanged := previousStrategy != nextStrategy ||
+		previousWeighted != nextWeighted ||
 		previousSessionAffinity != nextSessionAffinity ||
 		previousSessionAffinityTTL != nextSessionAffinityTTL
 
@@ -552,7 +556,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		case "fill-first":
 			selector = &coreauth.FillFirstSelector{}
 		default:
-			selector = &coreauth.RoundRobinSelector{}
+			selector = &coreauth.RoundRobinSelector{Weighted: nextWeighted}
 		}
 
 		if nextSessionAffinity {

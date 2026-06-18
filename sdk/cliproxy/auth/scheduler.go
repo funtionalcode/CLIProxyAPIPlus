@@ -65,6 +65,7 @@ type modelScheduler struct {
 	entries         map[string]*scheduledAuth
 	priorityOrder   []int
 	readyByPriority map[int]*readyBucket
+	readyAll        readyBucket
 	blocked         cooldownQueue
 }
 
@@ -311,13 +312,23 @@ func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider,
 		return nil
 	}
 	shard.promoteExpiredLocked(time.Now())
-	priorityReady, okPriority := shard.highestReadyPriorityLocked(preferWebsocket, predicate)
-	if !okPriority {
-		return nil
+	priorityReady := 0
+	if !s.weighted {
+		var okPriority bool
+		priorityReady, okPriority = shard.highestReadyPriorityLocked(preferWebsocket, predicate)
+		if !okPriority {
+			return nil
+		}
 	}
 	cacheKey := provider + "::" + primaryID + "::" + model
 	if cachedAuthID, okCache := cache.GetAndRefresh(cacheKey); okCache {
-		if auth := shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate); auth != nil {
+		var auth *Auth
+		if s.weighted {
+			auth = shard.readyAuthLocked(preferWebsocket, cachedAuthID, predicate)
+		} else {
+			auth = shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate)
+		}
+		if auth != nil {
 			selectorLogEntry(ctx).Infof("session-affinity: scheduler cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 			return auth
 		}
@@ -326,7 +337,13 @@ func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider,
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey := provider + "::" + fallbackID + "::" + model
 		if cachedAuthID, okCache := cache.Get(fallbackKey); okCache {
-			if auth := shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate); auth != nil {
+			var auth *Auth
+			if s.weighted {
+				auth = shard.readyAuthLocked(preferWebsocket, cachedAuthID, predicate)
+			} else {
+				auth = shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate)
+			}
+			if auth != nil {
 				cache.Set(cacheKey, auth.ID)
 				selectorLogEntry(ctx).Infof("session-affinity: scheduler fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 				return auth
@@ -345,7 +362,12 @@ func (s *authScheduler) reselectSessionAffinityLocked(ctx context.Context, provi
 	if cache == nil {
 		return nil
 	}
-	auth := shard.pickReadyAtPriorityLocked(preferWebsocket, priority, s.strategy, s.weighted, predicate)
+	var auth *Auth
+	if s.weighted {
+		auth = shard.pickReadyLocked(preferWebsocket, s.strategy, s.weighted, predicate)
+	} else {
+		auth = shard.pickReadyAtPriorityLocked(preferWebsocket, priority, s.strategy, s.weighted, predicate)
+	}
 	if auth == nil {
 		return nil
 	}
@@ -422,13 +444,20 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
-		if !okPriority {
-			continue
-		}
-		if !hasCandidate || priorityReady > bestPriority {
-			bestPriority = priorityReady
+		if s.weighted {
+			if shard.readyWeightLocked(false, predicate) <= 0 {
+				continue
+			}
 			hasCandidate = true
+		} else {
+			priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+			if !okPriority {
+				continue
+			}
+			if !hasCandidate || priorityReady > bestPriority {
+				bestPriority = priorityReady
+				hasCandidate = true
+			}
 		}
 	}
 	if !hasCandidate {
@@ -458,7 +487,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		segmentStarts[providerIndex] = totalWeight
 		if shard != nil {
 			if s.weighted {
-				weights[providerIndex] = shard.readyWeightAtPriorityLocked(false, bestPriority, predicate)
+				weights[providerIndex] = shard.readyWeightLocked(false, predicate)
 			} else {
 				weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
 			}
@@ -499,7 +528,12 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, s.weighted, predicate)
+		var picked *Auth
+		if s.weighted {
+			picked = shard.pickReadyLocked(false, schedulerStrategyRoundRobin, s.weighted, predicate)
+		} else {
+			picked = shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, s.weighted, predicate)
+		}
 		if picked == nil {
 			continue
 		}
@@ -846,12 +880,17 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 	}
 }
 
-// pickReadyLocked selects the next ready auth from the highest available priority bucket.
+// pickReadyLocked selects the next ready auth for the shard.
+// Weighted round-robin spans all ready auths and ignores priority; unweighted
+// round-robin and fill-first keep the highest-priority bucket behavior.
 func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, weighted bool, predicate func(*scheduledAuth) bool) *Auth {
 	if m == nil {
 		return nil
 	}
 	m.promoteExpiredLocked(time.Now())
+	if weighted && strategy != schedulerStrategyFillFirst {
+		return m.pickReadyAnyPriorityLocked(preferWebsocket, strategy, weighted, predicate)
+	}
 	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
 	if !okPriority {
 		return nil
@@ -916,6 +955,26 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	return picked.auth
 }
 
+func (m *modelScheduler) pickReadyAnyPriorityLocked(preferWebsocket bool, strategy schedulerStrategy, weighted bool, predicate func(*scheduledAuth) bool) *Auth {
+	if m == nil {
+		return nil
+	}
+	view := &m.readyAll.all
+	if preferWebsocket && m.readyAll.ws.pickFirst(predicate) != nil {
+		view = &m.readyAll.ws
+	}
+	var picked *scheduledAuth
+	if strategy == schedulerStrategyFillFirst {
+		picked = view.pickFirst(predicate)
+	} else {
+		picked = view.pickRoundRobin(weighted, predicate)
+	}
+	if picked == nil || picked.auth == nil {
+		return nil
+	}
+	return picked.auth
+}
+
 func (m *modelScheduler) readyAuthAtPriorityLocked(preferWebsocket bool, priority int, authID string, predicate func(*scheduledAuth) bool) *Auth {
 	if m == nil || authID == "" {
 		return nil
@@ -927,6 +986,26 @@ func (m *modelScheduler) readyAuthAtPriorityLocked(preferWebsocket bool, priorit
 	view := &bucket.all
 	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
 		view = &bucket.ws
+	}
+	for _, entry := range view.flat {
+		if entry == nil || entry.auth == nil || entry.auth.ID != authID {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			return nil
+		}
+		return entry.auth
+	}
+	return nil
+}
+
+func (m *modelScheduler) readyAuthLocked(preferWebsocket bool, authID string, predicate func(*scheduledAuth) bool) *Auth {
+	if m == nil || authID == "" {
+		return nil
+	}
+	view := &m.readyAll.all
+	if preferWebsocket && m.readyAll.ws.pickFirst(predicate) != nil {
+		view = &m.readyAll.ws
 	}
 	for _, entry := range view.flat {
 		if entry == nil || entry.auth == nil || entry.auth.ID != authID {
@@ -954,17 +1033,13 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 	return len(bucket.all.flat)
 }
 
-func (m *modelScheduler) readyWeightAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) int {
+func (m *modelScheduler) readyWeightLocked(preferWebsocket bool, predicate func(*scheduledAuth) bool) int {
 	if m == nil {
 		return 0
 	}
-	bucket := m.readyByPriority[priority]
-	if bucket == nil {
-		return 0
-	}
-	view := &bucket.all
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
-		view = &bucket.ws
+	view := &m.readyAll.all
+	if preferWebsocket && len(m.readyAll.ws.flat) > 0 {
+		view = &m.readyAll.ws
 	}
 	total := 0
 	for _, entry := range view.flat {
@@ -1026,6 +1101,10 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
 func (m *modelScheduler) rebuildIndexesLocked() {
+	allCursorState := readyBucketCursorState{
+		all: snapshotReadyViewCursors(m.readyAll.all),
+		ws:  snapshotReadyViewCursors(m.readyAll.ws),
+	}
 	cursorStates := make(map[int]readyBucketCursorState, len(m.readyByPriority))
 	for priority, bucket := range m.readyByPriority {
 		if bucket == nil {
@@ -1038,21 +1117,30 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 	}
 
 	m.readyByPriority = make(map[int]*readyBucket)
+	m.readyAll = readyBucket{}
 	m.priorityOrder = m.priorityOrder[:0]
 	m.blocked = m.blocked[:0]
 	priorityBuckets := make(map[int][]*scheduledAuth)
+	readyEntries := make([]*scheduledAuth, 0, len(m.entries))
 	for _, entry := range m.entries {
 		if entry == nil || entry.auth == nil {
 			continue
 		}
 		switch entry.state {
 		case scheduledStateReady:
+			readyEntries = append(readyEntries, entry)
 			priority := entry.meta.priority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
 		case scheduledStateCooldown, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
 		}
 	}
+	sort.Slice(readyEntries, func(i, j int) bool {
+		return readyEntries[i].auth.ID < readyEntries[j].auth.ID
+	})
+	m.readyAll = *buildReadyBucket(readyEntries)
+	restoreReadyViewCursors(&m.readyAll.all, allCursorState.all)
+	restoreReadyViewCursors(&m.readyAll.ws, allCursorState.ws)
 	for priority, entries := range priorityBuckets {
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].auth.ID < entries[j].auth.ID

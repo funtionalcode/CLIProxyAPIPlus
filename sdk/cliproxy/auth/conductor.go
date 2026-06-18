@@ -644,20 +644,25 @@ func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string
 	return models
 }
 
-func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time) ([]*Auth, error) {
+func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeModel string, now time.Time, ignorePriority bool) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
 	availableByPriority := make(map[int][]*Auth)
+	available := make([]*Auth, 0, len(auths))
 	cooldownCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
-			priority := authPriority(candidate)
-			availableByPriority[priority] = append(availableByPriority[priority], candidate)
+			if ignorePriority {
+				available = append(available, candidate)
+			} else {
+				priority := authPriority(candidate)
+				availableByPriority[priority] = append(availableByPriority[priority], candidate)
+			}
 			continue
 		}
 		if reason == blockReasonCooldown {
@@ -668,35 +673,42 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		}
 	}
 
-	if len(availableByPriority) == 0 {
-		if cooldownCount == len(auths) && !earliest.IsZero() {
-			providerForError := provider
-			if providerForError == "mixed" {
-				providerForError = ""
-			}
-			resetIn := earliest.Sub(now)
-			if resetIn < 0 {
-				resetIn = 0
-			}
-			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
+	if ignorePriority && len(available) > 0 {
+		if len(available) > 1 {
+			sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 		}
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+		return available, nil
 	}
 
-	bestPriority := 0
-	found := false
-	for priority := range availableByPriority {
-		if !found || priority > bestPriority {
-			bestPriority = priority
-			found = true
+	if !ignorePriority && len(availableByPriority) > 0 {
+		bestPriority := 0
+		found := false
+		for priority := range availableByPriority {
+			if !found || priority > bestPriority {
+				bestPriority = priority
+				found = true
+			}
 		}
+
+		available = availableByPriority[bestPriority]
+		if len(available) > 1 {
+			sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+		}
+		return available, nil
 	}
 
-	available := availableByPriority[bestPriority]
-	if len(available) > 1 {
-		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+	if cooldownCount == len(auths) && !earliest.IsZero() {
+		providerForError := provider
+		if providerForError == "mixed" {
+			providerForError = ""
+		}
+		resetIn := earliest.Sub(now)
+		if resetIn < 0 {
+			resetIn = 0
+		}
+		return nil, newModelCooldownError(routeModel, providerForError, resetIn)
 	}
-	return available, nil
+	return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
@@ -3335,7 +3347,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
+	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now(), selectorWeighted(m.selector))
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
@@ -3487,7 +3499,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
+	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now(), selectorWeighted(m.selector))
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
