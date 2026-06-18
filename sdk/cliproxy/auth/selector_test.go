@@ -70,7 +70,7 @@ func TestRoundRobinSelectorPick_WeightedCyclesByAuthWeight(t *testing.T) {
 		{ID: "b", Attributes: map[string]string{"weight": "1"}},
 	}
 
-	want := []string{"a", "a", "b", "a", "a", "b"}
+	want := []string{"a", "b", "a", "a", "b", "a"}
 	for i, id := range want {
 		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
 		if err != nil {
@@ -85,6 +85,34 @@ func TestRoundRobinSelectorPick_WeightedCyclesByAuthWeight(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_WeightedSmoothlyInterleavesAuths(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{Weighted: true}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{"weight": "11"}},
+		{ID: "b", Attributes: map[string]string{"weight": "7"}},
+		{ID: "c", Attributes: map[string]string{"weight": "10"}},
+		{ID: "d", Attributes: map[string]string{"weight": "2"}},
+		{ID: "e", Attributes: map[string]string{"weight": "1"}},
+	}
+
+	seen := make(map[string]bool)
+	for i := 0; i < 5; i++ {
+		got, err := selector.Pick(context.Background(), "gemini", "smooth-model", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		seen[got.ID] = true
+	}
+	if len(seen) < 3 {
+		t.Fatalf("first 5 weighted picks touched %d auths, want at least 3; seen=%v", len(seen), seen)
+	}
+}
+
 func TestRoundRobinSelectorPick_WeightedIgnoresPriorityBuckets(t *testing.T) {
 	t.Parallel()
 
@@ -94,7 +122,7 @@ func TestRoundRobinSelectorPick_WeightedIgnoresPriorityBuckets(t *testing.T) {
 		{ID: "low", Attributes: map[string]string{"priority": "0", "weight": "2"}},
 	}
 
-	want := []string{"high", "low", "low", "high", "low", "low"}
+	want := []string{"low", "high", "low", "low", "high", "low"}
 	for i, id := range want {
 		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
 		if err != nil {
@@ -845,7 +873,7 @@ func TestSessionAffinitySelector_NewBindingsUseWeightedFallback(t *testing.T) {
 		{ID: "auth-b", Attributes: map[string]string{"weight": "1"}},
 	}
 
-	want := []string{"auth-a", "auth-a", "auth-b"}
+	want := []string{"auth-a", "auth-b", "auth-a"}
 	for i, id := range want {
 		headers := http.Header{}
 		headers.Set("X-Session-ID", fmt.Sprintf("weighted-session-%d", i))
@@ -884,7 +912,7 @@ func TestSessionAffinitySelector_WeightedNewBindingsIgnorePriority(t *testing.T)
 		{ID: "low", Attributes: map[string]string{"priority": "0", "weight": "2"}},
 	}
 
-	want := []string{"high", "low", "low"}
+	want := []string{"low", "high", "low"}
 	for i, id := range want {
 		headers := http.Header{}
 		headers.Set("X-Session-ID", fmt.Sprintf("weighted-priority-session-%d", i))

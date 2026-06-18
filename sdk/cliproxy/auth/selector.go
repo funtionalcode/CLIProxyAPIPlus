@@ -25,9 +25,10 @@ import (
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
-	maxKeys int
+	mu               sync.Mutex
+	cursors          map[string]int
+	weightedCurrents map[string]map[string]int
+	maxKeys          int
 	// Weighted enables weighted round-robin across all available auths, ignoring priority.
 	Weighted bool
 }
@@ -377,10 +378,20 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		if groupIndex >= 2_147_483_640 {
 			groupIndex = 0
 		}
-		selectedParent := parentOrder[groupIndex%len(parentOrder)]
 		if s.Weighted {
-			selectedParent, groupIndex = pickWeightedParent(parentOrder, groups, groupIndex)
+			selectedParent := pickSmoothWeightedParent(parentOrder, groups, s.weightedCurrentsForKey(groupKey, limit))
+			group := groups[selectedParent]
+			innerKey := key + "::cred:" + selectedParent
+			s.ensureCursorKey(innerKey, limit)
+			innerIndex := s.cursors[innerKey]
+			if innerIndex >= 2_147_483_640 {
+				innerIndex = 0
+			}
+			s.cursors[innerKey] = innerIndex + 1
+			s.mu.Unlock()
+			return group[innerIndex%len(group)], nil
 		}
+		selectedParent := parentOrder[groupIndex%len(parentOrder)]
 		s.cursors[groupKey] = groupIndex + 1
 		group := groups[selectedParent]
 
@@ -403,9 +414,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		index = 0
 	}
 	if s.Weighted {
-		var picked *Auth
-		picked, index = pickWeightedAuth(available, index)
-		s.cursors[key] = index + 1
+		picked := pickSmoothWeightedAuth(available, s.weightedCurrentsForKey(key, limit))
 		s.mu.Unlock()
 		return picked, nil
 	}
@@ -414,48 +423,70 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	return available[index%len(available)], nil
 }
 
-func pickWeightedAuth(auths []*Auth, cursor int) (*Auth, int) {
+func pickSmoothWeightedAuth(auths []*Auth, currents map[string]int) *Auth {
+	if len(auths) == 0 {
+		return nil
+	}
+	if currents == nil {
+		currents = make(map[string]int)
+	}
+	active := make(map[string]struct{}, len(auths))
 	total := 0
+	var picked *Auth
 	for _, auth := range auths {
-		total += authWeight(auth)
-	}
-	if total <= 0 {
-		if len(auths) == 0 {
-			return nil, cursor
+		if auth == nil {
+			continue
 		}
-		return auths[0], cursor
-	}
-	slot := normalizeCursor(cursor, total)
-	running := 0
-	for _, auth := range auths {
-		running += authWeight(auth)
-		if slot < running {
-			return auth, slot
+		id := auth.ID
+		active[id] = struct{}{}
+		weight := authWeight(auth)
+		total += weight
+		currents[id] += weight
+		if picked == nil || currents[id] > currents[picked.ID] {
+			picked = auth
 		}
 	}
-	return auths[0], 0
+	for id := range currents {
+		if _, ok := active[id]; !ok {
+			delete(currents, id)
+		}
+	}
+	if picked == nil {
+		return auths[0]
+	}
+	currents[picked.ID] -= total
+	return picked
 }
 
-func pickWeightedParent(parentOrder []string, groups map[string][]*Auth, cursor int) (string, int) {
+func pickSmoothWeightedParent(parentOrder []string, groups map[string][]*Auth, currents map[string]int) string {
+	if len(parentOrder) == 0 {
+		return ""
+	}
+	if currents == nil {
+		currents = make(map[string]int)
+	}
+	active := make(map[string]struct{}, len(parentOrder))
 	total := 0
+	picked := ""
 	for _, parent := range parentOrder {
-		total += groupAuthWeight(groups[parent])
-	}
-	if total <= 0 {
-		if len(parentOrder) == 0 {
-			return "", cursor
-		}
-		return parentOrder[0], cursor
-	}
-	slot := normalizeCursor(cursor, total)
-	running := 0
-	for _, parent := range parentOrder {
-		running += groupAuthWeight(groups[parent])
-		if slot < running {
-			return parent, slot
+		active[parent] = struct{}{}
+		weight := groupAuthWeight(groups[parent])
+		total += weight
+		currents[parent] += weight
+		if picked == "" || currents[parent] > currents[picked] {
+			picked = parent
 		}
 	}
-	return parentOrder[0], 0
+	for parent := range currents {
+		if _, ok := active[parent]; !ok {
+			delete(currents, parent)
+		}
+	}
+	if picked == "" {
+		return parentOrder[0]
+	}
+	currents[picked] -= total
+	return picked
 }
 
 func groupAuthWeight(auths []*Auth) int {
@@ -485,6 +516,23 @@ func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
 	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
 		s.cursors = make(map[string]int)
 	}
+}
+
+// weightedCurrentsForKey returns the smooth weighted round-robin state for key.
+// Must be called with s.mu held.
+func (s *RoundRobinSelector) weightedCurrentsForKey(key string, limit int) map[string]int {
+	if s.weightedCurrents == nil {
+		s.weightedCurrents = make(map[string]map[string]int)
+	}
+	if _, ok := s.weightedCurrents[key]; !ok && len(s.weightedCurrents) >= limit {
+		s.weightedCurrents = make(map[string]map[string]int)
+	}
+	state := s.weightedCurrents[key]
+	if state == nil {
+		state = make(map[string]int)
+		s.weightedCurrents[key] = state
+	}
+	return state
 }
 
 // groupByVirtualParent groups auths by their gemini_virtual_parent attribute.

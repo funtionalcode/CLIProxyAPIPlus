@@ -85,11 +85,12 @@ type readyBucket struct {
 
 // readyView holds the selection order for flat or grouped round-robin traversal.
 type readyView struct {
-	flat         []*scheduledAuth
-	cursor       int
-	parentOrder  []string
-	parentCursor int
-	children     map[string]*childBucket
+	flat             []*scheduledAuth
+	cursor           int
+	weightedCurrents map[string]int
+	parentOrder      []string
+	parentCursor     int
+	children         map[string]*childBucket
 }
 
 // childBucket keeps the per-parent rotation state for grouped Gemini virtual auths.
@@ -102,9 +103,10 @@ type childBucket struct {
 type cooldownQueue []*scheduledAuth
 
 type readyViewCursorState struct {
-	cursor       int
-	parentCursor int
-	childCursors map[string]int
+	cursor           int
+	weightedCurrents map[string]int
+	parentCursor     int
+	childCursors     map[string]int
 }
 
 type readyBucketCursorState struct {
@@ -114,8 +116,9 @@ type readyBucketCursorState struct {
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
 	state := readyViewCursorState{
-		cursor:       view.cursor,
-		parentCursor: view.parentCursor,
+		cursor:           view.cursor,
+		parentCursor:     view.parentCursor,
+		weightedCurrents: cloneStringIntMap(view.weightedCurrents),
 	}
 	if len(view.children) == 0 {
 		return state
@@ -137,6 +140,7 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 	if len(view.flat) > 0 {
 		view.cursor = normalizeCursor(state.cursor, len(view.flat))
 	}
+	view.weightedCurrents = cloneStringIntMap(state.weightedCurrents)
 	if len(view.parentOrder) == 0 || len(view.children) == 0 {
 		return
 	}
@@ -154,6 +158,17 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 		}
 		child.cursor = normalizeCursor(cursor, len(child.items))
 	}
+}
+
+func cloneStringIntMap(src map[string]int) map[string]int {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]int, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 func normalizeCursor(cursor, size int) int {
@@ -1255,29 +1270,38 @@ func (v *readyView) pickRoundRobin(weighted bool, predicate func(*scheduledAuth)
 }
 
 func (v *readyView) pickWeightedRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if v.weightedCurrents == nil {
+		v.weightedCurrents = make(map[string]int)
+	}
+	active := make(map[string]struct{}, len(v.flat))
 	total := 0
+	var picked *scheduledAuth
 	for _, entry := range v.flat {
 		if predicate != nil && !predicate(entry) {
 			continue
 		}
-		total += scheduledAuthWeight(entry)
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		id := entry.auth.ID
+		active[id] = struct{}{}
+		weight := scheduledAuthWeight(entry)
+		total += weight
+		v.weightedCurrents[id] += weight
+		if picked == nil || v.weightedCurrents[id] > v.weightedCurrents[picked.auth.ID] {
+			picked = entry
+		}
 	}
-	if total <= 0 {
+	for id := range v.weightedCurrents {
+		if _, ok := active[id]; !ok {
+			delete(v.weightedCurrents, id)
+		}
+	}
+	if picked == nil || total <= 0 {
 		return nil
 	}
-	slot := normalizeCursor(v.cursor, total)
-	running := 0
-	for _, entry := range v.flat {
-		if predicate != nil && !predicate(entry) {
-			continue
-		}
-		running += scheduledAuthWeight(entry)
-		if slot < running {
-			v.cursor = slot + 1
-			return entry
-		}
-	}
-	return nil
+	v.weightedCurrents[picked.auth.ID] -= total
+	return picked
 }
 
 // pickGroupedRoundRobin rotates across parents first and then within the selected parent.
@@ -1312,35 +1336,40 @@ func (v *readyView) pickGroupedRoundRobin(weighted bool, predicate func(*schedul
 }
 
 func (v *readyView) pickWeightedGroupedRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if v.weightedCurrents == nil {
+		v.weightedCurrents = make(map[string]int)
+	}
+	active := make(map[string]struct{}, len(v.parentOrder))
 	total := 0
-	for _, parent := range v.parentOrder {
-		child := v.children[parent]
-		weight := childReadyWeight(child, predicate)
-		total += weight
-	}
-	if total <= 0 {
-		return nil
-	}
-	slot := normalizeCursor(v.parentCursor, total)
-	running := 0
+	pickedParent := ""
 	for _, parent := range v.parentOrder {
 		child := v.children[parent]
 		weight := childReadyWeight(child, predicate)
 		if weight <= 0 {
 			continue
 		}
-		running += weight
-		if slot >= running {
-			continue
+		active[parent] = struct{}{}
+		total += weight
+		v.weightedCurrents[parent] += weight
+		if pickedParent == "" || v.weightedCurrents[parent] > v.weightedCurrents[pickedParent] {
+			pickedParent = parent
 		}
-		entry := child.pickRoundRobin(predicate)
-		if entry == nil {
-			return nil
-		}
-		v.parentCursor = slot + 1
-		return entry
 	}
-	return nil
+	for parent := range v.weightedCurrents {
+		if _, ok := active[parent]; !ok {
+			delete(v.weightedCurrents, parent)
+		}
+	}
+	if pickedParent == "" || total <= 0 {
+		return nil
+	}
+	child := v.children[pickedParent]
+	entry := child.pickRoundRobin(predicate)
+	if entry == nil {
+		return nil
+	}
+	v.weightedCurrents[pickedParent] -= total
+	return entry
 }
 
 func (c *childBucket) pickRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {

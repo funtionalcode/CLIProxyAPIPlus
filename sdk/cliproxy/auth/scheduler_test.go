@@ -105,7 +105,7 @@ func TestSchedulerPick_RoundRobinWeightedByAuthWeight(t *testing.T) {
 		&Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{"weight": "1"}},
 	)
 
-	want := []string{"a", "a", "b", "a", "a", "b"}
+	want := []string{"a", "b", "a", "a", "b", "a"}
 	for index, wantID := range want {
 		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -120,6 +120,34 @@ func TestSchedulerPick_RoundRobinWeightedByAuthWeight(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_RoundRobinWeightedSmoothlyInterleavesAuths(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{Weighted: true},
+		&Auth{ID: "a", Provider: "gemini", Attributes: map[string]string{"weight": "11"}},
+		&Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{"weight": "7"}},
+		&Auth{ID: "c", Provider: "gemini", Attributes: map[string]string{"weight": "10"}},
+		&Auth{ID: "d", Provider: "gemini", Attributes: map[string]string{"weight": "2"}},
+		&Auth{ID: "e", Provider: "gemini", Attributes: map[string]string{"weight": "1"}},
+	)
+
+	seen := make(map[string]bool)
+	for index := 0; index < 5; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		seen[got.ID] = true
+	}
+	if len(seen) < 3 {
+		t.Fatalf("first 5 weighted picks touched %d auths, want at least 3; seen=%v", len(seen), seen)
+	}
+}
+
 func TestSchedulerPick_RoundRobinWeightedIgnoresPriority(t *testing.T) {
 	t.Parallel()
 
@@ -129,7 +157,7 @@ func TestSchedulerPick_RoundRobinWeightedIgnoresPriority(t *testing.T) {
 		&Auth{ID: "low", Provider: "gemini", Attributes: map[string]string{"priority": "0", "weight": "2"}},
 	)
 
-	want := []string{"high", "low", "low", "high", "low", "low"}
+	want := []string{"low", "high", "low", "low", "high", "low"}
 	for index, wantID := range want {
 		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -572,7 +600,7 @@ func TestSchedulerPick_SessionAffinityNewBindingsUseWeight(t *testing.T) {
 		&Auth{ID: "weighted-b", Provider: "claude", Attributes: map[string]string{"weight": "1"}},
 	)
 
-	want := []string{"weighted-a", "weighted-a", "weighted-b"}
+	want := []string{"weighted-a", "weighted-b", "weighted-a"}
 	for index, wantID := range want {
 		headers := http.Header{}
 		headers.Set("X-Session-ID", "scheduler-weighted-session-"+string(rune('a'+index)))
@@ -612,7 +640,7 @@ func TestSchedulerPick_SessionAffinityWeightedNewBindingsIgnorePriority(t *testi
 		&Auth{ID: "low", Provider: "claude", Attributes: map[string]string{"priority": "0", "weight": "2"}},
 	)
 
-	want := []string{"high", "low", "low"}
+	want := []string{"low", "high", "low"}
 	for index, wantID := range want {
 		headers := http.Header{}
 		headers.Set("X-Session-ID", "scheduler-weighted-priority-session-"+string(rune('a'+index)))
