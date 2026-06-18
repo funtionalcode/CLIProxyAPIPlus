@@ -23,16 +23,11 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
-	cfg.UsagePersistence.Enabled = false
-	cfg.UsagePersistence.Backend = "json"
-	cfg.UsagePersistence.Path = "~/.cli-proxy-api/usage.json"
-	cfg.UsagePersistence.FlushIntervalSeconds = 300
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
-	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -76,6 +71,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+
+	cfg.NormalizePluginsConfig()
 
 	// Apply the same sanitization pipeline.
 	cfg.SanitizeGeminiKeys()

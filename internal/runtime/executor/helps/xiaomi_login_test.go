@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +15,32 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func xiaomiIntegrationCredentials(t *testing.T) (string, string) {
+	t.Helper()
+	if os.Getenv("CLIPROXY_RUN_XIAOMI_INTEGRATION") != "1" {
+		t.Skip("set CLIPROXY_RUN_XIAOMI_INTEGRATION=1 to run Xiaomi integration tests")
+	}
+	email := strings.TrimSpace(os.Getenv("CLIPROXY_XIAOMI_EMAIL"))
+	password := strings.TrimSpace(os.Getenv("CLIPROXY_XIAOMI_PASSWORD"))
+	if email == "" || password == "" {
+		t.Skip("set CLIPROXY_XIAOMI_EMAIL and CLIPROXY_XIAOMI_PASSWORD to run Xiaomi integration tests")
+	}
+	return email, password
+}
+
+func skipXiaomiNetworkTest(t *testing.T) {
+	t.Helper()
+	if os.Getenv("CLIPROXY_RUN_XIAOMI_INTEGRATION") != "1" {
+		t.Skip("set CLIPROXY_RUN_XIAOMI_INTEGRATION=1 to run Xiaomi network tests")
+	}
+}
+
 func TestXiaomiDiagnose(t *testing.T) {
+	email, password := xiaomiIntegrationCredentials(t)
 	cfg := &config.Config{
 		XiaomiPlatform: config.XiaomiPlatformConfig{
-			Email:    "xin11cc11@gmail.com",
-			Password: "Cn.xm183",
+			Email:    email,
+			Password: password,
 		},
 	}
 	auth := &cliproxyauth.Auth{}
@@ -119,7 +141,7 @@ func TestXiaomiDiagnose(t *testing.T) {
 }
 
 func TestPasswordHash(t *testing.T) {
-	hash := xiaomiPasswordHash("Cn.xm183")
+	hash := xiaomiPasswordHash("example-password")
 	t.Logf("密码哈希: %s", hash)
 	// 预期长度：32 个大写 hex 字符
 	if len(hash) != 32 {
@@ -139,12 +161,10 @@ func TestComputeSign(t *testing.T) {
 }
 
 func TestEncryptUser(t *testing.T) {
-	if testing.Short() {
-		t.Skip("跳过加密测试")
-	}
+	email, _ := xiaomiIntegrationCredentials(t)
 	client := &http.Client{Timeout: 15 * time.Second}
 	ctx := context.Background()
-	encrypted, err := xiaomiEncryptUser(ctx, client, "xin11cc11@gmail.com")
+	encrypted, err := xiaomiEncryptUser(ctx, client, email)
 	if err != nil {
 		t.Fatalf("加密邮箱失败: %v", err)
 	}
@@ -158,9 +178,7 @@ func TestEncryptUser(t *testing.T) {
 }
 
 func TestFetchPublicKey(t *testing.T) {
-	if testing.Short() {
-		t.Skip("跳过公钥获取测试")
-	}
+	skipXiaomiNetworkTest(t)
 	client := &http.Client{Timeout: 15 * time.Second}
 	ctx := context.Background()
 	key, err := fetchXiaomiPublicKey(ctx, client)
@@ -180,21 +198,21 @@ func min(a, b int) int {
 // 验证当前代码中已知道的值
 func TestKnownValues(t *testing.T) {
 	// 从 Burp 抓包验证
-	// password hash: MD5("Cn.xm183") → should produce correct hash
-	hash := xiaomiPasswordHash("Cn.xm183")
-	t.Logf("MD5(Cn.xm183).toUpperCase() = %s", hash)
+	// password hash should produce 32 uppercase hex characters.
+	hash := xiaomiPasswordHash("example-password")
+	if len(hash) != 32 {
+		t.Fatalf("hash length = %d, want 32", len(hash))
+	}
 }
 
 // 保留下面的集成测试
 func TestXiaomiLoginReal(t *testing.T) {
-	if testing.Short() {
-		t.Skip("跳过真实登录测试")
-	}
+	email, password := xiaomiIntegrationCredentials(t)
 
 	cfg := &config.Config{
 		XiaomiPlatform: config.XiaomiPlatformConfig{
-			Email:    "xin11cc11@gmail.com",
-			Password: "Cn.xm183",
+			Email:    email,
+			Password: password,
 		},
 	}
 	auth := &cliproxyauth.Auth{}

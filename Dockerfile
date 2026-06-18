@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 
-# ── Stage 1: Go build ──────────────────────────────────────────────
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26-bookworm AS builder
 
 WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential git && rm -rf /var/lib/apt/lists/*
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
@@ -38,14 +39,13 @@ ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
+RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
 
-# ── Stage 2: Runtime ───────────────────────────────────────────────
-FROM ubuntu:22.04
+FROM debian:bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 安装基础依赖
+# Install base runtime dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
@@ -74,7 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     telnet \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Playwright
+# Install Playwright.
 RUN python3 -m venv /opt/playwright-venv \
     && /opt/playwright-venv/bin/pip install --no-cache-dir playwright \
     && /opt/playwright-venv/bin/python -m playwright install chromium \
@@ -82,11 +82,11 @@ RUN python3 -m venv /opt/playwright-venv \
 
 ENV PATH="/opt/playwright-venv/bin:${PATH}"
 
-# 时区（很少变动）
+# Time zone rarely changes.
 ENV TZ=Asia/Shanghai
 RUN ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
-# ── 最后 COPY Go 二进制（变动最频繁，放在最后最大化缓存命中） ───────
+# Copy the Go binary last to maximize layer cache reuse.
 RUN mkdir /CLIProxyAPI
 COPY --from=builder /app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml

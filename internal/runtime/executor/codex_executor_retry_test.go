@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -75,16 +74,57 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	}
 }
 
-func TestNewCodexStatusErrTreatsChallengePageAsBadGateway(t *testing.T) {
-	body := []byte(`<html><body><noscript>Enable JavaScript and cookies to continue</noscript><script>window._cf_chl_opt={};</script></body></html>`)
+func TestNewCodexStatusErrTreatsUsageLimitAsRetryableRateLimit(t *testing.T) {
+	body := []byte(`{"error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":120}}`)
 
-	err := newCodexStatusErr(http.StatusForbidden, body)
+	err := newCodexStatusErr(http.StatusBadRequest, body)
 
-	if got := err.StatusCode(); got != http.StatusBadGateway {
-		t.Fatalf("status code = %d, want %d", got, http.StatusBadGateway)
+	if got := err.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
 	}
-	if !strings.Contains(err.Error(), "Cloudflare challenge page") {
-		t.Fatalf("message = %q, want Cloudflare challenge page hint", err.Error())
+	retryAfter := err.RetryAfter()
+	if retryAfter == nil {
+		t.Fatalf("expected retryAfter from usage_limit_reached, got nil")
+	}
+	if *retryAfter != 120*time.Second {
+		t.Fatalf("retryAfter = %v, want %v", *retryAfter, 120*time.Second)
+	}
+}
+
+func TestIsCodexUsageLimitError(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+		want bool
+	}{
+		{
+			name: "nested usage_limit_reached",
+			body: []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":30}}`),
+			want: true,
+		},
+		{
+			name: "top-level usage_limit_reached",
+			body: []byte(`{"type":"usage_limit_reached"}`),
+			want: true,
+		},
+		{
+			name: "transient rate limit is excluded",
+			body: []byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}`),
+			want: false,
+		},
+		{
+			name: "empty body",
+			body: nil,
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCodexUsageLimitError(tc.body); got != tc.want {
+				t.Fatalf("isCodexUsageLimitError = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -153,19 +193,6 @@ func TestNewCodexStatusErrPreservesUnclassifiedErrors(t *testing.T) {
 	}
 	if got := err.Error(); got != string(body) {
 		t.Fatalf("error body = %s, want original %s", got, string(body))
-	}
-}
-
-func TestNewCodexStatusErrSummarizesPlainHTML(t *testing.T) {
-	body := []byte(`<html><head><title>403 Forbidden</title></head><body>forbidden</body></html>`)
-
-	err := newCodexStatusErr(http.StatusForbidden, body)
-
-	if got := err.StatusCode(); got != http.StatusForbidden {
-		t.Fatalf("status code = %d, want %d", got, http.StatusForbidden)
-	}
-	if err.Error() != "403 Forbidden" {
-		t.Fatalf("message = %q, want %q", err.Error(), "403 Forbidden")
 	}
 }
 

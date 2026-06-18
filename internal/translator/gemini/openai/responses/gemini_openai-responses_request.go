@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -355,7 +356,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			case "reasoning":
 				thoughtContent := []byte(`{"role":"model","parts":[]}`)
 				thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
-				thought, _ = sjson.SetBytes(thought, "text", item.Get("summary.0.text").String())
+				thought, _ = sjson.SetBytes(thought, "text", responseReasoningSummaryText(item))
 				thought, _ = sjson.SetBytes(thought, "thoughtSignature", openAIResponsesGeminiThoughtSignature(item.Get("encrypted_content").String()))
 
 				thoughtContent, _ = sjson.SetRawBytes(thoughtContent, "parts.-1", thought)
@@ -367,6 +368,16 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		userContent := []byte(`{"role":"user","parts":[{"text":""}]}`)
 		userContent, _ = sjson.SetBytes(userContent, "parts.0.text", input.String())
 		out, _ = sjson.SetRawBytes(out, "contents.-1", userContent)
+	}
+
+	// Gemini/Vertex accepts assistant/model turns in history, but some model
+	// surfaces reject requests whose final turn is model-authored prefill.
+	contents := gjson.GetBytes(out, "contents")
+	if contents.Exists() && contents.IsArray() {
+		arr := contents.Array()
+		if len(arr) > 0 && shouldStripTrailingModelTurn(arr[len(arr)-1]) {
+			out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
+		}
 	}
 
 	// Convert tools to Gemini functionDeclarations format
@@ -458,4 +469,35 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 func openAIResponsesGeminiThoughtSignature(rawSignature string) string {
 	return sigcompat.GeminiReplaySignatureOrBypass(rawSignature, sigcompat.SignatureBlockKindGeminiModelPart)
+}
+
+func responseReasoningSummaryText(item gjson.Result) string {
+	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+		for _, part := range summary.Array() {
+			if text := part.Get("text").String(); text != "" {
+				return text
+			}
+		}
+	}
+	return item.Get("summary_text").String()
+}
+
+func shouldStripTrailingModelTurn(content gjson.Result) bool {
+	if content.Get("role").String() != "model" {
+		return false
+	}
+	parts := content.Get("parts")
+	if !parts.IsArray() {
+		return true
+	}
+	arr := parts.Array()
+	if len(arr) == 0 {
+		return true
+	}
+	for _, part := range arr {
+		if !part.Get("thought").Bool() {
+			return true
+		}
+	}
+	return false
 }

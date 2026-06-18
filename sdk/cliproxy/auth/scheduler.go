@@ -15,9 +15,10 @@ import (
 type schedulerStrategy int
 
 const (
-	schedulerStrategyCustom schedulerStrategy = iota
-	schedulerStrategyRoundRobin
-	schedulerStrategyFillFirst
+	schedulerStrategyCurrent    schedulerStrategy = -1
+	schedulerStrategyCustom     schedulerStrategy = 0
+	schedulerStrategyRoundRobin schedulerStrategy = 1
+	schedulerStrategyFillFirst  schedulerStrategy = 2
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -272,16 +273,24 @@ func (s *authScheduler) removeAuth(authID string) {
 
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
 func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
+	return s.pickSingleWithStrategy(ctx, provider, model, opts, tried, schedulerStrategyCurrent)
+}
+
+func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, error) {
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
+	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerPrefersWebsocketTransport(providerKey) && pinnedAuthID == ""
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strategy == schedulerStrategyCurrent {
+		strategy = s.strategy
+	}
+	effectiveWeighted := s.weighted && strategy != schedulerStrategyFillFirst
 	providerState := s.providers[providerKey]
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -304,16 +313,16 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := s.pickSessionAffinityLocked(ctx, provider, model, opts, shard, preferWebsocket, predicate); picked != nil {
+	if picked := s.pickSessionAffinityLocked(ctx, provider, model, opts, shard, preferWebsocket, strategy, effectiveWeighted, predicate); picked != nil {
 		return picked, nil
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, s.weighted, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, effectiveWeighted, predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
 }
 
-func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, shard *modelScheduler, preferWebsocket bool, predicate func(*scheduledAuth) bool) *Auth {
+func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, shard *modelScheduler, preferWebsocket bool, strategy schedulerStrategy, weighted bool, predicate func(*scheduledAuth) bool) *Auth {
 	affinity, ok := s.selector.(*SessionAffinitySelector)
 	if !ok {
 		return nil
@@ -328,7 +337,7 @@ func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider,
 	}
 	shard.promoteExpiredLocked(time.Now())
 	priorityReady := 0
-	if !s.weighted {
+	if !weighted {
 		var okPriority bool
 		priorityReady, okPriority = shard.highestReadyPriorityLocked(preferWebsocket, predicate)
 		if !okPriority {
@@ -338,7 +347,7 @@ func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider,
 	cacheKey := provider + "::" + primaryID + "::" + model
 	if cachedAuthID, okCache := cache.GetAndRefresh(cacheKey); okCache {
 		var auth *Auth
-		if s.weighted {
+		if weighted {
 			auth = shard.readyAuthLocked(preferWebsocket, cachedAuthID, predicate)
 		} else {
 			auth = shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate)
@@ -347,13 +356,13 @@ func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider,
 			selectorLogEntry(ctx).Infof("session-affinity: scheduler cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 			return auth
 		}
-		return s.reselectSessionAffinityLocked(ctx, provider, model, primaryID, cacheKey, shard, preferWebsocket, priorityReady, predicate)
+		return s.reselectSessionAffinityLocked(ctx, provider, model, primaryID, cacheKey, shard, preferWebsocket, priorityReady, strategy, weighted, predicate)
 	}
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey := provider + "::" + fallbackID + "::" + model
 		if cachedAuthID, okCache := cache.Get(fallbackKey); okCache {
 			var auth *Auth
-			if s.weighted {
+			if weighted {
 				auth = shard.readyAuthLocked(preferWebsocket, cachedAuthID, predicate)
 			} else {
 				auth = shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate)
@@ -365,10 +374,10 @@ func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider,
 			}
 		}
 	}
-	return s.reselectSessionAffinityLocked(ctx, provider, model, primaryID, cacheKey, shard, preferWebsocket, priorityReady, predicate)
+	return s.reselectSessionAffinityLocked(ctx, provider, model, primaryID, cacheKey, shard, preferWebsocket, priorityReady, strategy, weighted, predicate)
 }
 
-func (s *authScheduler) reselectSessionAffinityLocked(ctx context.Context, provider, model, primaryID, cacheKey string, shard *modelScheduler, preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) *Auth {
+func (s *authScheduler) reselectSessionAffinityLocked(ctx context.Context, provider, model, primaryID, cacheKey string, shard *modelScheduler, preferWebsocket bool, priority int, strategy schedulerStrategy, weighted bool, predicate func(*scheduledAuth) bool) *Auth {
 	affinity, ok := s.selector.(*SessionAffinitySelector)
 	if !ok {
 		return nil
@@ -378,10 +387,10 @@ func (s *authScheduler) reselectSessionAffinityLocked(ctx context.Context, provi
 		return nil
 	}
 	var auth *Auth
-	if s.weighted {
-		auth = shard.pickReadyLocked(preferWebsocket, s.strategy, s.weighted, predicate)
+	if weighted {
+		auth = shard.pickReadyLocked(preferWebsocket, strategy, weighted, predicate)
 	} else {
-		auth = shard.pickReadyAtPriorityLocked(preferWebsocket, priority, s.strategy, s.weighted, predicate)
+		auth = shard.pickReadyAtPriorityLocked(preferWebsocket, priority, strategy, weighted, predicate)
 	}
 	if auth == nil {
 		return nil
@@ -391,8 +400,21 @@ func (s *authScheduler) reselectSessionAffinityLocked(ctx context.Context, provi
 	return auth
 }
 
+func providerPrefersWebsocketTransport(providerKey string) bool {
+	switch strings.ToLower(strings.TrimSpace(providerKey)) {
+	case "codex", "xai":
+		return true
+	default:
+		return false
+	}
+}
+
 // pickMixed returns the next auth and provider for a mixed-provider request.
 func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, string, error) {
+	return s.pickMixedWithStrategy(ctx, providers, model, opts, tried, schedulerStrategyCurrent)
+}
+
+func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, string, error) {
 	if s == nil {
 		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -404,7 +426,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		// When a single provider is eligible, reuse pickSingle so provider-specific preferences
 		// (for example Codex websocket transport) are applied consistently.
 		providerKey := normalized[0]
-		picked, errPick := s.pickSingle(ctx, providerKey, model, opts, tried)
+		picked, errPick := s.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 		if errPick != nil {
 			return nil, "", errPick
 		}
@@ -418,6 +440,10 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strategy == schedulerStrategyCurrent {
+		strategy = s.strategy
+	}
+	effectiveWeighted := s.weighted && strategy != schedulerStrategyFillFirst
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
@@ -438,7 +464,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			_, ok := tried[pinnedAuthID]
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, s.weighted, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, effectiveWeighted, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -459,7 +485,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		if s.weighted {
+		if effectiveWeighted {
 			if shard.readyWeightLocked(false, predicate) <= 0 {
 				continue
 			}
@@ -479,13 +505,13 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	if s.strategy == schedulerStrategyFillFirst {
+	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, s.weighted, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, effectiveWeighted, predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -501,7 +527,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	for providerIndex, shard := range candidateShards {
 		segmentStarts[providerIndex] = totalWeight
 		if shard != nil {
-			if s.weighted {
+			if effectiveWeighted {
 				weights[providerIndex] = shard.readyWeightLocked(false, predicate)
 			} else {
 				weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
@@ -544,10 +570,10 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			continue
 		}
 		var picked *Auth
-		if s.weighted {
-			picked = shard.pickReadyLocked(false, schedulerStrategyRoundRobin, s.weighted, predicate)
+		if effectiveWeighted {
+			picked = shard.pickReadyLocked(false, schedulerStrategyRoundRobin, effectiveWeighted, predicate)
 		} else {
-			picked = shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, s.weighted, predicate)
+			picked = shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, effectiveWeighted, predicate)
 		}
 		if picked == nil {
 			continue

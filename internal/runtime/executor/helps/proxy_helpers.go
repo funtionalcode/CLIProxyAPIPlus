@@ -46,14 +46,22 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
+	var ctxRoundTripper http.RoundTripper
+	if ctx != nil {
+		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
+	}
+
 	// Build cache key from proxy URL (empty string for no proxy)
 	cacheKey := proxyURL
 
 	// Check cache first
+	cacheable := proxyURL != "" || ctxRoundTripper == nil
 	httpClientCacheMutex.RLock()
-	if cachedClient, ok := httpClientCache[cacheKey]; ok {
-		httpClientCacheMutex.RUnlock()
-		return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, cachedClient, timeout)
+	if cacheable {
+		if cachedClient, ok := httpClientCache[cacheKey]; ok {
+			httpClientCacheMutex.RUnlock()
+			return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, cachedClient, timeout)
+		}
 	}
 	httpClientCacheMutex.RUnlock()
 
@@ -79,12 +87,12 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
-	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
+	if ctxRoundTripper != nil {
+		httpClient.Transport = ctxRoundTripper
 	}
 
 	// Cache the client for no-proxy case
-	if proxyURL == "" {
+	if cacheable && proxyURL == "" {
 		httpClientCacheMutex.Lock()
 		httpClientCache[cacheKey] = httpClient
 		httpClientCacheMutex.Unlock()

@@ -101,9 +101,9 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	req := newClaudeHeaderTestRequest(t, incoming)
 	applyClaudeHeaders(req, auth, "key-baseline", false, nil, cfg)
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
-	if got := req.Header.Get("X-Stainless-Timeout"); got != "" {
-		t.Fatalf("X-Stainless-Timeout = %q, want empty", got)
+	assertClaudeFingerprint(t, req.Header, "evil-client/9.9", "9.9.9", "v24.5.0", "Linux", "x64")
+	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
+		t.Fatalf("X-Stainless-Timeout = %q, want %q", got, "900")
 	}
 }
 
@@ -496,7 +496,7 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, cfg)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "lobe-chat/1.0", "0.10.0", "v18.0.0", "Windows", "x64")
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.10.0", "v18.0.0", "Windows", "x64")
 
 	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
@@ -567,10 +567,10 @@ func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *tes
 	})
 	applyClaudeHeaders(req, auth, "key-legacy-runtime-os-arch", false, nil, cfg)
 
-	assertClaudeFingerprint(t, req.Header, "curl/8.7.1", "", "", "", "")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
 }
 
-func TestApplyClaudeHeaders_UnsetStabilizationUsesStableMacFingerprint(t *testing.T) {
+func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallback(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 
 	cfg := &config.Config{
@@ -594,66 +594,15 @@ func TestApplyClaudeHeaders_UnsetStabilizationUsesStableMacFingerprint(t *testin
 	})
 	applyClaudeHeaders(req, auth, "key-unset-runtime-os-arch", false, nil, cfg)
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", "MacOS", "arm64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
 }
 
-func TestClaudeDeviceProfileStabilizationEnabled_DefaultTrue(t *testing.T) {
-	if !helps.ClaudeDeviceProfileStabilizationEnabled(nil) {
-		t.Fatal("expected nil config to default to enabled stabilization")
+func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {
+	if helps.ClaudeDeviceProfileStabilizationEnabled(nil) {
+		t.Fatal("expected nil config to default to disabled stabilization")
 	}
-	if !helps.ClaudeDeviceProfileStabilizationEnabled(&config.Config{}) {
-		t.Fatal("expected unset stabilize-device-profile to default to enabled stabilization")
-	}
-}
-
-func TestNormalizeClaudeMetadataDeviceIDRewritesOnlyDeviceID(t *testing.T) {
-	userIDJSON := `{"session_id":"sess-client","device_id":"device-client","account_id":"acct-client"}`
-	payload, _ := sjson.SetBytes([]byte(`{"metadata":{}}`), "metadata.user_id", userIDJSON)
-	auth := &cliproxyauth.Auth{ID: "auth-device-1"}
-
-	first := normalizeClaudeMetadataDeviceID(payload, auth, "token-1")
-	second := normalizeClaudeMetadataDeviceID(payload, auth, "token-1")
-	other := normalizeClaudeMetadataDeviceID(payload, &cliproxyauth.Auth{ID: "auth-device-2"}, "token-2")
-
-	firstUserID := gjson.GetBytes(first, "metadata.user_id").String()
-	secondUserID := gjson.GetBytes(second, "metadata.user_id").String()
-	otherUserID := gjson.GetBytes(other, "metadata.user_id").String()
-
-	firstMeta := gjson.Parse(firstUserID)
-	secondMeta := gjson.Parse(secondUserID)
-	otherMeta := gjson.Parse(otherUserID)
-
-	if got := firstMeta.Get("session_id").String(); got != "sess-client" {
-		t.Fatalf("session_id = %q, want sess-client", got)
-	}
-	if got := firstMeta.Get("account_id").String(); got != "acct-client" {
-		t.Fatalf("account_id = %q, want acct-client", got)
-	}
-	if got := firstMeta.Get("device_id").String(); got == "" || got == "device-client" {
-		t.Fatalf("device_id = %q, want rewritten non-empty value", got)
-	}
-	if firstMeta.Get("device_id").String() != secondMeta.Get("device_id").String() {
-		t.Fatalf("expected stable device_id for same auth, got %q and %q", firstMeta.Get("device_id").String(), secondMeta.Get("device_id").String())
-	}
-	if firstMeta.Get("device_id").String() == otherMeta.Get("device_id").String() {
-		t.Fatalf("expected different device_id for different auth, got %q", firstMeta.Get("device_id").String())
-	}
-}
-
-func TestApplyCloakingRewritesClaudeCodeDeviceIDWhenCloakSkipped(t *testing.T) {
-	userIDJSON := `{"session_id":"sess-client","device_id":"device-client"}`
-	payload, _ := sjson.SetBytes([]byte(`{"messages":[{"role":"user","content":"hi"}],"metadata":{}}`), "metadata.user_id", userIDJSON)
-	ctx := contextWithGinHeaders(map[string]string{"User-Agent": "claude-cli/2.1.80 (external, cli)"})
-
-	out := applyCloaking(ctx, &config.Config{}, &cliproxyauth.Auth{ID: "auth-claude-code-device"}, payload, "claude-3-5-sonnet", "token-claude-code")
-	userID := gjson.GetBytes(out, "metadata.user_id").String()
-	meta := gjson.Parse(userID)
-
-	if got := meta.Get("device_id").String(); got == "" || got == "device-client" {
-		t.Fatalf("device_id = %q, want rewritten non-empty value", got)
-	}
-	if !gjson.GetBytes(out, "messages.0.content").Exists() {
-		t.Fatal("expected original message content to remain present")
+	if helps.ClaudeDeviceProfileStabilizationEnabled(&config.Config{}) {
+		t.Fatal("expected unset stabilize-device-profile to default to disabled stabilization")
 	}
 }
 
@@ -684,6 +633,36 @@ func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "proxy_gamma" {
 		t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, "proxy_gamma")
+	}
+}
+
+func TestSanitizeClaudeWebSearchDomains(t *testing.T) {
+	// Mirrors the litellm payload from issue #2681: a non-empty allowed_domains
+	// alongside an empty blocked_domains, which Anthropic rejects as ambiguous.
+	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search","allowed_domains":["anthropic.com"],"blocked_domains":[],"max_uses":8}]}`)
+	out := sanitizeClaudeWebSearchDomains(input)
+
+	if gjson.GetBytes(out, "tools.0.blocked_domains").Exists() {
+		t.Fatalf("empty blocked_domains should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.allowed_domains").Array(); len(got) != 1 || got[0].String() != "anthropic.com" {
+		t.Fatalf("non-empty allowed_domains should be preserved: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.max_uses").Int(); got != 8 {
+		t.Fatalf("max_uses should be preserved: got %d", got)
+	}
+}
+
+func TestSanitizeClaudeWebSearchDomains_LeavesNonBuiltinAndNonEmpty(t *testing.T) {
+	// Empty arrays on non-web_search tools must be left untouched.
+	input := []byte(`{"tools":[{"type":"custom","name":"x","blocked_domains":[]},{"type":"web_search_20250305","name":"web_search","blocked_domains":["evil.com"]}]}`)
+	out := sanitizeClaudeWebSearchDomains(input)
+
+	if !gjson.GetBytes(out, "tools.0.blocked_domains").Exists() {
+		t.Fatalf("non-web_search tool fields should be untouched: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.1.blocked_domains").Array(); len(got) != 1 || got[0].String() != "evil.com" {
+		t.Fatalf("non-empty blocked_domains should be preserved: %s", string(out))
 	}
 }
 
@@ -2147,7 +2126,10 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
 	payload := []byte(`{"system":"proxy rules","messages":[{"role":"user","content":[{"type":"text","text":"proxy access"}]}]}`)
 
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	out, errCloaking := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloaking)
+	}
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
@@ -2242,8 +2224,7 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 // must pass through unchanged) and a lowercase tool that we forward-rename.
 // Before the fix, triggering ANY forward rename caused the reverse pass to
 // lowercase every TitleCase tool in the response using a global reverse map,
-// corrupting tool names the client originally sent in TitleCase (notably Amp
-// CLI's `Bash`, which its registry lookup cannot find as `bash`).
+// corrupting tool names the client originally sent in TitleCase.
 func TestRemapOAuthToolNames_MixedCase_OnlyRenamedToolsReversed(t *testing.T) {
 	body := []byte(`{"tools":[` +
 		`{"name":"Bash","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},` +

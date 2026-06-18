@@ -93,6 +93,128 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 	}
 }
 
+func TestCodexWebsocketsExecuteStreamPassesThroughUpstreamWebsocketPayloadForDownstreamWebsocket(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	delta := []byte(`{"type":"response.output_text.delta","delta":"hello"}`)
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		if errWrite := conn.WriteMessage(websocket.TextMessage, delta); errWrite != nil {
+			t.Errorf("write delta websocket message: %v", errWrite)
+			return
+		}
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+			return
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("stream closed before first chunk")
+		}
+		if chunk.Err != nil {
+			t.Fatalf("first chunk error = %v", chunk.Err)
+		}
+		if !bytes.Equal(bytes.TrimSpace(chunk.Payload), delta) {
+			t.Fatalf("first chunk = %q, want raw upstream websocket payload %q", chunk.Payload, delta)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first stream chunk")
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamPropagatesUpstreamErrorForDownstreamWebsocket(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	errorPayload := []byte(`{"type":"error","status":429,"error":{"code":"websocket_connection_limit_reached","message":"too many websockets"}}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		if errWrite := conn.WriteMessage(websocket.TextMessage, errorPayload); errWrite != nil {
+			t.Errorf("write error websocket message: %v", errWrite)
+			return
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case chunk, ok := <-result.Chunks:
+		if !ok {
+			t.Fatal("stream closed before error chunk")
+		}
+		if len(bytes.TrimSpace(chunk.Payload)) != 0 {
+			t.Fatalf("error chunk payload = %q, want empty", chunk.Payload)
+		}
+		if chunk.Err == nil {
+			t.Fatal("error chunk Err = nil, want upstream error")
+		}
+		statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("error type %T does not expose StatusCode", chunk.Err)
+		}
+		if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for error stream chunk")
+	}
+}
+
 func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,21 +274,22 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsOnInvalidate(t *testing.T) 
 }
 
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
 	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
 		t.Fatalf("OpenAI-Beta = %s, want %s", got, codexResponsesWebsocketBetaHeaderValue)
 	}
-	wantUA := codexFixedMacUserAgent(nil, "")
-	if got := headers.Get("User-Agent"); got != wantUA {
-		t.Fatalf("User-Agent = %s, want %s", got, wantUA)
+	if got := headers.Get("User-Agent"); got != codexUserAgent {
+		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
 	}
-	if !strings.HasPrefix(wantUA, "codex_cli_rs/") {
-		t.Fatalf("default Codex User-Agent = %s, want codex_cli_rs prefix", wantUA)
+	if !strings.HasPrefix(codexUserAgent, codexOriginator+"/") {
+		t.Fatalf("default Codex User-Agent = %s, want prefix %s/", codexUserAgent, codexOriginator)
 	}
-	if !strings.Contains(wantUA, "(Mac OS 26.3.1; arm64) iTerm.app/3.6.9") {
-		t.Fatalf("default Codex User-Agent = %s, want fixed macOS device profile", wantUA)
+	if !strings.HasPrefix(codexUserAgent, "codex-tui/") {
+		t.Fatalf("default Codex User-Agent = %s, want codex-tui prefix", codexUserAgent)
+	}
+	if !strings.Contains(codexUserAgent, "(codex-tui;") {
+		t.Fatalf("default Codex User-Agent = %s, want codex-tui suffix", codexUserAgent)
 	}
 	if got := headers.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
@@ -174,8 +297,8 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("Version"); got != "" {
 		t.Fatalf("Version = %q, want empty", got)
 	}
-	if got := headers.Get("x-codex-beta-features"); got != "multi_agent" {
-		t.Fatalf("x-codex-beta-features = %q, want multi_agent", got)
+	if got := headers.Get("x-codex-beta-features"); got != "" {
+		t.Fatalf("x-codex-beta-features = %q, want empty", got)
 	}
 	if got := headers.Get("X-Codex-Turn-Metadata"); got != "" {
 		t.Fatalf("X-Codex-Turn-Metadata = %q, want empty", got)
@@ -186,7 +309,6 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 }
 
 func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
 		Metadata: map[string]any{"email": "user@example.com"},
@@ -202,12 +324,11 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", nil)
 
-	if got := headers.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
+	if got := headers.Get("Originator"); got != "Codex Desktop" {
+		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
 	}
-	wantUA := codexFixedMacUserAgent(nil, "")
-	if got := headers.Get("User-Agent"); got != wantUA {
-		t.Fatalf("User-Agent = %s, want %s", got, wantUA)
+	if got := headers.Get("User-Agent"); got != "codex_cli_rs/0.1.0" {
+		t.Fatalf("User-Agent = %s, want %s", got, "codex_cli_rs/0.1.0")
 	}
 	if got := headers.Get("Version"); got != "0.115.0-alpha.27" {
 		t.Fatalf("Version = %s, want %s", got, "0.115.0-alpha.27")
@@ -247,8 +368,7 @@ func TestApplyCodexWebsocketHeadersCanonicalizesLegacyUnderscoreSessionHeader(t 
 	}
 }
 
-func TestApplyCodexWebsocketHeadersUsesDesktopFallbacksForOAuth(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
+func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "my-codex-client/1.0",
@@ -262,12 +382,11 @@ func TestApplyCodexWebsocketHeadersUsesDesktopFallbacksForOAuth(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg)
 
-	wantUA := codexFixedMacUserAgent(nil, "")
-	if got := headers.Get("User-Agent"); got != wantUA {
-		t.Fatalf("User-Agent = %s, want %s", got, wantUA)
+	if got := headers.Get("User-Agent"); got != "my-codex-client/1.0" {
+		t.Fatalf("User-Agent = %s, want %s", got, "my-codex-client/1.0")
 	}
-	if got := headers.Get("x-codex-beta-features"); got != "multi_agent" {
-		t.Fatalf("x-codex-beta-features = %s, want %s", got, "multi_agent")
+	if got := headers.Get("x-codex-beta-features"); got != "feature-a,feature-b" {
+		t.Fatalf("x-codex-beta-features = %s, want %s", got, "feature-a,feature-b")
 	}
 	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
 		t.Fatalf("OpenAI-Beta = %s, want %s", got, codexResponsesWebsocketBetaHeaderValue)
@@ -275,7 +394,6 @@ func TestApplyCodexWebsocketHeadersUsesDesktopFallbacksForOAuth(t *testing.T) {
 }
 
 func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "config-ua",
@@ -296,20 +414,18 @@ func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *
 
 	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
 
-	wantUA := codexFixedMacUserAgent(nil, "")
-	if gotVal := got.Get("User-Agent"); gotVal != wantUA {
-		t.Fatalf("User-Agent = %s, want %s", gotVal, wantUA)
+	if gotVal := got.Get("User-Agent"); gotVal != "existing-ua" {
+		t.Fatalf("User-Agent = %s, want %s", gotVal, "existing-ua")
 	}
 	if gotVal := got.Get("x-codex-beta-features"); gotVal != "existing-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", gotVal, "existing-beta")
 	}
 }
 
-func TestApplyCodexWebsocketHeadersLearnsLatestClientUserAgentVersion(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
+func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesClientHeader(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
-			UserAgent:    "codex_cli_rs/0.117.0 (Mac OS 14.2.0; x86_64) vscode",
+			UserAgent:    "config-ua",
 			BetaFeatures: "config-beta",
 		},
 	}
@@ -318,51 +434,21 @@ func TestApplyCodexWebsocketHeadersLearnsLatestClientUserAgentVersion(t *testing
 		Metadata: map[string]any{"email": "user@example.com"},
 	}
 	ctx := contextWithGinHeaders(map[string]string{
-		"User-Agent":            "codex_cli_rs/0.119.0 (Windows NT 10.0; x64) vscode",
+		"User-Agent":            "client-ua",
 		"X-Codex-Beta-Features": "client-beta",
 	})
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
 
-	wantUA := "codex_cli_rs/0.119.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
-	if got := headers.Get("User-Agent"); got != wantUA {
-		t.Fatalf("User-Agent = %s, want %s", got, wantUA)
+	if got := headers.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "client-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", got, "client-beta")
 	}
 }
 
-func TestApplyCodexWebsocketHeadersLearnsDesktopAndTUIUserAgentVersions(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
-	auth := &cliproxyauth.Auth{
-		Provider: "codex",
-		Metadata: map[string]any{"email": "user@example.com"},
-	}
-
-	desktopCtx := contextWithGinHeaders(map[string]string{
-		"User-Agent": "Codex Desktop/0.136.0-alpha.2 (Mac OS 26.3.1; arm64) unknown (Codex Desktop; 26.601.21317)",
-	})
-	desktopHeaders := applyCodexWebsocketHeaders(desktopCtx, http.Header{}, auth, "", nil)
-	if got := desktopHeaders.Get("User-Agent"); got != "codex_cli_rs/0.136.0-alpha.2 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
-		t.Fatalf("desktop User-Agent = %s", got)
-	}
-
-	tuiCtx := contextWithGinHeaders(map[string]string{
-		"Originator": "codex-tui",
-		"User-Agent": "codex-tui/0.136.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.9 (codex-tui; 0.136.0)",
-	})
-	tuiHeaders := applyCodexWebsocketHeaders(tuiCtx, http.Header{}, auth, "", nil)
-	if got := tuiHeaders.Get("User-Agent"); got != "codex_cli_rs/0.136.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
-		t.Fatalf("tui User-Agent = %s", got)
-	}
-	if got := tuiHeaders.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
-	}
-}
-
 func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "config-ua",
@@ -376,31 +462,28 @@ func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "sk-test", cfg)
 
-	wantUA := codexFixedMacUserAgent(nil, "")
-	if got := headers.Get("User-Agent"); got != wantUA {
-		t.Fatalf("User-Agent = %s, want %s", got, wantUA)
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
-	if got := headers.Get("x-codex-beta-features"); got != "multi_agent" {
-		t.Fatalf("x-codex-beta-features = %q, want multi_agent", got)
+	if got := headers.Get("x-codex-beta-features"); got != "" {
+		t.Fatalf("x-codex-beta-features = %q, want empty", got)
 	}
-	if got := headers.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
+	if got := headers.Get("Originator"); got != "" {
+		t.Fatalf("Originator = %s, want empty", got)
 	}
 }
 
-func TestApplyCodexWebsocketHeadersStabilizesExplicitAPIKeyUserAgent(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
+func TestApplyCodexWebsocketHeadersPreservesExplicitAPIKeyUserAgent(t *testing.T) {
 	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "sk-test"}}
 	ctx := contextWithGinHeaders(map[string]string{"User-Agent": "api-key-client/1.0", "Originator": "explicit-origin"})
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "sk-test", nil)
 
-	wantUA := codexFixedMacUserAgent(nil, "")
-	if got := headers.Get("User-Agent"); got != wantUA {
-		t.Fatalf("User-Agent = %s, want %s", got, wantUA)
+	if got := headers.Get("User-Agent"); got != "api-key-client/1.0" {
+		t.Fatalf("User-Agent = %s, want api-key-client/1.0", got)
 	}
-	if got := headers.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
+	if got := headers.Get("Originator"); got != "explicit-origin" {
+		t.Fatalf("Originator = %s, want explicit-origin", got)
 	}
 }
 
@@ -683,15 +766,14 @@ func TestParseCodexWebsocketErrorPreservesWrappedBodyAndHeaders(t *testing.T) {
 	}
 }
 
-func TestApplyCodexHeadersLearnsLatestClientUserAgentVersion(t *testing.T) {
-	resetCodexFixedMacUserAgentForTest()
+func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
-			UserAgent:    "codex_cli_rs/0.117.0 (Mac OS 14.2.0; x86_64) vscode",
+			UserAgent:    "config-ua",
 			BetaFeatures: "config-beta",
 		},
 	}
@@ -700,14 +782,13 @@ func TestApplyCodexHeadersLearnsLatestClientUserAgentVersion(t *testing.T) {
 		Metadata: map[string]any{"email": "user@example.com"},
 	}
 	req = req.WithContext(contextWithGinHeaders(map[string]string{
-		"User-Agent": "codex_cli_rs/0.119.0 (Windows NT 10.0; x64) vscode",
+		"User-Agent": "client-ua",
 	}))
 
 	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
 
-	wantUA := "codex_cli_rs/0.119.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
-	if got := req.Header.Get("User-Agent"); got != wantUA {
-		t.Fatalf("User-Agent = %s, want %s", got, wantUA)
+	if got := req.Header.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
 	if got := req.Header.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
@@ -732,8 +813,8 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 
 	applyCodexHeaders(req, auth, "oauth-token", true, nil)
 
-	if got := req.Header.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
+	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
+		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
 	}
 	if got := req.Header.Get("Version"); got != "0.115.0-alpha.27" {
 		t.Fatalf("Version = %s, want %s", got, "0.115.0-alpha.27")
