@@ -1,62 +1,22 @@
-# Git and GitHub folders
-.git
-.github
+# Exclude everything by default. Only keep the files Dockerfile copies.
+**
 
-# Docker and CI/CD related files
-docker-compose.yml
-.dockerignore
-.gitignore
-.goreleaser.yml
-Dockerfile
+# Build instructions
+!Dockerfile
+!.dockerignore
 
-# Documentation and license
-docs
-README.md
-README_CN.md
-README_JA.md
-LICENSE
-AGENTS.md
+# Go module metadata
+!go.mod
+!go.sum
 
-# Runtime data folders (should be mounted as volumes)
-auths
-logs
-conv
-config.yaml
+# Runtime template copied into the image
+!config.example.yaml
 
-# Development/editor
-bin
-.vscode
-.claude
-.codex
-.codex-worktrees
-.gemini
-.serena
-.agent
-.agents
-.antigravitycli
-.opencode
-.idea
-.junie
-.worktrees
-.bmad
-_bmad
-_bmad-output
-
-# Runtime-downloaded assets
-static
-
-# Test and development files not needed in image
-test
-examples
-assets
-server
-.env
-.env.example
-build.sh
-docker-build.sh
-docker-build.ps1
-test_cursor.sh
-gitlab-duo-codex-parity-plan.md
-
-# Compiled binary (built inside container)
-cli-proxy-api
+# Build inputs
+!cmd/
+!cmd/server/
+!cmd/server/**
+!internal/
+!internal/**
+!sdk/
+!sdk/**
