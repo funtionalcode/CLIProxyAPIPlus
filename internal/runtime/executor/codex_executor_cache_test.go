@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -222,6 +223,135 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	}
 	if gotMetadataWindowID := gjson.Get(gotHeaderMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Turn-Metadata.window_id = %q, want %q", gotMetadataWindowID, expectedPromptCacheKey+":0")
+	}
+}
+
+func TestCodexExecutorCacheHelper_IdentityConfuseAddsStableInstallationIDWhenMissing(t *testing.T) {
+	executor := &CodexExecutor{cfg: &config.Config{
+		Routing: config.RoutingConfig{Strategy: "fill-first"},
+		Codex:   config.CodexConfig{IdentityConfuse: true},
+	}}
+	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
+	rawJSON := []byte(`{"model":"gpt-5-codex","stream":true,"client_metadata":{}}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex"}`),
+	}
+
+	_, body, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://example.com/responses", auth, req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	expectedInstallationID := codexIdentityConfuseUUID("auth-1", "installation", "account")
+	if got := gjson.GetBytes(body, "client_metadata.x-codex-installation-id").String(); got != expectedInstallationID {
+		t.Fatalf("installation id = %q, want %q", got, expectedInstallationID)
+	}
+}
+
+func TestCodexExecutorCacheHelper_NormalizesCodexEnvironmentText(t *testing.T) {
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{Strategy: "fill-first"},
+		Codex: config.CodexConfig{
+			IdentityConfuse: true,
+			NormalizeEnvironment: config.ClaudeEnvironmentNormalizationConfig{
+				Enabled: true,
+				Home:    "/Users/codex",
+				CWD:     "/Users/codex/project",
+				User:    "codex",
+			},
+		},
+	}
+	executor := &CodexExecutor{cfg: cfg}
+	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
+	rawJSON := []byte(`{
+		"model":"gpt-5-codex",
+		"stream":true,
+		"instructions":"<env>\nWorking directory: /Users/alice/private\nCurrent user: alice\nHome: /Users/alice\n</env>",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"<env>\nCurrent directory: /Users/alice/private\nUser: alice\nHome directory: /Users/alice\n</env>"}]},
+			{"type":"function_call","name":"run","arguments":"{\"cwd\":\"/Users/alice/private\"}"}
+		]
+	}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex"}`),
+	}
+
+	_, body, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://example.com/responses", auth, req, req.Payload, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	instructions := gjson.GetBytes(body, "instructions").String()
+	if !strings.Contains(instructions, "Working directory: /Users/codex/project") {
+		t.Fatalf("instructions missing canonical cwd: %q", instructions)
+	}
+	if !strings.Contains(instructions, "Current user: codex") {
+		t.Fatalf("instructions missing canonical user: %q", instructions)
+	}
+	if !strings.Contains(instructions, "Home: /Users/codex") {
+		t.Fatalf("instructions missing canonical home: %q", instructions)
+	}
+	if strings.Contains(instructions, "alice") {
+		t.Fatalf("instructions still leak original identity: %q", instructions)
+	}
+
+	messageText := gjson.GetBytes(body, "input.0.content.0.text").String()
+	if !strings.Contains(messageText, "Current directory: /Users/codex/project") {
+		t.Fatalf("message text missing canonical cwd: %q", messageText)
+	}
+	if !strings.Contains(messageText, "User: codex") {
+		t.Fatalf("message text missing canonical user: %q", messageText)
+	}
+	if !strings.Contains(messageText, "Home directory: /Users/codex") {
+		t.Fatalf("message text missing canonical home: %q", messageText)
+	}
+	if strings.Contains(messageText, "alice") {
+		t.Fatalf("message text still leaks original identity: %q", messageText)
+	}
+
+	arguments := gjson.GetBytes(body, "input.1.arguments").String()
+	if !strings.Contains(arguments, "/Users/alice/private") {
+		t.Fatalf("tool arguments were unexpectedly normalized: %q", arguments)
+	}
+}
+
+func TestApplyCodexHeadersStabilizesOAuthIdentityHeadersWhenIdentityConfuseEnabled(t *testing.T) {
+	resetCodexFixedMacUserAgentForTest()
+	req := httptest.NewRequest("POST", "https://example.com/responses", nil)
+	req = req.WithContext(contextWithGinHeaders(map[string]string{
+		"Originator":  "Codex Desktop",
+		"User-Agent":  "codex_cli_rs/0.140.0 (Linux 6.8.0; x64) Terminal/1.0",
+		"Version":     "0.1.0",
+		"OpenAI-Beta": "client-beta=1",
+	}))
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{Strategy: "fill-first"},
+		Codex:   config.CodexConfig{IdentityConfuse: true},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct-1"},
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
+
+	if got := req.Header.Get("User-Agent"); got != "codex_cli_rs/0.140.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("User-Agent = %q, want managed Mac Codex UA", got)
+	}
+	if got := req.Header.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	}
+	if got := req.Header.Get("Version"); got != "0.140.0" {
+		t.Fatalf("Version = %q, want 0.140.0", got)
+	}
+	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct-1" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want acct-1", got)
+	}
+	if got := req.Header.Get("OpenAI-Beta"); got != "" {
+		t.Fatalf("OpenAI-Beta = %q, want empty for HTTP requests", got)
 	}
 }
 

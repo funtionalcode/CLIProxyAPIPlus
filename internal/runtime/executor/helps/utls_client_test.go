@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"golang.org/x/net/proxy"
 )
 
@@ -81,6 +82,31 @@ func TestUTLSClientHelloFingerprints(t *testing.T) {
 				t.Fatalf("JA3 md5 = %q, want %q", gotJA3MD5, tt.wantJA3MD5)
 			}
 		})
+	}
+}
+
+func TestClaudeCodeClientHelloAdvertisesOnlyHTTP11(t *testing.T) {
+	clientHello := captureUTLSClientHello(t, utlsProfileClaudeCodeHTTP1)
+	protocols := clientHelloALPNProtocols(t, clientHello)
+	if got, want := strings.Join(protocols, ","), "http/1.1"; got != want {
+		t.Fatalf("ALPN protocols = %q, want %q", got, want)
+	}
+}
+
+func TestNewUtlsHTTPClientUsesHTTP1RoundTripperWhenClaudeTLSHTTP1Only(t *testing.T) {
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			TLS: config.ClaudeTLSConfig{HTTP1Only: true},
+		},
+	}
+
+	client := NewUtlsHTTPClient(context.Background(), cfg, nil, 0)
+	fallback, ok := client.Transport.(*fallbackRoundTripper)
+	if !ok {
+		t.Fatalf("client transport = %T, want *fallbackRoundTripper", client.Transport)
+	}
+	if _, ok := fallback.utls.(*utlsHTTP1RoundTripper); !ok {
+		t.Fatalf("protected-host transport = %T, want *utlsHTTP1RoundTripper", fallback.utls)
 	}
 }
 
@@ -190,6 +216,63 @@ func clientHelloJA3(t *testing.T, record []byte) string {
 		joinJA3Uint16s(curves),
 		joinJA3Bytes(points),
 	}, ",")
+}
+
+func clientHelloALPNProtocols(t *testing.T, record []byte) []string {
+	t.Helper()
+	if len(record) < 5 || record[0] != 22 {
+		t.Fatalf("not a TLS handshake record: %x", record[:min(len(record), 5)])
+	}
+	body := record[5:]
+	if len(body) < 4 || body[0] != 1 {
+		t.Fatalf("not a ClientHello: %x", body[:min(len(body), 4)])
+	}
+
+	p := 4
+	p += 2 + 32
+	sessionIDLen := int(body[p])
+	p += 1 + sessionIDLen
+	cipherLen := int(body[p])<<8 | int(body[p+1])
+	p += 2 + cipherLen
+	compressionLen := int(body[p])
+	p += 1 + compressionLen
+	if p+2 > len(body) {
+		return nil
+	}
+	extensionsLen := int(body[p])<<8 | int(body[p+1])
+	p += 2
+	end := min(len(body), p+extensionsLen)
+	for p+4 <= end {
+		extID := uint16(body[p])<<8 | uint16(body[p+1])
+		extLen := int(body[p+2])<<8 | int(body[p+3])
+		p += 4
+		if p+extLen > end {
+			t.Fatalf("extension %d length exceeds ClientHello bounds", extID)
+		}
+		extData := body[p : p+extLen]
+		p += extLen
+		if extID != 16 {
+			continue
+		}
+		if len(extData) < 2 {
+			t.Fatalf("malformed ALPN extension: %x", extData)
+		}
+		listLen := int(extData[0])<<8 | int(extData[1])
+		q := 2
+		listEnd := min(len(extData), q+listLen)
+		var protocols []string
+		for q < listEnd {
+			nameLen := int(extData[q])
+			q++
+			if q+nameLen > listEnd {
+				t.Fatalf("malformed ALPN protocol list: %x", extData)
+			}
+			protocols = append(protocols, string(extData[q:q+nameLen]))
+			q += nameLen
+		}
+		return protocols
+	}
+	return nil
 }
 
 func joinJA3Uint16s(values []uint16) string {

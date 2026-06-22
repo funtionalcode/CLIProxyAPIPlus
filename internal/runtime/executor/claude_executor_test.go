@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,12 +87,16 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 		Attributes: map[string]string{
 			"api_key":                            "key-baseline",
 			"header:User-Agent":                  "evil-client/9.9",
+			"header:X-App":                       "evil-app",
 			"header:X-Stainless-Os":              "Linux",
 			"header:X-Stainless-Arch":            "x64",
 			"header:X-Stainless-Package-Version": "9.9.9",
+			"header:X-Stainless-Timeout":         "1",
+			"header:X-Custom-Trace":              "allowed",
 		},
 	}
 	incoming := http.Header{
+		"Anthropic-Beta":              []string{"client-only-beta-2099-01-01"},
 		"User-Agent":                  []string{"curl/8.7.1"},
 		"X-Stainless-Package-Version": []string{"0.10.0"},
 		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
@@ -101,9 +107,18 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	req := newClaudeHeaderTestRequest(t, incoming)
 	applyClaudeHeaders(req, auth, "key-baseline", false, nil, cfg)
 
-	assertClaudeFingerprint(t, req.Header, "evil-client/9.9", "9.9.9", "v24.5.0", "Linux", "x64")
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
+	if got := req.Header.Get("X-App"); got != "cli" {
+		t.Fatalf("X-App = %q, want %q", got, "cli")
+	}
 	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
 		t.Fatalf("X-Stainless-Timeout = %q, want %q", got, "900")
+	}
+	if got := req.Header.Get("X-Custom-Trace"); got != "allowed" {
+		t.Fatalf("X-Custom-Trace = %q, want custom header to be preserved", got)
+	}
+	if got := req.Header.Get("Anthropic-Beta"); strings.Contains(got, "client-only-beta-2099-01-01") {
+		t.Fatalf("Anthropic-Beta leaked incoming unstable beta: %q", got)
 	}
 }
 
@@ -604,6 +619,145 @@ func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {
 	if helps.ClaudeDeviceProfileStabilizationEnabled(&config.Config{}) {
 		t.Fatal("expected unset stabilize-device-profile to default to disabled stabilization")
 	}
+}
+
+func TestApplyCloaking_AppliesSyntheticDeviceIDForClaudeCLIClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages", nil)
+	ginReq.Header.Set("User-Agent", "claude-cli/2.1.63 (external, cli)")
+	ginCtx.Request = ginReq
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			SyntheticDeviceID: config.ClaudeSyntheticDeviceIDConfig{
+				Enabled: true,
+				Salt:    "server-salt:",
+			},
+		},
+	}
+	auth := &cliproxyauth.Auth{ID: "auth-A", Attributes: map[string]string{"api_key": "upstream-key"}}
+	payload := []byte(`{"model":"claude-sonnet-4-5","metadata":{"user_id":"{\"device_id\":\"real-device\",\"account_uuid\":\"acct-1\",\"session_id\":\"sess-1\"}"},"messages":[{"role":"user","content":"hi"}]}`)
+
+	out, err := applyCloaking(ctx, cfg, auth, payload, "claude-sonnet-4-5", "upstream-key")
+	if err != nil {
+		t.Fatalf("applyCloaking returned error: %v", err)
+	}
+
+	userID := gjson.GetBytes(out, "metadata.user_id").String()
+	if !gjson.Valid(userID) {
+		t.Fatalf("metadata.user_id = %q, want JSON string", userID)
+	}
+	parsed := gjson.Parse(userID)
+	if got := parsed.Get("device_id").String(); got != expectedSyntheticDeviceID("server-salt:", "auth-A") {
+		t.Fatalf("device_id = %q, want synthetic account-scoped id", got)
+	}
+	if got := parsed.Get("session_id").String(); got != "sess-1" {
+		t.Fatalf("session_id = %q, want preserved", got)
+	}
+	if got := parsed.Get("account_uuid").String(); got != "acct-1" {
+		t.Fatalf("account_uuid = %q, want preserved", got)
+	}
+}
+
+func TestApplyClaudeSyntheticDeviceID_InvalidUserIDFallsBackToJSON(t *testing.T) {
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			SyntheticDeviceID: config.ClaudeSyntheticDeviceIDConfig{
+				Enabled: true,
+				Salt:    "server-salt:",
+			},
+		},
+	}
+	authA := &cliproxyauth.Auth{ID: "auth-A"}
+	authB := &cliproxyauth.Auth{ID: "auth-B"}
+	payload := []byte(`{"metadata":{"user_id":"not-json"},"messages":[{"role":"user","content":"hi"}]}`)
+
+	outA, errA := helps.ApplyClaudeSyntheticDeviceID(payload, cfg, authA, "fallback-key")
+	if errA != nil {
+		t.Fatalf("ApplyClaudeSyntheticDeviceID(authA) error = %v", errA)
+	}
+	outB, errB := helps.ApplyClaudeSyntheticDeviceID(payload, cfg, authB, "fallback-key")
+	if errB != nil {
+		t.Fatalf("ApplyClaudeSyntheticDeviceID(authB) error = %v", errB)
+	}
+
+	userIDA := gjson.GetBytes(outA, "metadata.user_id").String()
+	userIDB := gjson.GetBytes(outB, "metadata.user_id").String()
+	if !gjson.Valid(userIDA) || !gjson.Valid(userIDB) {
+		t.Fatalf("metadata.user_id should be valid JSON strings, got %q and %q", userIDA, userIDB)
+	}
+	deviceA := gjson.Parse(userIDA).Get("device_id").String()
+	deviceB := gjson.Parse(userIDB).Get("device_id").String()
+	if deviceA != expectedSyntheticDeviceID("server-salt:", "auth-A") {
+		t.Fatalf("authA device_id = %q, want account-scoped id", deviceA)
+	}
+	if deviceB != expectedSyntheticDeviceID("server-salt:", "auth-B") {
+		t.Fatalf("authB device_id = %q, want account-scoped id", deviceB)
+	}
+	if deviceA == deviceB {
+		t.Fatalf("different auth accounts must not share device_id: %q", deviceA)
+	}
+}
+
+func TestApplyClaudeEnvironmentNormalization_OnlyCanonicalizesEnvText(t *testing.T) {
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{
+			NormalizeEnvironment: config.ClaudeEnvironmentNormalizationConfig{
+				Enabled: true,
+				Home:    "/Users/claude-a",
+				CWD:     "/Users/claude-a/project",
+				User:    "claude-a",
+			},
+		},
+	}
+	payload := []byte(`{
+		"system": [
+			{"type":"text","text":"<env>\nWorking directory: /Users/alice/private/repo\nCurrent user: alice\nHome: /Users/alice\n</env>"}
+		],
+		"messages": [
+			{"role":"user","content":[
+				{"type":"text","text":"<system-reminder>\nCurrent directory: /Users/alice/private/repo\nUsername: alice\n</system-reminder>"},
+				{"type":"tool_use","name":"Read","input":{"file_path":"/Users/alice/private/repo/main.go"}}
+			]}
+		]
+	}`)
+
+	out, err := helps.ApplyClaudeEnvironmentNormalization(payload, cfg, nil)
+	if err != nil {
+		t.Fatalf("ApplyClaudeEnvironmentNormalization returned error: %v", err)
+	}
+
+	systemText := gjson.GetBytes(out, "system.0.text").String()
+	if !strings.Contains(systemText, "Working directory: /Users/claude-a/project") {
+		t.Fatalf("system env text did not receive canonical cwd: %q", systemText)
+	}
+	if !strings.Contains(systemText, "Current user: claude-a") {
+		t.Fatalf("system env text did not receive canonical user: %q", systemText)
+	}
+	if !strings.Contains(systemText, "Home: /Users/claude-a") {
+		t.Fatalf("system env text did not receive canonical home: %q", systemText)
+	}
+	if strings.Contains(systemText, "/Users/alice") || strings.Contains(systemText, "Current user: alice") {
+		t.Fatalf("system env text still leaks original identity: %q", systemText)
+	}
+
+	messageText := gjson.GetBytes(out, "messages.0.content.0.text").String()
+	if !strings.Contains(messageText, "Current directory: /Users/claude-a/project") || !strings.Contains(messageText, "Username: claude-a") {
+		t.Fatalf("system-reminder text was not normalized: %q", messageText)
+	}
+
+	toolPath := gjson.GetBytes(out, "messages.0.content.1.input.file_path").String()
+	if toolPath != "/Users/alice/private/repo/main.go" {
+		t.Fatalf("tool input path = %q, want original path untouched", toolPath)
+	}
+}
+
+func expectedSyntheticDeviceID(salt, accountKey string) string {
+	sum := sha256.Sum256([]byte(salt + accountKey))
+	return hex.EncodeToString(sum[:])
 }
 
 func TestApplyClaudeToolPrefix(t *testing.T) {

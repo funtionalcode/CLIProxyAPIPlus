@@ -144,6 +144,9 @@ type Config struct {
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
+	// Claude configures provider-wide Claude request identity controls.
+	Claude ClaudeConfig `yaml:"claude" json:"claude"`
+
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
@@ -283,9 +286,9 @@ func defaultPluginInstanceConfigNode() *yaml.Node {
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
-// By default, UserAgent/PackageVersion/RuntimeVersion seed the upgradeable
-// software fingerprint while OS/Arch pin the stable platform baseline. Legacy
-// mode can be enabled by explicitly setting StabilizeDeviceProfile to false.
+// When StabilizeDeviceProfile is true, UserAgent/PackageVersion/RuntimeVersion
+// seed the upgradeable software fingerprint while OS/Arch pin the stable
+// platform baseline. Unset or false keeps legacy passthrough behavior.
 type ClaudeHeaderDefaults struct {
 	UserAgent              string `yaml:"user-agent" json:"user-agent"`
 	PackageVersion         string `yaml:"package-version" json:"package-version"`
@@ -294,6 +297,35 @@ type ClaudeHeaderDefaults struct {
 	Arch                   string `yaml:"arch" json:"arch"`
 	Timeout                string `yaml:"timeout" json:"timeout"`
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+}
+
+// ClaudeConfig groups Claude-specific anti-correlation identity controls.
+// Each behavior is disabled by default and must be explicitly enabled for
+// gray rollout on test credentials.
+type ClaudeConfig struct {
+	SyntheticDeviceID    ClaudeSyntheticDeviceIDConfig        `yaml:"synthetic-device-id,omitempty" json:"synthetic-device-id,omitempty"`
+	NormalizeEnvironment ClaudeEnvironmentNormalizationConfig `yaml:"normalize-environment,omitempty" json:"normalize-environment,omitempty"`
+	TLS                  ClaudeTLSConfig                      `yaml:"tls,omitempty" json:"tls,omitempty"`
+}
+
+// ClaudeSyntheticDeviceIDConfig controls account-scoped synthetic device IDs.
+type ClaudeSyntheticDeviceIDConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Salt    string `yaml:"salt,omitempty" json:"salt,omitempty"`
+}
+
+// ClaudeEnvironmentNormalizationConfig controls canonical cwd/user/home text
+// in Claude Code system/env reminders.
+type ClaudeEnvironmentNormalizationConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Home    string `yaml:"home,omitempty" json:"home,omitempty"`
+	CWD     string `yaml:"cwd,omitempty" json:"cwd,omitempty"`
+	User    string `yaml:"user,omitempty" json:"user,omitempty"`
+}
+
+// ClaudeTLSConfig controls Claude outbound TLS transport behavior.
+type ClaudeTLSConfig struct {
+	HTTP1Only bool `yaml:"http1-only,omitempty" json:"http1-only,omitempty"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex
@@ -306,7 +338,8 @@ type CodexHeaderDefaults struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	IdentityConfuse      bool                                 `yaml:"identity-confuse" json:"identity-confuse"`
+	NormalizeEnvironment ClaudeEnvironmentNormalizationConfig `yaml:"normalize-environment,omitempty" json:"normalize-environment,omitempty"`
 }
 
 // CodexOAuthConfig configures the public callback URLs used by the management UI's
@@ -977,9 +1010,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
+	cfg.SanitizeCodexConfig()
 
 	// Sanitize Claude header defaults.
 	cfg.SanitizeClaudeHeaderDefaults()
+	cfg.SanitizeClaudeConfig()
 
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
@@ -1094,6 +1129,16 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }
 
+// SanitizeCodexConfig trims configured Codex identity-control values.
+func (cfg *Config) SanitizeCodexConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.Codex.NormalizeEnvironment.Home = strings.TrimSpace(cfg.Codex.NormalizeEnvironment.Home)
+	cfg.Codex.NormalizeEnvironment.CWD = strings.TrimSpace(cfg.Codex.NormalizeEnvironment.CWD)
+	cfg.Codex.NormalizeEnvironment.User = strings.TrimSpace(cfg.Codex.NormalizeEnvironment.User)
+}
+
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the
 // configured Claude fingerprint baseline values.
 func (cfg *Config) SanitizeClaudeHeaderDefaults() {
@@ -1106,6 +1151,17 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+}
+
+// SanitizeClaudeConfig trims configured Claude identity-control values.
+func (cfg *Config) SanitizeClaudeConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.Claude.SyntheticDeviceID.Salt = strings.TrimSpace(cfg.Claude.SyntheticDeviceID.Salt)
+	cfg.Claude.NormalizeEnvironment.Home = strings.TrimSpace(cfg.Claude.NormalizeEnvironment.Home)
+	cfg.Claude.NormalizeEnvironment.CWD = strings.TrimSpace(cfg.Claude.NormalizeEnvironment.CWD)
+	cfg.Claude.NormalizeEnvironment.User = strings.TrimSpace(cfg.Claude.NormalizeEnvironment.User)
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

@@ -21,6 +21,7 @@ type utlsClientProfile int
 
 const (
 	utlsProfileClaudeCode utlsClientProfile = iota
+	utlsProfileClaudeCodeHTTP1
 	utlsProfileCodexCLI
 )
 
@@ -192,6 +193,8 @@ func dialUTLSConn(dialer proxy.Dialer, host, addr string, profile utlsClientProf
 
 func utlsClientHelloSpec(profile utlsClientProfile) tls.ClientHelloSpec {
 	switch profile {
+	case utlsProfileClaudeCodeHTTP1:
+		return claudeCodeClientHelloSpec([]string{"http/1.1"})
 	case utlsProfileCodexCLI:
 		return tls.ClientHelloSpec{
 			TLSVersMin:         tls.VersionTLS10,
@@ -232,46 +235,50 @@ func utlsClientHelloSpec(profile utlsClientProfile) tls.ClientHelloSpec {
 			},
 		}
 	default:
-		return tls.ClientHelloSpec{
-			TLSVersMin:         tls.VersionTLS12,
-			TLSVersMax:         tls.VersionTLS13,
-			CompressionMethods: []uint8{0},
-			CipherSuites: []uint16{
-				tls.TLS_AES_128_GCM_SHA256,
-				tls.TLS_AES_256_GCM_SHA384,
-				tls.TLS_CHACHA20_POLY1305_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-				tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-			},
-			Extensions: []tls.TLSExtension{
-				&tls.SNIExtension{},
-				&tls.ExtendedMasterSecretExtension{},
-				&tls.RenegotiationInfoExtension{Renegotiation: tls.RenegotiateOnceAsClient},
-				&tls.SupportedCurvesExtension{Curves: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}},
-				&tls.SupportedPointsExtension{SupportedPoints: []byte{0}},
-				&tls.SessionTicketExtension{},
-				&tls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
-				&tls.StatusRequestExtension{},
-				&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: defaultSignatureAlgorithms()},
-				&tls.SCTExtension{},
-				&tls.KeyShareExtension{KeyShares: []tls.KeyShare{{Group: tls.X25519}}},
-				&tls.PSKKeyExchangeModesExtension{Modes: []uint8{tls.PskModeDHE}},
-				&tls.SupportedVersionsExtension{Versions: []uint16{tls.VersionTLS13, tls.VersionTLS12}},
-				&tls.UtlsPaddingExtension{GetPaddingLen: tls.BoringPaddingStyle},
-			},
-		}
+		return claudeCodeClientHelloSpec([]string{"h2", "http/1.1"})
+	}
+}
+
+func claudeCodeClientHelloSpec(alpnProtocols []string) tls.ClientHelloSpec {
+	return tls.ClientHelloSpec{
+		TLSVersMin:         tls.VersionTLS12,
+		TLSVersMax:         tls.VersionTLS13,
+		CompressionMethods: []uint8{0},
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		},
+		Extensions: []tls.TLSExtension{
+			&tls.SNIExtension{},
+			&tls.ExtendedMasterSecretExtension{},
+			&tls.RenegotiationInfoExtension{Renegotiation: tls.RenegotiateOnceAsClient},
+			&tls.SupportedCurvesExtension{Curves: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}},
+			&tls.SupportedPointsExtension{SupportedPoints: []byte{0}},
+			&tls.SessionTicketExtension{},
+			&tls.ALPNExtension{AlpnProtocols: alpnProtocols},
+			&tls.StatusRequestExtension{},
+			&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: defaultSignatureAlgorithms()},
+			&tls.SCTExtension{},
+			&tls.KeyShareExtension{KeyShares: []tls.KeyShare{{Group: tls.X25519}}},
+			&tls.PSKKeyExchangeModesExtension{Modes: []uint8{tls.PskModeDHE}},
+			&tls.SupportedVersionsExtension{Versions: []uint16{tls.VersionTLS13, tls.VersionTLS12}},
+			&tls.UtlsPaddingExtension{GetPaddingLen: tls.BoringPaddingStyle},
+		},
 	}
 }
 
@@ -331,7 +338,12 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper = newUtlsRoundTripper(proxyURL, utlsProfileClaudeCode)
+	var utlsRT http.RoundTripper
+	if cfg != nil && cfg.Claude.TLS.HTTP1Only {
+		utlsRT = newUtlsHTTP1RoundTripper(proxyURL, utlsProfileClaudeCodeHTTP1)
+	} else {
+		utlsRT = newUtlsRoundTripper(proxyURL, utlsProfileClaudeCode)
+	}
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {

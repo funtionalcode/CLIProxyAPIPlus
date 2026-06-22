@@ -347,6 +347,47 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	}
 }
 
+func TestApplyCodexWebsocketHeadersStabilizesOAuthIdentityHeadersWhenIdentityConfuseEnabled(t *testing.T) {
+	resetCodexFixedMacUserAgentForTest()
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct-1"},
+	}
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{Strategy: "fill-first"},
+		Codex:   config.CodexConfig{IdentityConfuse: true},
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"Originator":            "Codex Desktop",
+		"User-Agent":            "codex_cli_rs/0.140.0 (Linux 6.8.0; x64) Terminal/1.0",
+		"Version":               "0.1.0",
+		"OpenAI-Beta":           "client-beta=1",
+		"X-Codex-Beta-Features": "client-feature",
+	})
+
+	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
+
+	if got := headers.Get("User-Agent"); got != "codex_cli_rs/0.140.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+		t.Fatalf("User-Agent = %q, want managed Mac Codex UA", got)
+	}
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	}
+	if got := headers.Get("Version"); got != "0.140.0" {
+		t.Fatalf("Version = %q, want 0.140.0", got)
+	}
+	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
+		t.Fatalf("OpenAI-Beta = %q, want %q", got, codexResponsesWebsocketBetaHeaderValue)
+	}
+	if got := headers.Get("X-Codex-Beta-Features"); got != "" {
+		t.Fatalf("X-Codex-Beta-Features = %q, want empty managed default", got)
+	}
+	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID = %q, want acct-1", got)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersCanonicalizesLegacyUnderscoreSessionHeader(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
@@ -868,5 +909,15 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 
 	if dialer.Proxy != nil {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
+	}
+}
+
+func TestNewProxyAwareWebsocketDialerUsesCodexFingerprintTLSForDirectWSS(t *testing.T) {
+	t.Parallel()
+
+	dialer := newProxyAwareWebsocketDialer(&config.Config{}, nil)
+
+	if dialer.NetDialTLSContext == nil {
+		t.Fatal("NetDialTLSContext is nil, want Codex fingerprint TLS dialer")
 	}
 }

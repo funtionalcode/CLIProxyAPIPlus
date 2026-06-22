@@ -250,6 +250,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
 
+	body, err = helps.ApplyClaudeIdentityControls(body, e.cfg, auth, apiKey)
+	if err != nil {
+		return resp, err
+	}
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -433,6 +438,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
+
+	body, err = helps.ApplyClaudeIdentityControls(body, e.cfg, auth, apiKey)
+	if err != nil {
+		return nil, err
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -682,6 +692,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
 	body = normalizeCacheControlTTL(body)
+
+	var errIdentity error
+	body, errIdentity = helps.ApplyClaudeIdentityControls(body, e.cfg, auth, apiKey)
+	if errIdentity != nil {
+		return cliproxyexecutor.Response{}, errIdentity
+	}
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
@@ -1038,7 +1054,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
+	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" && !stabilizeDeviceProfile {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
 			baseBetas += ",oauth-2025-04-20"
@@ -1112,6 +1128,15 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if stabilizeDeviceProfile {
+		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
+		r.Header.Set("Anthropic-Beta", baseBetas)
+		r.Header.Set("X-App", "cli")
+		r.Header.Set("X-Stainless-Retry-Count", "0")
+		r.Header.Set("X-Stainless-Runtime", "node")
+		r.Header.Set("X-Stainless-Lang", "js")
+		r.Header.Set("X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
+	}
 	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
 	// may override it with a user-configured value.  Compressed SSE breaks the line
 	// scanner regardless of user preference, so this is non-negotiable for streams.
@@ -1909,6 +1934,9 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) ([]byte, error) {
 	clientUserAgent := getClientUserAgent(ctx)
+	applySyntheticDeviceID := func(current []byte) ([]byte, error) {
+		return helps.ApplyClaudeSyntheticDeviceID(current, cfg, auth, apiKey)
+	}
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
 	oauthToken := isClaudeOAuthToken(apiKey)
 	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)
@@ -1951,7 +1979,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Determine if cloaking should be applied
 	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
-		return payload, nil
+		return applySyntheticDeviceID(payload)
 	}
 
 	// Skip system instructions for claude-3-5-haiku models
@@ -1965,6 +1993,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	// Inject fake user ID
 	var errFakeUserID error
 	payload, errFakeUserID = injectFakeUserID(ctx, payload, apiKey, cacheUserID)
+	if errFakeUserID != nil {
+		return nil, errFakeUserID
+	}
+	payload, errFakeUserID = applySyntheticDeviceID(payload)
 	if errFakeUserID != nil {
 		return nil, errFakeUserID
 	}

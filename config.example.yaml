@@ -237,13 +237,52 @@ routing:
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
 
+# Claude provider identity controls. All switches default to false; enable them
+# first on test accounts and verify CPA outbound traffic before wider rollout.
+claude:
+  synthetic-device-id:
+    enabled: false
+    # Secret random salt used for: sha256(salt + stable upstream account key).
+    # Keep it private and stable across restarts; changing it rotates every
+    # synthetic device_id.
+    salt: ""
+  normalize-environment:
+    enabled: false
+    # Optional canonical values for Claude Code system/<env> text. When omitted,
+    # CPA derives account-scoped stable defaults. Tool call parameters are not changed.
+    home: ""
+    cwd: ""
+    user: ""
+  tls:
+    # When true, Claude outbound requests use the Claude HTTP/1.1 uTLS profile:
+    # ALPN only "http/1.1" and no HTTP/2 transport for protected upstream hosts.
+    http1-only: false
+
+# Claude managed header profile defaults. Uncomment and enable
+# stabilize-device-profile for per-account locked Claude Code headers.
+# claude-header-defaults:
+#   user-agent: "claude-cli/2.1.63 (external, cli)"
+#   package-version: "0.74.0"
+#   runtime-version: "v24.3.0"
+#   os: "MacOS"
+#   arch: "arm64"
+#   timeout: "600"
+#   stabilize-device-profile: false
+
 # Codex provider behavior.
 codex:
   # When true, and routing.strategy is fill-first or routing.session-affinity is true,
-  # remap Codex prompt_cache_key and installation identity per selected auth.
-  # Some superstitious users believe request tracking identifiers can be used
-  # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
+  # remap Codex prompt_cache_key/installation/session identity per selected auth
+  # and present a managed Codex client header profile for OAuth/file-backed auth.
+  # API-key Codex entries keep API-key client header behavior.
   identity-confuse: false
+  normalize-environment:
+    enabled: false
+    # Optional canonical values for Codex instructions/input env text. When omitted,
+    # CPA derives account-scoped stable defaults. Tool call arguments are not changed.
+    home: ""
+    cwd: ""
+    user: ""
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
@@ -344,13 +383,15 @@ nonstream-keepalive-interval: 0
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
 
-# Claude OAuth requests pass through the headers from each incoming Claude CLI request.
-# CPA does not pin a managed Claude version; the management page lists recent
-# Claude header observations from the current server process instead.
-# Codex OAuth requests pass through client headers when present. When the client
-# omits Codex headers, CPA uses built-in Codex Desktop/codex-proxy-compatible
-# fallback headers for OAuth/file-backed Codex requests. codex-api-key entries
-# still pass through API-key client headers without OAuth desktop fallbacks.
+# Claude header defaults seed the managed Claude Code device profile. Set
+# claude-header-defaults.stabilize-device-profile: true to pin per-account
+# OS/Arch/X-App/timeout and let official claude-cli User-Agent/package/runtime
+# observations upgrade the account software fingerprint without downgrades.
+# Codex OAuth requests pass through client headers by default. When
+# codex.identity-confuse is enabled with session affinity/fill-first routing,
+# CPA pins managed Codex OAuth client headers, remaps Codex identity metadata,
+# and normalizes Codex env text when codex.normalize-environment.enabled is true.
+# codex-api-key entries still keep API-key client header behavior.
 
 # Codex browser OAuth settings for the management UI.
 # Useful for Docker, reverse proxies, and LAN access where the browser cannot use localhost:1455.

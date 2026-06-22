@@ -779,7 +779,7 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
 
@@ -860,7 +860,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -1031,7 +1031,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		AuthType:  authType,
 		AuthValue: authValue,
 	})
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -1145,7 +1145,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
@@ -1498,6 +1498,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 }
 
 func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, rawJSON []byte) ([]byte, codexIdentityConfuseState) {
+	rawJSON = helps.ApplyCodexEnvironmentNormalization(rawJSON, cfg, auth)
 	if !codexIdentityConfuseEnabled(cfg) || auth == nil || strings.TrimSpace(auth.ID) == "" || len(rawJSON) == 0 {
 		return rawJSON, codexIdentityConfuseState{}
 	}
@@ -1508,7 +1509,11 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 		state.promptCacheKey = codexIdentityConfuseUUID(auth.ID, "prompt-cache", promptCacheKey)
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", state.promptCacheKey)
 	}
-	if installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String()); installationID != "" {
+	installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String())
+	if installationID == "" {
+		installationID = "account"
+	}
+	if installationID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-installation-id", codexIdentityConfuseUUID(auth.ID, "installation", installationID))
 	}
 	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
@@ -1614,6 +1619,10 @@ func codexIdentityConfuseEnabled(cfg *config.Config) bool {
 	return cfg.Routing.SessionAffinity || strategy == "fill-first" || strategy == "fillfirst" || strategy == "ff"
 }
 
+func codexManagedIdentityEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	return codexIdentityConfuseEnabled(cfg) && !codexAuthUsesAPIKey(auth)
+}
+
 func codexIdentityConfuseUUID(authID string, kind string, value string) string {
 	name := strings.Join([]string{"cli-proxy-api", "codex", "identity-confuse", kind, strings.TrimSpace(authID), strings.TrimSpace(value)}, ":")
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
@@ -1628,14 +1637,21 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	if ginHeaders.Get("X-Codex-Beta-Features") != "" {
+	isAPIKey := codexAuthUsesAPIKey(auth)
+	managedIdentity := codexManagedIdentityEnabled(cfg, auth)
+	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
+
+	if !managedIdentity && ginHeaders.Get("X-Codex-Beta-Features") != "" {
 		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
 	}
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
+	if managedIdentity {
+		applyCodexManagedClientHeaders(r.Header, ginHeaders, cfgUserAgent)
+	} else {
+		misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
-	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
 		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
@@ -1648,13 +1664,9 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	r.Header.Set("Connection", "Keep-Alive")
 
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
+	if managedIdentity {
+		r.Header.Set("Originator", codexOriginator)
+	} else if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {
 		r.Header.Set("Originator", codexOriginator)
@@ -1671,6 +1683,36 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if managedIdentity {
+		applyCodexManagedClientHeaders(r.Header, ginHeaders, cfgUserAgent)
+		r.Header.Set("Originator", codexOriginator)
+		r.Header.Del("OpenAI-Beta")
+		r.Header.Del("X-Codex-Beta-Features")
+		if auth != nil && auth.Metadata != nil {
+			if accountID, ok := auth.Metadata["account_id"].(string); ok {
+				r.Header.Set("Chatgpt-Account-Id", accountID)
+			}
+		}
+	}
+}
+
+func applyCodexManagedClientHeaders(headers http.Header, observedHeaders http.Header, configUserAgent string) {
+	if headers == nil {
+		return
+	}
+	userAgent := codexFixedMacUserAgent(observedHeaders, configUserAgent)
+	headers.Set("User-Agent", userAgent)
+	if version := codexManagedVersionHeader(userAgent); version != "" {
+		headers.Set("Version", version)
+	}
+}
+
+func codexManagedVersionHeader(userAgent string) string {
+	version, ok := parseCodexCLIUserAgentVersion(userAgent)
+	if !ok {
+		return ""
+	}
+	return version.String()
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
