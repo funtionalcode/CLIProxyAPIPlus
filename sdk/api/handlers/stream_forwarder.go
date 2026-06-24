@@ -6,9 +6,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	log "github.com/sirupsen/logrus"
 )
 
 type StreamForwardOptions struct {
+	// Model is used only for temporary disconnect diagnostics.
+	Model string
+
+	// InitialChunkCount accounts for chunks written before entering ForwardStream.
+	InitialChunkCount int
+
 	// KeepAliveInterval overrides the configured streaming keep-alive interval.
 	// If nil, the configured default is used. If set to <= 0, keep-alives are disabled.
 	KeepAliveInterval *time.Duration
@@ -61,11 +69,22 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		keepAliveC = keepAlive.C
 	}
 
+	startedAt := time.Now()
+	chunkCount := opts.InitialChunkCount
 	var terminalErr *interfaces.ErrorMessage
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
+			err := c.Request.Context().Err()
+			log.Infof(
+				"stream forward client disconnected request_id=%s model=%s elapsed=%s chunk_count=%d error=%v",
+				streamForwardRequestID(c),
+				opts.Model,
+				time.Since(startedAt).Truncate(time.Millisecond),
+				chunkCount,
+				err,
+			)
+			cancel(err)
 			return
 		case chunk, ok := <-data:
 			if !ok {
@@ -95,6 +114,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				return
 			}
 			writeChunk(chunk)
+			chunkCount++
 			flusher.Flush()
 		case errMsg, ok := <-errs:
 			if !ok {
@@ -118,4 +138,17 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			flusher.Flush()
 		}
 	}
+}
+
+func streamForwardRequestID(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if requestID := logging.GetGinRequestID(c); requestID != "" {
+		return requestID
+	}
+	if c.Request == nil {
+		return ""
+	}
+	return logging.GetRequestID(c.Request.Context())
 }

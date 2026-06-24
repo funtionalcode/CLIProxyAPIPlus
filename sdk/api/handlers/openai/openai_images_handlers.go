@@ -1371,6 +1371,8 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 			flusher.Flush()
 			streamStarted = true
 			h.ForwardStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, handlers.StreamForwardOptions{
+				Model:             model,
+				InitialChunkCount: 1,
 				WriteChunk: func(next []byte) {
 					_, _ = c.Writer.Write(next)
 				},

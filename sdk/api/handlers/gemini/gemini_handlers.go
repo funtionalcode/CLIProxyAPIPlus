@@ -246,7 +246,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			flusher.Flush()
 
 			// Continue
-			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan, modelName, 1)
 			return
 		}
 	}
@@ -301,7 +301,7 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 	cliCancel()
 }
 
-func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, modelName string, initialChunkCount int) {
 	var keepAliveInterval *time.Duration
 	if alt != "" {
 		keepAliveInterval = new(time.Duration(0))
@@ -309,6 +309,8 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		KeepAliveInterval: keepAliveInterval,
+		Model:             modelName,
+		InitialChunkCount: initialChunkCount,
 		WriteChunk: func(chunk []byte) {
 			if alt == "" {
 				_, _ = c.Writer.Write([]byte("data: "))

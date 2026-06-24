@@ -178,7 +178,7 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-	h.forwardCLIStream(c, flusher, "", func(err error) { cliCancel(err) }, dataChan, errChan)
+	h.forwardCLIStream(c, flusher, "", func(err error) { cliCancel(err) }, dataChan, errChan, modelName, 0)
 	return
 }
 
@@ -201,7 +201,7 @@ func (h *GeminiCLIAPIHandler) handleInternalGenerateContent(c *gin.Context, rawJ
 	cliCancel()
 }
 
-func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, modelName string, initialChunkCount int) {
 	var keepAliveInterval *time.Duration
 	if alt != "" {
 		keepAliveInterval = new(time.Duration(0))
@@ -209,6 +209,8 @@ func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flus
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		KeepAliveInterval: keepAliveInterval,
+		Model:             modelName,
+		InitialChunkCount: initialChunkCount,
 		WriteChunk: func(chunk []byte) {
 			if alt == "" {
 				if bytes.Equal(chunk, []byte("data: [DONE]")) || bytes.Equal(chunk, []byte("[DONE]")) {
