@@ -76,18 +76,17 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		select {
 		case <-c.Request.Context().Done():
 			err := c.Request.Context().Err()
-			log.Infof(
-				"stream forward client disconnected request_id=%s model=%s elapsed=%s chunk_count=%d error=%v",
-				streamForwardRequestID(c),
-				opts.Model,
-				time.Since(startedAt).Truncate(time.Millisecond),
-				chunkCount,
-				err,
-			)
+			logStreamForwardClientDisconnected(c, opts.Model, startedAt, chunkCount, err, "request_context_done")
 			cancel(err)
 			return
 		case chunk, ok := <-data:
 			if !ok {
+				if err := c.Request.Context().Err(); err != nil {
+					logStreamForwardClientDisconnected(c, opts.Model, startedAt, chunkCount, err, "data_closed_after_request_context_done")
+					cancel(err)
+					return
+				}
+
 				// Prefer surfacing a terminal error if one is pending.
 				if terminalErr == nil {
 					select {
@@ -138,6 +137,18 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			flusher.Flush()
 		}
 	}
+}
+
+func logStreamForwardClientDisconnected(c *gin.Context, model string, startedAt time.Time, chunkCount int, err error, stage string) {
+	log.Infof(
+		"stream forward client disconnected request_id=%s model=%s elapsed=%s chunk_count=%d error=%v stage=%s",
+		streamForwardRequestID(c),
+		model,
+		time.Since(startedAt).Truncate(time.Millisecond),
+		chunkCount,
+		err,
+		stage,
+	)
 }
 
 func streamForwardRequestID(c *gin.Context) string {
