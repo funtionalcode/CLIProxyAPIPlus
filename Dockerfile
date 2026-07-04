@@ -93,7 +93,7 @@ COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
 WORKDIR /CLIProxyAPI
 
-VOLUME ["/root/.cli-proxy-api"]
+VOLUME ["/root/.cli-proxy-api", "/CLIProxyAPI/plugins"]
 
 EXPOSE 8317
 

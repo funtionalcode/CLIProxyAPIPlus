@@ -277,6 +277,7 @@ func TestGetPluginConfigReturnsNotFoundForUnknownPlugin(t *testing.T) {
 func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 	t.Parallel()
 
+	configFilePath := writeTestConfigFile(t)
 	h := &Handler{
 		cfg: &config.Config{
 			Plugins: config.PluginsConfig{
@@ -286,7 +287,7 @@ func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 				},
 			},
 		},
-		configFilePath: writeTestConfigFile(t),
+		configFilePath: configFilePath,
 	}
 	reloads, reloadDone := captureConfigReload(h)
 
@@ -326,6 +327,18 @@ func TestPatchPluginEnabledUpdatesOnlyPluginConfig(t *testing.T) {
 	raw := marshalPluginRaw(t, item)
 	if !strings.Contains(raw, "mode: safe") {
 		t.Fatalf("raw config lost custom field:\n%s", raw)
+	}
+
+	persisted, errLoad := config.LoadConfig(configFilePath)
+	if errLoad != nil {
+		t.Fatalf("LoadConfig(%q) error = %v", configFilePath, errLoad)
+	}
+	persistedItem := persisted.Plugins.Configs["sample"]
+	if persistedItem.Enabled == nil || !*persistedItem.Enabled {
+		t.Fatalf("persisted sample enabled = %#v, want true", persistedItem.Enabled)
+	}
+	if rawPersisted := marshalPluginRaw(t, persistedItem); !strings.Contains(rawPersisted, "mode: safe") {
+		t.Fatalf("persisted raw config lost custom field:\n%s", rawPersisted)
 	}
 }
 

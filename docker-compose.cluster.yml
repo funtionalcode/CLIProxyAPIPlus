@@ -16,6 +16,7 @@ services:
       - "8317:8317"
     volumes:
       - ./home:/root/.cli-proxy-api
+      - ./plugins:/CLIProxyAPI/plugins
       - ./logs:/CLIProxyAPI/logs
     command: >
       sh -eu -c '
