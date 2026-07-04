@@ -38,7 +38,8 @@ import (
 // ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
-	cfg *config.Config
+	cfg         *config.Config
+	authManager *cliproxyauth.Manager
 }
 
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
@@ -144,7 +145,31 @@ const defaultModelMaxTokens = 1024
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
+func NewClaudeExecutorWithManager(cfg *config.Config, manager *cliproxyauth.Manager) *ClaudeExecutor {
+	return &ClaudeExecutor{cfg: cfg, authManager: manager}
+}
+
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
+
+func (e *ClaudeExecutor) persistClaudeDeviceHighWater(auth *cliproxyauth.Auth, apiKey string) {
+	if e == nil || e.authManager == nil || auth == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return
+	}
+	highWater, ok := helps.ClaudeObservedHighWaterForAuth(auth, apiKey)
+	if !ok {
+		return
+	}
+	if _, err := e.authManager.RaiseClaudeDeviceHighWater(context.Background(), authID, highWater); err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"component": "claude_device_high_water",
+			"auth_id":   authID,
+		}).Warn("claude executor: failed to persist device-profile high-water")
+	}
+}
 
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -274,13 +299,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+	requestCtx := contextWithClaudeInboundHeaders(ctx, opts.Headers)
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
 	}
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return resp, errHeaders
 	}
+	e.persistClaudeDeviceHighWater(auth, apiKey)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -462,13 +489,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+	requestCtx := contextWithClaudeInboundHeaders(ctx, opts.Headers)
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
 	}
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
 		return nil, errHeaders
 	}
+	e.persistClaudeDeviceHighWater(auth, apiKey)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -708,13 +737,15 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	requestCtx := contextWithClaudeInboundHeaders(ctx, opts.Headers)
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
+	e.persistClaudeDeviceHighWater(auth, apiKey)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -1013,6 +1044,36 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
+type claudeInboundHeadersContextKeyType struct{}
+
+var claudeInboundHeadersContextKey = claudeInboundHeadersContextKeyType{}
+
+func contextWithClaudeInboundHeaders(ctx context.Context, headers http.Header) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(headers) == 0 {
+		return ctx
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, claudeInboundHeadersContextKey, headers.Clone())
+}
+
+func ginHeadersFromContext(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return ginCtx.Request.Header
+	}
+	if headers, ok := ctx.Value(claudeInboundHeadersContextKey).(http.Header); ok {
+		return headers
+	}
+	return nil
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) error {
 	if r == nil {
 		return nil
@@ -1039,10 +1100,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	r.Header.Set("Content-Type", "application/json")
 
-	var ginHeaders http.Header
-	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
-	}
+	ginHeaders := ginHeadersFromContext(r.Context())
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
 	if stabilizeDeviceProfile {
@@ -1051,6 +1109,8 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		if errDeviceProfile != nil {
 			return errDeviceProfile
 		}
+	} else {
+		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
 	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"

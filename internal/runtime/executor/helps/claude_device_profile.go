@@ -34,6 +34,7 @@ var (
 	claudeCLIVersionPattern = regexp.MustCompile(`^claude-cli/(\d+)\.(\d+)\.(\d+)`)
 
 	claudeDeviceProfileCache            = make(map[string]claudeDeviceProfileCacheEntry)
+	claudeDeviceProfileObservations     = make(map[string]ClaudeDeviceProfile)
 	claudeDeviceProfileCacheMu          sync.RWMutex
 	claudeDeviceProfileCacheCleanupOnce sync.Once
 
@@ -79,6 +80,10 @@ func (v claudeCLIVersion) Compare(other claudeCLIVersion) int {
 	}
 }
 
+func (v claudeCLIVersion) String() string {
+	return strconv.Itoa(v.major) + "." + strconv.Itoa(v.minor) + "." + strconv.Itoa(v.patch)
+}
+
 type ClaudeDeviceProfile struct {
 	UserAgent      string
 	PackageVersion string
@@ -87,6 +92,13 @@ type ClaudeDeviceProfile struct {
 	Arch           string
 	version        claudeCLIVersion
 	hasVersion     bool
+}
+
+func (profile ClaudeDeviceProfile) VersionString() string {
+	if !profile.hasVersion {
+		return ""
+	}
+	return profile.version.String()
 }
 
 type claudeDeviceProfileCacheEntry struct {
@@ -112,6 +124,7 @@ func ClaudeDeviceProfileStabilizationEnabled(cfg *config.Config) bool {
 func ResetClaudeDeviceProfileCache() {
 	claudeDeviceProfileCacheMu.Lock()
 	claudeDeviceProfileCache = make(map[string]claudeDeviceProfileCacheEntry)
+	claudeDeviceProfileObservations = make(map[string]ClaudeDeviceProfile)
 	claudeDeviceProfileCacheMu.Unlock()
 }
 
@@ -276,8 +289,20 @@ func claudeDeviceProfileScopeKey(auth *cliproxyauth.Auth, apiKey string) string 
 }
 
 func claudeDeviceProfileCacheKey(auth *cliproxyauth.Auth, apiKey string) string {
-	sum := sha256.Sum256([]byte(claudeDeviceProfileScopeKey(auth, apiKey)))
+	return claudeDeviceProfileHashKey(claudeDeviceProfileScopeKey(auth, apiKey))
+}
+
+func claudeDeviceProfileHashKey(scope string) string {
+	sum := sha256.Sum256([]byte(scope))
 	return hex.EncodeToString(sum[:])
+}
+
+func claudeDeviceProfileGlobalObservationKey() string {
+	return claudeDeviceProfileHashKey("global")
+}
+
+func claudeDeviceProfileObservationCacheKeys(auth *cliproxyauth.Auth, apiKey string) []string {
+	return []string{claudeDeviceProfileCacheKey(auth, apiKey)}
 }
 
 func claudeDeviceProfileKVKey(auth *cliproxyauth.Auth, apiKey string) string {
@@ -307,6 +332,99 @@ func purgeExpiredClaudeDeviceProfiles() {
 		}
 	}
 	claudeDeviceProfileCacheMu.Unlock()
+}
+
+func recordClaudeDeviceProfileObservation(cacheKey string, profile ClaudeDeviceProfile) {
+	recordClaudeDeviceProfileObservationForKey(cacheKey, profile)
+	recordClaudeDeviceProfileObservationForKey(claudeDeviceProfileGlobalObservationKey(), profile)
+}
+
+func recordClaudeDeviceProfileObservationForKey(cacheKey string, profile ClaudeDeviceProfile) {
+	if cacheKey == "" || profile.UserAgent == "" || !profile.hasVersion {
+		return
+	}
+	current, ok := claudeDeviceProfileObservations[cacheKey]
+	if !ok || shouldUpgradeClaudeDeviceProfile(profile, current) {
+		claudeDeviceProfileObservations[cacheKey] = profile
+	}
+}
+
+func claudeObservedHighWaterProfileLocked(cacheKeys []string) (ClaudeDeviceProfile, bool) {
+	var best ClaudeDeviceProfile
+	found := false
+	for _, cacheKey := range cacheKeys {
+		profile, ok := claudeDeviceProfileObservations[cacheKey]
+		if !ok || profile.UserAgent == "" || !profile.hasVersion {
+			continue
+		}
+		if !found || profile.version.Compare(best.version) > 0 {
+			best = profile
+			found = true
+		}
+	}
+	return best, found
+}
+
+func globalClaudeObservedHighWaterProfileLocked() (ClaudeDeviceProfile, bool) {
+	return claudeObservedHighWaterProfileLocked([]string{claudeDeviceProfileGlobalObservationKey()})
+}
+
+func claudePersistedHighWaterProfile(auth *cliproxyauth.Auth) (ClaudeDeviceProfile, bool) {
+	if auth == nil {
+		return ClaudeDeviceProfile{}, false
+	}
+	hw, ok := cliproxyauth.ClaudeDeviceHighWaterFromMetadata(auth.Metadata)
+	if !ok {
+		return ClaudeDeviceProfile{}, false
+	}
+	version, ok := parseClaudeCLIVersion(hw.UserAgent)
+	if !ok {
+		return ClaudeDeviceProfile{}, false
+	}
+	return ClaudeDeviceProfile{
+		UserAgent:      strings.TrimSpace(hw.UserAgent),
+		PackageVersion: strings.TrimSpace(hw.PackageVersion),
+		RuntimeVersion: strings.TrimSpace(hw.RuntimeVersion),
+		OS:             strings.TrimSpace(hw.OS),
+		Arch:           strings.TrimSpace(hw.Arch),
+		version:        version,
+		hasVersion:     true,
+	}, true
+}
+
+func SeedClaudeObservedHighWaterFromAuth(auth *cliproxyauth.Auth) bool {
+	profile, ok := claudePersistedHighWaterProfile(auth)
+	if !ok {
+		return false
+	}
+	claudeDeviceProfileCacheMu.Lock()
+	recordClaudeDeviceProfileObservation(claudeDeviceProfileGlobalObservationKey(), profile)
+	claudeDeviceProfileCacheMu.Unlock()
+	return true
+}
+
+func ClaudeObservedHighWaterForAuth(auth *cliproxyauth.Auth, apiKey string) (cliproxyauth.ClaudeDeviceHighWater, bool) {
+	observationKeys := claudeDeviceProfileObservationCacheKeys(auth, apiKey)
+
+	claudeDeviceProfileCacheMu.RLock()
+	profile, ok := claudeObservedHighWaterProfileLocked(observationKeys)
+	if !ok {
+		profile, ok = globalClaudeObservedHighWaterProfileLocked()
+	}
+	claudeDeviceProfileCacheMu.RUnlock()
+	if !ok || profile.UserAgent == "" || !profile.hasVersion {
+		return cliproxyauth.ClaudeDeviceHighWater{}, false
+	}
+	return cliproxyauth.ClaudeDeviceHighWater{
+		UserAgent:      profile.UserAgent,
+		Version:        profile.VersionString(),
+		PackageVersion: profile.PackageVersion,
+		RuntimeVersion: profile.RuntimeVersion,
+		OS:             profile.OS,
+		Arch:           profile.Arch,
+		Source:         "observed",
+		LastSeenAt:     time.Now().UTC().Format(time.RFC3339),
+	}, true
 }
 
 func ResolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers http.Header, cfg *config.Config) ClaudeDeviceProfile {
@@ -354,6 +472,7 @@ func resolveClaudeDeviceProfileLocal(auth *cliproxyauth.Auth, apiKey string, hea
 		}
 
 		claudeDeviceProfileCacheMu.Lock()
+		recordClaudeDeviceProfileObservation(cacheKey, candidate)
 		entry, hasCached = claudeDeviceProfileCache[cacheKey]
 		cachedValid = hasCached && entry.expire.After(now) && entry.profile.UserAgent != ""
 		if cachedValid {
@@ -413,6 +532,9 @@ func resolveClaudeDeviceProfileHome(ctx context.Context, client claudeDeviceProf
 	if ClaudeDeviceProfileBeforeCandidateStore != nil {
 		ClaudeDeviceProfileBeforeCandidateStore(candidate)
 	}
+	claudeDeviceProfileCacheMu.Lock()
+	recordClaudeDeviceProfileObservation(claudeDeviceProfileCacheKey(auth, apiKey), candidate)
+	claudeDeviceProfileCacheMu.Unlock()
 
 	cached, found, errRead := readClaudeDeviceProfileValueFromHome(ctx, client, valueKey, baseline)
 	if errRead != nil {

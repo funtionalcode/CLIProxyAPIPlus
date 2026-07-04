@@ -449,6 +449,52 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
+// RaiseClaudeDeviceHighWater monotonically raises the persisted Claude client
+// device-profile high-water mark stored in auth metadata. It writes only when
+// the incoming observed version is strictly newer than the current one.
+func (m *Manager) RaiseClaudeDeviceHighWater(ctx context.Context, authID string, profile ClaudeDeviceHighWater) (bool, error) {
+	if m == nil {
+		return false, nil
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" || !profile.valid() {
+		return false, nil
+	}
+	incomingVersion, ok := profile.parsedVersion()
+	if !ok {
+		return false, nil
+	}
+
+	m.mu.Lock()
+	existing, ok := m.auths[authID]
+	if !ok || existing == nil {
+		m.mu.Unlock()
+		return false, nil
+	}
+
+	if current, hasCurrent := ClaudeDeviceHighWaterFromMetadata(existing.Metadata); hasCurrent {
+		if currentVersion, currentOK := current.parsedVersion(); currentOK && incomingVersion.compare(currentVersion) <= 0 {
+			m.mu.Unlock()
+			return false, nil
+		}
+	}
+
+	if existing.Metadata == nil {
+		existing.Metadata = make(map[string]any)
+	}
+	existing.Metadata[ClaudeDeviceHighWaterMetadataKey] = claudeDeviceHighWaterToMetadataMap(profile)
+	snapshot := existing.Clone()
+	m.mu.Unlock()
+
+	if snapshot == nil {
+		return true, nil
+	}
+	if err := m.persist(ctx, snapshot); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // HomeEnabled reports whether the home control plane integration is enabled in the runtime config.
 func (m *Manager) HomeEnabled() bool {
 	if m == nil {
