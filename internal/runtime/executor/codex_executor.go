@@ -128,6 +128,11 @@ func codexTerminalStreamErr(eventData []byte) (statusErr, []byte, bool) {
 		if len(body) == 0 {
 			body = codexTerminalErrorBody(eventData, "error")
 		}
+	case "":
+		body = codexTerminalErrorBody(eventData, "error")
+		if len(body) == 0 {
+			body = codexTerminalErrorBody(eventData, "body.error")
+		}
 	default:
 		return statusErr{}, nil, false
 	}

@@ -482,6 +482,86 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 }
 
+func TestManagerExecuteStream_UsageLimitFallsBackToNextCodexAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "codex",
+		streamFirstErrors: map[string]error{
+			"aa-free-auth": &retryAfterStatusError{
+				status:     http.StatusTooManyRequests,
+				message:    `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"free","resets_in_seconds":300}}`,
+				retryAfter: 5 * time.Minute,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "gpt-5"
+	freeAuth := &Auth{
+		ID:         "aa-free-auth",
+		Provider:   "codex",
+		Attributes: map[string]string{"plan_type": "free"},
+	}
+	proAuth := &Auth{
+		ID:         "bb-pro-auth",
+		Provider:   "codex",
+		Attributes: map[string]string{"plan_type": "pro"},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(freeAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(proAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(freeAuth.ID)
+		reg.UnregisterClient(proAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), freeAuth); errRegister != nil {
+		t.Fatalf("register free auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), proAuth); errRegister != nil {
+		t.Fatalf("register pro auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	for i := 0; i < 2; i++ {
+		streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"codex"}, request, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute stream %d error = %v, want success", i, errExecute)
+		}
+		var payload []byte
+		for chunk := range streamResult.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("execute stream %d chunk error = %v, want success", i, chunk.Err)
+			}
+			payload = append(payload, chunk.Payload...)
+		}
+		if string(payload) != proAuth.ID {
+			t.Fatalf("execute stream %d payload = %q, want %q", i, string(payload), proAuth.ID)
+		}
+	}
+
+	got := executor.StreamCalls()
+	want := []string{freeAuth.ID, proAuth.ID, proAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedFree, ok := m.GetByID(freeAuth.ID)
+	if !ok || updatedFree == nil {
+		t.Fatalf("expected free auth to remain registered")
+	}
+	state := updatedFree.ModelStates[model]
+	if state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() || !state.Quota.Exceeded {
+		t.Fatalf("free auth model state not cooled down: %+v", state)
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

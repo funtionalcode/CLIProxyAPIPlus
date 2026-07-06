@@ -236,6 +236,23 @@ func TestCodexTerminalStreamErrHandlesUsageLimitErrorEvent(t *testing.T) {
 	}
 }
 
+func TestCodexTerminalStreamErrHandlesUsageLimitEnvelopeWithoutEventType(t *testing.T) {
+	streamErr, _, ok := codexTerminalStreamErr([]byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"free","resets_in_seconds":300}}`))
+	if !ok {
+		t.Fatal("expected usage_limit_reached envelope to be handled")
+	}
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	retryAfter := streamErr.RetryAfter()
+	if retryAfter == nil {
+		t.Fatal("expected retryAfter from usage_limit_reached envelope")
+	}
+	if *retryAfter != 300*time.Second {
+		t.Fatalf("retryAfter = %v, want %v", *retryAfter, 300*time.Second)
+	}
+}
+
 func TestCodexTerminalStreamErrHandlesUsageLimitResponseFailed(t *testing.T) {
 	streamErr, _, ok := codexTerminalStreamErr([]byte(`{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":60}}}`))
 	if !ok {
