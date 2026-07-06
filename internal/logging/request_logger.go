@@ -655,9 +655,9 @@ func (l *FileRequestLogger) logRequestWithHostAndSources(url, host, method strin
 	}
 
 	// Generate filename with request ID
-	filename := l.generateFilename(url, requestID)
+	filename := l.generateFilename(url, body, requestID)
 	if force && !l.enabled {
-		filename = l.generateErrorFilename(url, requestID)
+		filename = l.generateErrorFilename(url, body, requestID)
 	}
 	filePath := filepath.Join(l.logsDir, filename)
 
@@ -726,7 +726,7 @@ func (l *FileRequestLogger) logRequestWithHostAndSources(url, host, method strin
 
 	// Write success log if enabled and response is successful (2xx)
 	if l.successEnabled && statusCode >= 200 && statusCode < 300 && !force {
-		successFilename := l.generateSuccessFilename(url, requestID)
+		successFilename := l.generateSuccessFilename(url, body, requestID)
 		successFilePath := filepath.Join(l.logsDir, successFilename)
 
 		successFile, errOpen := os.OpenFile(successFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -811,7 +811,7 @@ func (l *FileRequestLogger) logStreamingRequestWithHost(url, host, method string
 	}
 
 	// Generate filename with request ID
-	filename := l.generateFilename(url, requestID)
+	filename := l.generateFilename(url, body, requestID)
 	filePath := filepath.Join(l.logsDir, filename)
 
 	requestHeaders := make(map[string][]string, len(headers))
@@ -856,13 +856,13 @@ func (l *FileRequestLogger) logStreamingRequestWithHost(url, host, method string
 }
 
 // generateErrorFilename creates a filename with an error prefix to differentiate forced error logs.
-func (l *FileRequestLogger) generateErrorFilename(url string, requestID ...string) string {
-	return fmt.Sprintf("error-%s", l.generateFilename(url, requestID...))
+func (l *FileRequestLogger) generateErrorFilename(url string, body []byte, requestID ...string) string {
+	return fmt.Sprintf("error-%s", l.generateFilename(url, body, requestID...))
 }
 
 // generateSuccessFilename creates a filename with a success prefix to differentiate success logs.
-func (l *FileRequestLogger) generateSuccessFilename(url string, requestID ...string) string {
-	return fmt.Sprintf("success-%s", l.generateFilename(url, requestID...))
+func (l *FileRequestLogger) generateSuccessFilename(url string, body []byte, requestID ...string) string {
+	return fmt.Sprintf("success-%s", l.generateFilename(url, body, requestID...))
 }
 
 // ensureLogsDir creates the logs directory if it doesn't exist.
@@ -876,43 +876,83 @@ func (l *FileRequestLogger) ensureLogsDir() error {
 	return nil
 }
 
-// generateFilename creates a sanitized filename from the URL path and current timestamp.
-// Format: v1-responses-2025-12-23T195811-a1b2c3d4.log
+// generateFilename creates a sanitized filename from the requested model.
+// Format: gpt-5.5-a1b2c3d4.log
 //
 // Parameters:
-//   - url: The request URL
+//   - url: The request URL, used only as a fallback for path-based model APIs
+//   - body: The request body used to extract the top-level model
 //   - requestID: Optional request ID to include in filename
 //
 // Returns:
 //   - string: A sanitized filename for the log file
-func (l *FileRequestLogger) generateFilename(url string, requestID ...string) string {
-	// Extract path from URL
-	path := url
-	if strings.Contains(url, "?") {
-		path = strings.Split(url, "?")[0]
-	}
+func (l *FileRequestLogger) generateFilename(url string, body []byte, requestID ...string) string {
+	model := l.requestModelName(url, body)
+	sanitized := l.sanitizeForFilename(model)
 
-	// Remove leading slash
-	if strings.HasPrefix(path, "/") {
-		path = path[1:]
-	}
-
-	// Sanitize path for filename
-	sanitized := l.sanitizeForFilename(path)
-
-	// Add timestamp
-	timestamp := time.Now().Format("2006-01-02T150405")
-
-	// Use request ID if provided, otherwise use sequential ID
 	var idPart string
 	if len(requestID) > 0 && requestID[0] != "" {
-		idPart = requestID[0]
+		idPart = l.sanitizeForFilename(requestID[0])
 	} else {
 		id := requestLogID.Add(1)
 		idPart = fmt.Sprintf("%d", id)
 	}
 
-	return fmt.Sprintf("%s-%s-%s.log", sanitized, timestamp, idPart)
+	return fmt.Sprintf("%s-%s.log", sanitized, idPart)
+}
+
+func (l *FileRequestLogger) requestModelName(rawURL string, body []byte) string {
+	if model := modelNameFromRequestBody(body); model != "" {
+		return model
+	}
+	if model := modelNameFromRequestURL(rawURL); model != "" {
+		return model
+	}
+	return "unknown-model"
+}
+
+func modelNameFromRequestBody(body []byte) string {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	for _, key := range []string{"model", "model_name", "modelName", "model_id", "modelId"} {
+		if value, ok := payload[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func modelNameFromRequestURL(rawURL string) string {
+	parsed, errParse := url.Parse(rawURL)
+	path := rawURL
+	if errParse == nil && parsed.Path != "" {
+		path = parsed.Path
+	} else if strings.Contains(path, "?") {
+		path = strings.Split(path, "?")[0]
+	}
+	marker := "/models/"
+	index := strings.Index(path, marker)
+	if index < 0 {
+		return ""
+	}
+	model := path[index+len(marker):]
+	if slash := strings.Index(model, "/"); slash >= 0 {
+		model = model[:slash]
+	}
+	if colon := strings.Index(model, ":"); colon >= 0 {
+		model = model[:colon]
+	}
+	if decoded, errUnescape := url.PathUnescape(model); errUnescape == nil {
+		model = decoded
+	}
+	return strings.TrimSpace(model)
 }
 
 // sanitizeForFilename replaces characters that are not safe for filenames.
