@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -321,6 +322,11 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	if provider == "codex" {
+		if planType := inferCodexPlanType(metadata, id); planType != "" {
+			auth.Attributes["plan_type"] = planType
+		}
+	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
 }
@@ -406,6 +412,58 @@ func extractAccessToken(metadata map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func inferCodexPlanType(metadata map[string]any, fileName string) string {
+	for _, key := range []string{"plan_type", "plan", "account_type"} {
+		if value, ok := metadata[key].(string); ok {
+			if planType := normalizeAuthPlanType(value); planType != "" {
+				return planType
+			}
+		}
+	}
+	if idToken, ok := metadata["id_token"].(string); ok {
+		if claims, errParse := codexauth.ParseJWTToken(strings.TrimSpace(idToken)); errParse == nil && claims != nil {
+			if planType := normalizeAuthPlanType(claims.CodexAuthInfo.ChatgptPlanType); planType != "" {
+				return planType
+			}
+		}
+	}
+	return inferPlanTypeFromAuthFileName(fileName)
+}
+
+func inferPlanTypeFromAuthFileName(fileName string) string {
+	normalized := strings.ToLower(filepath.Base(strings.TrimSpace(fileName)))
+	if normalized == "" {
+		return ""
+	}
+	for _, plan := range []string{"prolite", "plus", "pro", "team", "free"} {
+		for _, marker := range []string{"-" + plan + ".", "-" + plan + "-", "_" + plan + ".", "_" + plan + "-", "." + plan + "."} {
+			if strings.Contains(normalized, marker) {
+				return plan
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeAuthPlanType(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return ""
+	}
+	switch normalized {
+	case "chatgpt pro", "chatgpt-pro":
+		return "pro"
+	case "chatgpt plus", "chatgpt-plus":
+		return "plus"
+	case "chatgpt team", "chatgpt-team", "business":
+		return "team"
+	case "chatgpt free", "chatgpt-free":
+		return "free"
+	default:
+		return normalized
+	}
 }
 
 func refreshGeminiAccessToken(tokenMap map[string]any, httpClient *http.Client) (string, error) {

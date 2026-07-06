@@ -1184,10 +1184,50 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
+		var bootstrapChunks []cliproxyexecutor.StreamChunk
+		bootstrapReleased := false
+		emitChunk := func(chunk cliproxyexecutor.StreamChunk) bool {
+			select {
+			case out <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		emitTranslated := func(chunks [][]byte, bootstrapOnly bool) bool {
+			if len(chunks) == 0 {
+				return true
+			}
+			if !bootstrapReleased && bootstrapOnly {
+				for i := range chunks {
+					if len(chunks[i]) == 0 {
+						continue
+					}
+					bootstrapChunks = append(bootstrapChunks, cliproxyexecutor.StreamChunk{Payload: chunks[i]})
+				}
+				return true
+			}
+			if !bootstrapReleased {
+				bootstrapReleased = true
+				for _, chunk := range bootstrapChunks {
+					if !emitChunk(chunk) {
+						return false
+					}
+				}
+				bootstrapChunks = nil
+			}
+			for i := range chunks {
+				if !emitChunk(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+					return false
+				}
+			}
+			return true
+		}
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
+			bootstrapOnly := codexStreamBootstrapOnlyLine(line)
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
@@ -1195,21 +1235,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Err: errClearReplay}:
-						case <-ctx.Done():
-						}
+						bootstrapChunks = nil
+						emitChunk(cliproxyexecutor.StreamChunk{Err: errClearReplay})
 						return
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-					case <-ctx.Done():
-					}
+					bootstrapChunks = nil
+					emitChunk(cliproxyexecutor.StreamChunk{Err: streamErr})
 					return
 				}
-				switch gjson.GetBytes(data, "type").String() {
+				dataType := gjson.GetBytes(data, "type").String()
+				bootstrapOnly = codexStreamBootstrapOnlyDataType(dataType)
+				switch dataType {
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed":
@@ -1225,20 +1263,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			translatedLine = applyCodexIdentityExposeResponsePayload(translatedLine, identityState)
 			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, originalPayload, body, translatedLine, &param)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
-				}
+			if !emitTranslated(chunks, bootstrapOnly) {
+				return
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
+			bootstrapChunks = nil
+			emitChunk(cliproxyexecutor.StreamChunk{Err: errScan})
+			return
+		}
+		if !bootstrapReleased && len(bootstrapChunks) > 0 {
+			for _, chunk := range bootstrapChunks {
+				if !emitChunk(chunk) {
+					return
+				}
 			}
 		}
 	}()
@@ -1921,6 +1961,26 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func codexStreamBootstrapOnlyLine(line []byte) bool {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return true
+	}
+	if bytes.HasPrefix(trimmed, []byte("event:")) {
+		return true
+	}
+	return bytes.HasPrefix(trimmed, []byte(":"))
+}
+
+func codexStreamBootstrapOnlyDataType(dataType string) bool {
+	switch strings.ToLower(strings.TrimSpace(dataType)) {
+	case "response.created", "response.in_progress", "response.queued":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {
