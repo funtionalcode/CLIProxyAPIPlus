@@ -813,6 +813,10 @@ func (l *FileRequestLogger) logStreamingRequestWithHost(url, host, method string
 	// Generate filename with request ID
 	filename := l.generateFilename(url, body, requestID)
 	filePath := filepath.Join(l.logsDir, filename)
+	successFilePath := ""
+	if l.successEnabled {
+		successFilePath = filepath.Join(l.logsDir, l.generateSuccessFilename(url, body, requestID))
+	}
 
 	requestHeaders := make(map[string][]string, len(headers))
 	for key, values := range headers {
@@ -835,18 +839,21 @@ func (l *FileRequestLogger) logStreamingRequestWithHost(url, host, method string
 
 	// Create streaming writer
 	writer := &FileStreamingLogWriter{
-		logFilePath:      filePath,
-		url:              url,
-		host:             host,
-		method:           method,
-		timestamp:        time.Now(),
-		requestHeaders:   requestHeaders,
-		requestBodyPath:  requestBodyPath,
-		responseBodyPath: responseBodyPath,
-		responseBodyFile: responseBodyFile,
-		chunkChan:        make(chan []byte, 100), // Buffered channel for async writes
-		closeChan:        make(chan struct{}),
-		errorChan:        make(chan error, 1),
+		logFilePath:         filePath,
+		successLogFilePath:  successFilePath,
+		logsDir:             l.logsDir,
+		successLogsMaxFiles: l.successLogsMaxFiles,
+		url:                 url,
+		host:                host,
+		method:              method,
+		timestamp:           time.Now(),
+		requestHeaders:      requestHeaders,
+		requestBodyPath:     requestBodyPath,
+		responseBodyPath:    responseBodyPath,
+		responseBodyFile:    responseBodyFile,
+		chunkChan:           make(chan []byte, 100), // Buffered channel for async writes
+		closeChan:           make(chan struct{}),
+		errorChan:           make(chan error, 1),
 	}
 
 	// Start async writer goroutine
@@ -1051,11 +1058,19 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 
 // cleanupOldSuccessLogs keeps only the newest successLogsMaxFiles success log files.
 func (l *FileRequestLogger) cleanupOldSuccessLogs() error {
-	if l.successLogsMaxFiles <= 0 {
+	return cleanupOldSuccessLogs(l.logsDir, l.successLogsMaxFiles)
+}
+
+func cleanupOldSuccessLogs(logsDir string, successLogsMaxFiles int) error {
+	return cleanupOldPrefixedLogs(logsDir, "success-", successLogsMaxFiles, "success")
+}
+
+func cleanupOldPrefixedLogs(logsDir, prefix string, maxFiles int, label string) error {
+	if maxFiles <= 0 {
 		return nil
 	}
 
-	entries, errRead := os.ReadDir(l.logsDir)
+	entries, errRead := os.ReadDir(logsDir)
 	if errRead != nil {
 		return errRead
 	}
@@ -1071,18 +1086,18 @@ func (l *FileRequestLogger) cleanupOldSuccessLogs() error {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasPrefix(name, "success-") || !strings.HasSuffix(name, ".log") {
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".log") {
 			continue
 		}
 		info, errInfo := entry.Info()
 		if errInfo != nil {
-			log.WithError(errInfo).Warn("failed to read success log info")
+			log.WithError(errInfo).Warnf("failed to read %s log info", label)
 			continue
 		}
 		files = append(files, logFile{name: name, modTime: info.ModTime()})
 	}
 
-	if len(files) <= l.successLogsMaxFiles {
+	if len(files) <= maxFiles {
 		return nil
 	}
 
@@ -1090,9 +1105,9 @@ func (l *FileRequestLogger) cleanupOldSuccessLogs() error {
 		return files[i].modTime.After(files[j].modTime)
 	})
 
-	for _, file := range files[l.successLogsMaxFiles:] {
-		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
-			log.WithError(errRemove).Warnf("failed to remove old success log: %s", file.name)
+	for _, file := range files[maxFiles:] {
+		if errRemove := os.Remove(filepath.Join(logsDir, file.name)); errRemove != nil {
+			log.WithError(errRemove).Warnf("failed to remove old %s log: %s", label, file.name)
 		}
 	}
 
@@ -1830,6 +1845,15 @@ type FileStreamingLogWriter struct {
 	// logFilePath is the final log file path.
 	logFilePath string
 
+	// successLogFilePath is the optional duplicate success request log path.
+	successLogFilePath string
+
+	// logsDir is the directory used for success log cleanup.
+	logsDir string
+
+	// successLogsMaxFiles limits retained success request logs.
+	successLogsMaxFiles int
+
 	// url is the request URL (masked upstream in middleware).
 	url string
 
@@ -2050,6 +2074,10 @@ func (w *FileStreamingLogWriter) Close() error {
 		}
 	}
 
+	if writeErr == nil && w.shouldWriteSuccessLog() {
+		w.writeSuccessLog()
+	}
+
 	w.cleanupTempFiles()
 	return writeErr
 }
@@ -2119,6 +2147,29 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 	}()
 
 	return writeResponseSection(logFile, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false)
+}
+
+func (w *FileStreamingLogWriter) shouldWriteSuccessLog() bool {
+	return w.successLogFilePath != "" && w.statusWritten && w.responseStatus >= 200 && w.responseStatus < 300
+}
+
+func (w *FileStreamingLogWriter) writeSuccessLog() {
+	successFile, errOpen := os.OpenFile(w.successLogFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if errOpen != nil {
+		log.WithError(errOpen).Warn("failed to create success request log file")
+		return
+	}
+	writeErr := w.writeFinalLog(successFile)
+	if errClose := successFile.Close(); errClose != nil {
+		log.WithError(errClose).Warn("failed to close success request log file")
+	}
+	if writeErr != nil {
+		log.WithError(writeErr).Warn("failed to write success request log")
+		return
+	}
+	if errCleanup := cleanupOldSuccessLogs(w.logsDir, w.successLogsMaxFiles); errCleanup != nil {
+		log.WithError(errCleanup).Warn("failed to clean up old success logs")
+	}
 }
 
 func (w *FileStreamingLogWriter) cleanupTempFiles() {

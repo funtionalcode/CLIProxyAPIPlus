@@ -109,6 +109,38 @@ func TestFileRequestLoggerUsesRequestModelInStreamingFilename(t *testing.T) {
 	}
 }
 
+func TestFileRequestLoggerUsesRequestModelInStreamingSuccessFilename(t *testing.T) {
+	t.Parallel()
+
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0, 0)
+	logger.SetSuccessEnabled(true)
+
+	writer, errLog := logger.LogStreamingRequest(
+		"/v1/responses",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"model":"gpt-5.5","stream":true}`),
+		"stream-success-1",
+	)
+	if errLog != nil {
+		t.Fatalf("LogStreamingRequest() error = %v", errLog)
+	}
+	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+		t.Fatalf("WriteStatus() error = %v", errStatus)
+	}
+	writer.WriteChunkAsync([]byte("data: ok\n\n"))
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("Close() error = %v", errClose)
+	}
+
+	got := logFileNames(t, logsDir)
+	want := []string{"gpt-5.5-stream-success-1.log", "success-gpt-5.5-stream-success-1.log"}
+	if !equalStringSlices(got, want) {
+		t.Fatalf("log filenames = %#v, want %#v", got, want)
+	}
+}
+
 func TestFileRequestLoggerUsesURLModelFallback(t *testing.T) {
 	t.Parallel()
 
