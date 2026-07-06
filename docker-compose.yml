@@ -23,7 +23,7 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-        # 启用 BuildKit 特性
+        # Enable BuildKit features.
         BUILDKIT_INLINE_CACHE: 1
     container_name: cli-proxy-api
     network_mode: host
@@ -48,11 +48,13 @@ services:
     restart: unless-stopped
 
   cpa-manager:
+    profiles:
+      - usage
     image: seakee/cpa-manager:latest
-    container_name: cpa-manager
+    container_name: ${CPA_MANAGER_CONTAINER_NAME:-cpa-manager}
     restart: unless-stopped
     ports:
-      - "18317:18317"
+      - "${CPA_MANAGER_PORT:-18317}:18317"
     environment:
       HTTP_ADDR: "0.0.0.0:18317"
       USAGE_DB_PATH: "/data/usage.sqlite"
