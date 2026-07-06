@@ -1192,12 +1192,15 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 	if len(payload) == 0 {
 		return nil, false
 	}
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "error" {
+	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "error" && !codexWebsocketErrorEnvelope(payload) {
 		return nil, false
 	}
 	status := int(gjson.GetBytes(payload, "status").Int())
 	if status == 0 {
 		status = int(gjson.GetBytes(payload, "status_code").Int())
+	}
+	if status == 0 {
+		status = inferCodexWebsocketErrorStatus(payload)
 	}
 	if status <= 0 {
 		return nil, false
@@ -1216,6 +1219,26 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 		statusErr: statusError,
 		headers:   headers,
 	}, true
+}
+
+func codexWebsocketErrorEnvelope(payload []byte) bool {
+	return gjson.GetBytes(payload, "error").Exists() || gjson.GetBytes(payload, "body.error").Exists()
+}
+
+func inferCodexWebsocketErrorStatus(payload []byte) int {
+	if isCodexWebsocketUsageLimitError(payload) || isCodexModelCapacityError(payload) {
+		return http.StatusTooManyRequests
+	}
+	return 0
+}
+
+func isCodexWebsocketUsageLimitError(payload []byte) bool {
+	for _, path := range []string{"error.type", "body.error.type", "body.type", "type"} {
+		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, path).String()), "usage_limit_reached") {
+			return true
+		}
+	}
+	return false
 }
 
 func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
