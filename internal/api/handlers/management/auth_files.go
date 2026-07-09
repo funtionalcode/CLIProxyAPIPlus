@@ -4241,6 +4241,11 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+
 	fmt.Println("Initializing xAI authentication...")
 
 	pkceCodes, errPKCE := xaiauth.GeneratePKCECodes()
@@ -4264,7 +4269,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		return
 	}
 
-	authSvc := xaiauth.NewXAIAuth(h.cfg)
+	authSvc := xaiauth.NewXAIAuth(withLoginProxy(h.cfg, loginProxy))
 	discovery, errDiscover := authSvc.Discover(ctx)
 	if errDiscover != nil {
 		log.Errorf("Failed to discover xAI OAuth endpoints: %v", errDiscover)
@@ -4387,6 +4392,9 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		if tokenStorage.Subject != "" {
 			metadata["sub"] = tokenStorage.Subject
 		}
+		if loginProxy != "" {
+			metadata["proxy_url"] = loginProxy
+		}
 
 		record := &coreauth.Auth{
 			ID:       fileName,
@@ -4394,6 +4402,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 			FileName: fileName,
 			Label:    label,
 			Storage:  tokenStorage,
+			ProxyURL: loginProxy,
 			Metadata: metadata,
 			Attributes: map[string]string{
 				"auth_kind": "oauth",

@@ -66,6 +66,7 @@ func (a XAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 		return nil, fmt.Errorf("xai nonce generation failed: %w", err)
 	}
 
+	cfg = CloneCfgWithProxy(cfg, opts.ProxyURL)
 	authSvc := xaiauth.NewXAIAuth(cfg)
 	discovery, err := authSvc.Discover(ctx)
 	if err != nil {
@@ -184,12 +185,20 @@ waitForCallback:
 		return nil, fmt.Errorf("xai token storage missing access token")
 	}
 
+	fmt.Println("xAI authentication successful")
+
+	return buildXAIAuthRecord(a.Provider(), tokenStorage, opts.ProxyURL), nil
+}
+
+func buildXAIAuthRecord(provider string, tokenStorage *xaiauth.TokenStorage, proxyURL string) *coreauth.Auth {
+	if tokenStorage == nil {
+		return nil
+	}
 	fileName := xaiauth.CredentialFileName(tokenStorage.Email, tokenStorage.Subject)
 	label := strings.TrimSpace(tokenStorage.Email)
 	if label == "" {
 		label = "xAI"
 	}
-
 	metadata := map[string]any{
 		"type":           "xai",
 		"access_token":   tokenStorage.AccessToken,
@@ -210,21 +219,24 @@ waitForCallback:
 	if tokenStorage.Subject != "" {
 		metadata["sub"] = tokenStorage.Subject
 	}
-
-	fmt.Println("xAI authentication successful")
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL != "" {
+		metadata["proxy_url"] = proxyURL
+	}
 
 	return &coreauth.Auth{
 		ID:       fileName,
-		Provider: a.Provider(),
+		Provider: provider,
 		FileName: fileName,
 		Label:    label,
 		Storage:  tokenStorage,
+		ProxyURL: proxyURL,
 		Metadata: metadata,
 		Attributes: map[string]string{
 			"auth_kind": "oauth",
 			"base_url":  tokenStorage.BaseURL,
 		},
-	}, nil
+	}
 }
 
 func parseXAIManualCallbackToken(input string, state string) (callbackResult, bool, error) {

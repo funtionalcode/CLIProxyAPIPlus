@@ -931,6 +931,25 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 	}
 }
 
+func TestNewProxyAwareWebsocketDialerSOCKS5UsesSOCKSDialerForTLS(t *testing.T) {
+	t.Parallel()
+
+	dialer := newProxyAwareWebsocketDialer(
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "socks5://proxy.example.com:1080"}},
+		nil,
+	)
+
+	if dialer.Proxy != nil {
+		t.Fatal("expected websocket proxy function to be nil for SOCKS mode")
+	}
+	if dialer.NetDialContext == nil {
+		t.Fatal("NetDialContext is nil, want SOCKS dialer")
+	}
+	if dialer.NetDialTLSContext != nil {
+		t.Fatal("NetDialTLSContext must be nil for SOCKS mode so WSS uses NetDialContext")
+	}
+}
+
 func TestNewProxyAwareWebsocketDialerUsesCodexFingerprintTLSForDirectWSS(t *testing.T) {
 	t.Parallel()
 

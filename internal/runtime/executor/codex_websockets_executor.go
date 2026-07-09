@@ -829,6 +829,7 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 		dialer.NetDialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
 			return socksDialer.Dial(network, addr)
 		}
+		dialer.NetDialTLSContext = nil
 	case "http", "https":
 		dialer.Proxy = http.ProxyURL(setting.URL)
 	default:
