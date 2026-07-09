@@ -5,6 +5,7 @@ FROM golang:1.26-bookworm AS builder
 WORKDIR /app
 
 RUN set -eux; \
+    apt_no_proxy() { env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u FTP_PROXY -u http_proxy -u https_proxy -u all_proxy -u ftp_proxy "$@"; }; \
     printf '%s\n' \
         'Acquire::Retries "5";' \
         'Acquire::http::Pipeline-Depth "0";' \
@@ -12,8 +13,8 @@ RUN set -eux; \
         'Acquire::http::No-Cache "true";' \
         'Acquire::BrokenProxy "true";' \
         > /etc/apt/apt.conf.d/99proxy-retries; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends build-essential git; \
+    apt_no_proxy apt-get update; \
+    apt_no_proxy apt-get install -y --no-install-recommends build-essential git; \
     rm -rf /var/lib/apt/lists/*
 
 ARG HTTP_PROXY
@@ -57,6 +58,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install base runtime dependencies.
 RUN set -eux; \
+    apt_no_proxy() { env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u FTP_PROXY -u http_proxy -u https_proxy -u all_proxy -u ftp_proxy "$@"; }; \
     printf '%s\n' \
         'Acquire::Retries "5";' \
         'Acquire::http::Pipeline-Depth "0";' \
@@ -64,8 +66,8 @@ RUN set -eux; \
         'Acquire::http::No-Cache "true";' \
         'Acquire::BrokenProxy "true";' \
         > /etc/apt/apt.conf.d/99proxy-retries; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
+    apt_no_proxy apt-get update; \
+    apt_no_proxy apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     python3 \
@@ -94,10 +96,12 @@ RUN set -eux; \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Playwright.
-RUN python3 -m venv /opt/playwright-venv \
-    && /opt/playwright-venv/bin/pip install --no-cache-dir playwright \
-    && /opt/playwright-venv/bin/python -m playwright install chromium \
-    && /opt/playwright-venv/bin/python -m playwright install-deps chromium
+RUN set -eux; \
+    apt_no_proxy() { env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u FTP_PROXY -u http_proxy -u https_proxy -u all_proxy -u ftp_proxy "$@"; }; \
+    python3 -m venv /opt/playwright-venv; \
+    /opt/playwright-venv/bin/pip install --no-cache-dir playwright; \
+    /opt/playwright-venv/bin/python -m playwright install chromium; \
+    apt_no_proxy /opt/playwright-venv/bin/python -m playwright install-deps chromium
 
 ENV PATH="/opt/playwright-venv/bin:${PATH}"
 
