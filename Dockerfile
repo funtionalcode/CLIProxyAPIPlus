@@ -4,7 +4,17 @@ FROM golang:1.26-bookworm AS builder
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential git && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::http::Pipeline-Depth "0";' \
+        'Acquire::https::Pipeline-Depth "0";' \
+        'Acquire::http::No-Cache "true";' \
+        'Acquire::BrokenProxy "true";' \
+        > /etc/apt/apt.conf.d/99proxy-retries; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends build-essential git; \
+    rm -rf /var/lib/apt/lists/*
 
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
@@ -46,7 +56,16 @@ FROM debian:bookworm
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install base runtime dependencies.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN set -eux; \
+    printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::http::Pipeline-Depth "0";' \
+        'Acquire::https::Pipeline-Depth "0";' \
+        'Acquire::http::No-Cache "true";' \
+        'Acquire::BrokenProxy "true";' \
+        > /etc/apt/apt.conf.d/99proxy-retries; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     python3 \
