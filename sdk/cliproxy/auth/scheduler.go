@@ -505,6 +505,101 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
+	if picked, providerKey := s.pickMixedSessionAffinityLocked(ctx, normalized, model, opts, candidateShards, bestPriority, strategy, effectiveWeighted, predicate); picked != nil {
+		return picked, providerKey, nil
+	}
+	if picked, providerKey := s.pickMixedReadyLocked(normalized, modelKey, candidateShards, bestPriority, strategy, effectiveWeighted, predicate); picked != nil {
+		return picked, providerKey, nil
+	}
+	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+}
+
+func (s *authScheduler) pickMixedSessionAffinityLocked(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, candidateShards []*modelScheduler, bestPriority int, strategy schedulerStrategy, weighted bool, predicate func(*scheduledAuth) bool) (*Auth, string) {
+	affinity, ok := s.selector.(*SessionAffinitySelector)
+	if !ok {
+		return nil, ""
+	}
+	cache := affinity.sessionCache()
+	if cache == nil {
+		return nil, ""
+	}
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primaryID == "" {
+		return nil, ""
+	}
+	cacheKey := mixedSessionAffinityCacheKey(providers, primaryID, model)
+	if cachedAuthID, okCache := cache.GetAndRefresh(cacheKey); okCache {
+		if auth, providerKey := s.readyMixedAuthLocked(providers, candidateShards, cachedAuthID, bestPriority, weighted, predicate); auth != nil {
+			selectorLogEntry(ctx).Infof("session-affinity: mixed scheduler cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, providerKey, model)
+			return auth, providerKey
+		}
+		return s.reselectMixedSessionAffinityLocked(ctx, providers, model, primaryID, cacheKey, candidateShards, bestPriority, strategy, weighted, predicate)
+	}
+	if fallbackID != "" && fallbackID != primaryID {
+		fallbackKey := mixedSessionAffinityCacheKey(providers, fallbackID, model)
+		if cachedAuthID, okCache := cache.Get(fallbackKey); okCache {
+			if auth, providerKey := s.readyMixedAuthLocked(providers, candidateShards, cachedAuthID, bestPriority, weighted, predicate); auth != nil {
+				cache.Set(cacheKey, auth.ID)
+				selectorLogEntry(ctx).Infof("session-affinity: mixed scheduler fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, providerKey, model)
+				return auth, providerKey
+			}
+		}
+	}
+	return s.reselectMixedSessionAffinityLocked(ctx, providers, model, primaryID, cacheKey, candidateShards, bestPriority, strategy, weighted, predicate)
+}
+
+func (s *authScheduler) reselectMixedSessionAffinityLocked(ctx context.Context, providers []string, model, primaryID, cacheKey string, candidateShards []*modelScheduler, bestPriority int, strategy schedulerStrategy, weighted bool, predicate func(*scheduledAuth) bool) (*Auth, string) {
+	affinity, ok := s.selector.(*SessionAffinitySelector)
+	if !ok {
+		return nil, ""
+	}
+	cache := affinity.sessionCache()
+	if cache == nil {
+		return nil, ""
+	}
+	auth, providerKey := s.pickMixedReadyLocked(providers, canonicalModelKey(model), candidateShards, bestPriority, strategy, weighted, predicate)
+	if auth == nil {
+		return nil, ""
+	}
+	cache.Set(cacheKey, auth.ID)
+	selectorLogEntry(ctx).Infof("session-affinity: mixed scheduler cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, providerKey, model)
+	return auth, providerKey
+}
+
+func (s *authScheduler) readyMixedAuthLocked(providers []string, candidateShards []*modelScheduler, authID string, bestPriority int, weighted bool, predicate func(*scheduledAuth) bool) (*Auth, string) {
+	providerKey := s.authProviders[authID]
+	if providerKey == "" {
+		return nil, ""
+	}
+	for providerIndex, candidateProvider := range providers {
+		if candidateProvider != providerKey || providerIndex >= len(candidateShards) {
+			continue
+		}
+		shard := candidateShards[providerIndex]
+		if shard == nil {
+			return nil, ""
+		}
+		var auth *Auth
+		if weighted {
+			auth = shard.readyAuthLocked(false, authID, predicate)
+		} else {
+			auth = shard.readyAuthAtPriorityLocked(false, bestPriority, authID, predicate)
+		}
+		if auth == nil {
+			return nil, ""
+		}
+		return auth, providerKey
+	}
+	return nil, ""
+}
+
+func mixedSessionAffinityCacheKey(providers []string, sessionID, model string) string {
+	cacheProviders := append([]string(nil), providers...)
+	sort.Strings(cacheProviders)
+	return "mixed:" + strings.Join(cacheProviders, ",") + "::" + sessionID + "::" + model
+}
+
+func (s *authScheduler) pickMixedReadyLocked(normalized []string, modelKey string, candidateShards []*modelScheduler, bestPriority int, strategy schedulerStrategy, effectiveWeighted bool, predicate func(*scheduledAuth) bool) (*Auth, string) {
 	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
@@ -513,10 +608,10 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			}
 			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, effectiveWeighted, predicate)
 			if picked != nil {
-				return picked, providerKey, nil
+				return picked, providerKey
 			}
 		}
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+		return nil, ""
 	}
 
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
@@ -537,7 +632,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		segmentEnds[providerIndex] = totalWeight
 	}
 	if totalWeight == 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+		return nil, ""
 	}
 
 	startSlot := s.mixedCursors[cursorKey] % totalWeight
@@ -552,7 +647,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 	}
 	if startProviderIndex < 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+		return nil, ""
 	}
 
 	slot := startSlot
@@ -579,9 +674,9 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			continue
 		}
 		s.mixedCursors[cursorKey] = slot + 1
-		return picked, providerKey, nil
+		return picked, providerKey
 	}
-	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	return nil, ""
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.

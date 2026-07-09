@@ -412,6 +412,53 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_CarriesProviderAndKeyWeights(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "ProviderA",
+					BaseURL: "https://provider-a.example.com",
+					Weight:  2,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "provider-a-key"},
+					},
+				},
+				{
+					Name:    "ProviderB",
+					BaseURL: "https://provider-b.example.com",
+					Weight:  1,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "provider-b-key", Weight: 3},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	gotWeights := map[string]string{}
+	for _, auth := range auths {
+		gotWeights[auth.Provider] = auth.Attributes["weight"]
+	}
+	if gotWeights["providera"] != "2" {
+		t.Fatalf("providera weight = %q, want 2", gotWeights["providera"])
+	}
+	if gotWeights["providerb"] != "3" {
+		t.Fatalf("providerb weight = %q, want 3", gotWeights["providerb"])
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

@@ -429,6 +429,89 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_MixedProvidersSessionAffinitySticksAcrossProviders(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	scheduler := newSchedulerForTest(
+		selector,
+		&Auth{ID: "compat-a", Provider: "compat-a"},
+		&Auth{ID: "compat-b", Provider: "compat-a"},
+		&Auth{ID: "compat-c", Provider: "compat-b"},
+	)
+
+	headers := http.Header{}
+	headers.Set("X-Session-ID", "mixed-sticky-session")
+	opts := cliproxyexecutor.Options{Headers: headers}
+	first, provider, errPick := scheduler.pickMixed(context.Background(), []string{"compat-a", "compat-b"}, "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickMixed() first error = %v", errPick)
+	}
+	if first == nil {
+		t.Fatalf("pickMixed() first auth = nil")
+	}
+
+	for index := 0; index < 3; index++ {
+		got, gotProvider, errAgain := scheduler.pickMixed(context.Background(), []string{"compat-a", "compat-b"}, "", opts, nil)
+		if errAgain != nil {
+			t.Fatalf("pickMixed() repeat #%d error = %v", index, errAgain)
+		}
+		if got == nil {
+			t.Fatalf("pickMixed() repeat #%d auth = nil", index)
+		}
+		if got.ID != first.ID || gotProvider != provider {
+			t.Fatalf("pickMixed() repeat #%d = (%q, %q), want (%q, %q)", index, gotProvider, got.ID, provider, first.ID)
+		}
+	}
+}
+
+func TestSchedulerPick_MixedProvidersSessionAffinityNewBindingsUseWeight(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{Weighted: true},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+	scheduler := newSchedulerForTest(
+		selector,
+		&Auth{ID: "provider-a", Provider: "provider-a", Attributes: map[string]string{"weight": "2"}},
+		&Auth{ID: "provider-b", Provider: "provider-b", Attributes: map[string]string{"weight": "1"}},
+	)
+
+	want := []struct {
+		provider string
+		authID   string
+	}{
+		{provider: "provider-a", authID: "provider-a"},
+		{provider: "provider-a", authID: "provider-a"},
+		{provider: "provider-b", authID: "provider-b"},
+	}
+	for index, tc := range want {
+		headers := http.Header{}
+		headers.Set("X-Session-ID", "mixed-weighted-session-"+string(rune('a'+index)))
+		opts := cliproxyexecutor.Options{Headers: headers}
+		got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"provider-a", "provider-b"}, "", opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickMixed() #%d auth = nil", index)
+		}
+		if provider != tc.provider || got.ID != tc.authID {
+			t.Fatalf("pickMixed() #%d = (%q, %q), want (%q, %q)", index, provider, got.ID, tc.provider, tc.authID)
+		}
+
+		again, againProvider, errAgain := scheduler.pickMixed(context.Background(), []string{"provider-a", "provider-b"}, "", opts, nil)
+		if errAgain != nil {
+			t.Fatalf("pickMixed() #%d repeat error = %v", index, errAgain)
+		}
+		if again == nil || againProvider != tc.provider || again.ID != tc.authID {
+			t.Fatalf("pickMixed() #%d repeat = (%q, %v), want (%q, %q)", index, againProvider, again, tc.provider, tc.authID)
+		}
+	}
+}
+
 func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotation(t *testing.T) {
 	t.Parallel()
 
