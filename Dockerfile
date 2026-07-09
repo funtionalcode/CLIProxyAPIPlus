@@ -40,7 +40,16 @@ ENV HTTP_PROXY=${HTTP_PROXY} \
     GOSUMDB=${GOSUMDB}
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN set -eux; \
+    for attempt in 1 2 3 4 5; do \
+        if go mod download; then \
+            break; \
+        fi; \
+        if [ "${attempt}" = "5" ]; then \
+            exit 1; \
+        fi; \
+        sleep "$((attempt * 5))"; \
+    done
 
 COPY cmd/server/ ./cmd/server/
 COPY internal/ ./internal/
