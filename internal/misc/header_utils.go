@@ -11,24 +11,17 @@ import (
 )
 
 const (
-	// GeminiCLIVersion is the version string reported in the User-Agent for upstream requests.
-	GeminiCLIVersion = "0.34.0"
-
-	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
+	GeminiCLIVersion         = "0.34.0"
 	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
 )
 
-// geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.
 func geminiCLIOS() string {
-	switch runtime.GOOS {
-	case "windows":
+	if runtime.GOOS == "windows" {
 		return "win32"
-	default:
-		return runtime.GOOS
 	}
+	return runtime.GOOS
 }
 
-// geminiCLIArch maps Go runtime architecture names to the Node.js-style arch strings used by Gemini CLI.
 func geminiCLIArch() string {
 	switch runtime.GOARCH {
 	case "amd64":
@@ -40,8 +33,7 @@ func geminiCLIArch() string {
 	}
 }
 
-// GeminiCLIUserAgent returns a User-Agent string that matches the Gemini CLI format.
-// The model parameter is included in the UA; pass "" or "unknown" when the model is not applicable.
+// GeminiCLIUserAgent returns a User-Agent string matching Gemini CLI.
 func GeminiCLIUserAgent(model string) string {
 	if model == "" {
 		model = "unknown"

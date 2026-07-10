@@ -11,7 +11,7 @@ func TestCliFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	ctx := context.Background()
 	var param any
 
-	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_dir","args":{"path":"C:/"}}}]}}],"usageMetadata":{"trafficType":"ON_DEMAND"}}}`)
+	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_dir","args":{"path":"C:/"}}}]}}],"usageMetadata":{"trafficType":"ON_DEMAND"}}`)
 	result1 := ConvertCliResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 	if len(result1) != 1 {
 		t.Fatalf("expected 1 result from chunk1, got %d", len(result1))
@@ -21,10 +21,10 @@ func TestCliFinishReasonOnlyOnFinalChunk(t *testing.T) {
 		t.Fatalf("expected null finish_reason on tool chunk, got %v", fr1.String())
 	}
 
-	chunk2 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_dir","args":{"path":"D:/"}}}]}}],"usageMetadata":{"trafficType":"ON_DEMAND"}}}`)
+	chunk2 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_dir","args":{"path":"D:/"}}}]}}],"usageMetadata":{"trafficType":"ON_DEMAND"}}`)
 	ConvertCliResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
-	chunk3 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+	chunk3 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`)
 	result3 := ConvertCliResponseToOpenAI(ctx, "model", nil, nil, chunk3, &param)
 	if len(result3) != 1 {
 		t.Fatalf("expected 1 result from chunk3, got %d", len(result3))

@@ -330,10 +330,109 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDForDownstream(t *te
 	}
 }
 
+func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDWithoutPreviousResponseID(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPreviousIDs := make(chan string, 2)
+	releaseServer := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		for i := 0; i < 2; i++ {
+			_, payload, errRead := conn.ReadMessage()
+			if errRead != nil {
+				t.Errorf("read upstream websocket message: %v", errRead)
+				return
+			}
+			capturedPreviousIDs <- gjson.GetBytes(payload, "previous_response_id").String()
+			completed := []byte(`{"type":"response.completed","response":{"id":"resp-real","output":[{"id":"msg_resp-real","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+				t.Errorf("write completed websocket message: %v", errWrite)
+				return
+			}
+		}
+		<-releaseServer
+	}))
+	defer server.Close()
+	defer close(releaseServer)
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-id-map-no-prev",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-id-map-no-prev-session",
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	runRequest := func(content string) (string, string) {
+		body := []byte(fmt.Sprintf(`{"model":"grok-4.3","input":[{"type":"message","role":"user","content":%q}]}`, content))
+		result, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "grok-4.3", Payload: body}, opts)
+		if err != nil {
+			t.Fatalf("ExecuteStream() error = %v", err)
+		}
+		select {
+		case chunk, ok := <-result.Chunks:
+			if !ok {
+				t.Fatal("stream closed before completed chunk")
+			}
+			if chunk.Err != nil {
+				t.Fatalf("chunk error = %v", chunk.Err)
+			}
+			payload := bytes.TrimSpace(chunk.Payload)
+			return gjson.GetBytes(payload, "response.id").String(),
+				gjson.GetBytes(payload, "response.output.0.id").String()
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for completed chunk")
+		}
+		return "", ""
+	}
+
+	firstDownstreamID, firstOutputID := runRequest("first")
+	if firstDownstreamID != "resp-real" {
+		t.Fatalf("first downstream id = %q, want resp-real", firstDownstreamID)
+	}
+	if firstOutputID != "msg_resp-real" {
+		t.Fatalf("first output item id = %q, want msg_resp-real", firstOutputID)
+	}
+	if firstUpstreamPrevious := <-capturedPreviousIDs; firstUpstreamPrevious != "" {
+		t.Fatalf("first upstream previous_response_id = %q, want empty", firstUpstreamPrevious)
+	}
+
+	secondDownstreamID, secondOutputID := runRequest("second")
+	if secondDownstreamID == "" || secondDownstreamID == "resp-real" {
+		t.Fatalf("second downstream id = %q, want synthetic id different from resp-real", secondDownstreamID)
+	}
+	if secondOutputID == "msg_resp-real" || !strings.Contains(secondOutputID, secondDownstreamID) {
+		t.Fatalf("second output item id = %q, want rewritten id containing %q", secondOutputID, secondDownstreamID)
+	}
+	if secondUpstreamPrevious := <-capturedPreviousIDs; secondUpstreamPrevious != "" {
+		t.Fatalf("second upstream previous_response_id = %q, want empty", secondUpstreamPrevious)
+	}
+}
+
 func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedContext(t *testing.T) {
+	nativeEncryptedContent := testValidGrokEncryptedContent()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedWebsocketPayload := make(chan []byte, 1)
 	capturedCompactPayload := make(chan []byte, 1)
+	compactResponse := []byte(fmt.Sprintf(`{"id":"resp_compact","model":"grok-4.3","output":[{"type":"compaction","encrypted_content":%q}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`, nativeEncryptedContent))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/responses":
@@ -369,7 +468,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 			}
 			capturedCompactPayload <- bytes.Clone(body)
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"resp_compact","model":"grok-4.3","output":[{"type":"compaction","encrypted_content":"opaque"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+			_, _ = w.Write(compactResponse)
 		default:
 			t.Errorf("path = %q, want /responses", r.URL.Path)
 			http.Error(w, "unexpected path", http.StatusNotFound)
@@ -485,6 +584,9 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 		}
 		if got := input.Array()[0].Get("type").String(); got != "compaction" {
 			t.Fatalf("post-compaction input[0].type = %q, want compaction; payload=%s", got, payload)
+		}
+		if got := input.Array()[0].Get("encrypted_content").String(); got != nativeEncryptedContent {
+			t.Fatalf("post-compaction input[0].encrypted_content = %q, want native sample; payload=%s", got, payload)
 		}
 		if got := input.Array()[1].Get("id").String(); got != "msg-2" {
 			t.Fatalf("post-compaction input[1].id = %q, want msg-2; payload=%s", got, payload)
@@ -607,6 +709,102 @@ func TestXAIWebsocketsExecuteStreamCompletesGenerateFalseWarmup(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("timed out waiting for warmup stream to close; event types so far: %v", gotTypes)
 		}
+	}
+}
+
+func TestXAIWebsocketsExecuteStreamHandshakeFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
+	body := []byte(`{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for now."}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		if _, errWrite := w.Write(body); errWrite != nil {
+			t.Errorf("write handshake rejection: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth-free-usage",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":"hello"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	_, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err == nil {
+		t.Fatal("ExecuteStream() error = nil, want handshake rejection")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("status = %#v, want 429", err)
+	}
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected RetryAfter for free-usage-exhausted handshake error: %#v", err)
+	}
+	if got := *retryable.RetryAfter(); got != 24*time.Hour {
+		t.Fatalf("RetryAfter = %v, want 24h", got)
+	}
+	if got := err.Error(); got != string(body) {
+		t.Fatalf("error payload = %q, want %q", got, body)
+	}
+}
+
+func TestParseXAIWebsocketErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
+	payload := []byte(`{"type":"error","status":429,"error":{"code":"subscription:free-usage-exhausted","message":"You've used all the included free usage for now."}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected xAI websocket error")
+	}
+
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected RetryAfter for free-usage-exhausted websocket event: %#v", err)
+	}
+	if got := *retryable.RetryAfter(); got != 24*time.Hour {
+		t.Fatalf("RetryAfter = %v, want 24h", got)
+	}
+	parsed := gjson.Parse(err.Error())
+	if got := parsed.Get("status").Int(); got != http.StatusTooManyRequests {
+		t.Fatalf("error status = %d, want 429; payload=%s", got, err)
+	}
+	if got := parsed.Get("error.code").String(); got != "subscription:free-usage-exhausted" {
+		t.Fatalf("error code = %q, want free-usage-exhausted; payload=%s", got, err)
+	}
+}
+
+func TestParseXAIWebsocketBareErrorFreeUsageExhaustedSetsRetryAfter(t *testing.T) {
+	payload := []byte(`{"status":429,"error":{"code":"subscription:free-usage-exhausted","message":"You've used all the included free usage for now."}}`)
+	err, ok := parseXAIWebsocketError(payload)
+	if !ok {
+		t.Fatal("expected bare xAI websocket error")
+	}
+
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected RetryAfter for bare free-usage-exhausted websocket event: %#v", err)
+	}
+	if got := *retryable.RetryAfter(); got != 24*time.Hour {
+		t.Fatalf("RetryAfter = %v, want 24h", got)
+	}
+	parsed := gjson.Parse(err.Error())
+	if got := parsed.Get("type").String(); got != "error" {
+		t.Fatalf("error type = %q, want error; payload=%s", got, err)
+	}
+	if got := parsed.Get("error.code").String(); got != "subscription:free-usage-exhausted" {
+		t.Fatalf("error code = %q, want free-usage-exhausted; payload=%s", got, err)
 	}
 }
 

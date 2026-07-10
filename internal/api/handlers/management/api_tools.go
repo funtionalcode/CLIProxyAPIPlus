@@ -379,12 +379,11 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 		Endpoint:     google.Endpoint,
 	}
 
-	ctxToken := ctx
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
 		Transport: h.apiCallTransport(auth),
 	}
-	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
+	ctxToken := context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 
 	src := conf.TokenSource(ctxToken, &token)
 	currentToken, errToken := src.Token()
@@ -795,6 +794,10 @@ func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
 	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
 	case "gemini":
 		if entry := resolveAPIKeyConfig(cfg.GeminiKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
+	case "gemini-interactions":
+		if entry := resolveAPIKeyConfig(cfg.InteractionsKey, auth); entry != nil {
 			return strings.TrimSpace(entry.ProxyURL)
 		}
 	case "claude":

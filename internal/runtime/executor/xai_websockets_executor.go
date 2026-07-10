@@ -292,12 +292,13 @@ func (m *xaiWebsocketRequestIDMapper) downstreamIDForUpstreamResponse(upstreamRe
 	defer m.state.mu.Unlock()
 	m.upstreamResponseID = upstreamResponseID
 	m.downstreamResponseID = upstreamResponseID
-	if m.downstreamPreviousID != "" && m.upstreamPreviousID != "" && upstreamResponseID == m.upstreamPreviousID {
-		m.state.sequence++
-		m.downstreamResponseID = fmt.Sprintf("%s-xai-%d", upstreamResponseID, m.state.sequence)
-	}
 	if m.state.downstreamToUpstream == nil {
 		m.state.downstreamToUpstream = make(map[string]string)
+	}
+	_, upstreamResponseIDSeen := m.state.downstreamToUpstream[upstreamResponseID]
+	if (m.downstreamPreviousID != "" && m.upstreamPreviousID != "" && upstreamResponseID == m.upstreamPreviousID) || upstreamResponseIDSeen {
+		m.state.sequence++
+		m.downstreamResponseID = fmt.Sprintf("%s-xai-%d", upstreamResponseID, m.state.sequence)
 	}
 	m.state.downstreamToUpstream[upstreamResponseID] = upstreamResponseID
 	m.state.downstreamToUpstream[m.downstreamResponseID] = upstreamResponseID
@@ -401,6 +402,9 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		return e.executeCompactionTriggerFromWebsocketContext(ctx, auth, req, opts, idMapper)
 	}
 
+	// Keep websocket on the official API base URL (or an explicit non-default
+	// base_url). Do not reuse xaiChatBaseURL: cli-chat-proxy only accepts HTTP
+	// POST and returns 405 for websocket upgrades.
 	token, baseURL := xaiCreds(auth)
 	if baseURL == "" {
 		baseURL = xaiauth.DefaultAPIBaseURL
@@ -470,7 +474,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			if sess != nil {
 				sess.reqMu.Unlock()
 			}
-			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return nil, xaiStatusErr(respHS.StatusCode, bodyErr)
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		if sess != nil {
@@ -497,10 +501,14 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry != nil || connRetry == nil {
+				bodyErrRetry := websocketHandshakeBody(respHSRetry)
 				closeHTTPResponseBody(respHSRetry, "xai websockets executor: close handshake response body error")
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
 				sess.clearActive(readCh)
 				sess.reqMu.Unlock()
+				if respHSRetry != nil && respHSRetry.StatusCode > 0 {
+					return nil, xaiStatusErr(respHSRetry.StatusCode, bodyErrRetry)
+				}
 				return nil, errDialRetry
 			}
 			wsReqBodyRetry := buildXAIWebsocketRequestBody(prepared.body)
@@ -647,6 +655,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					}
 					payload = xaiPatchCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
 					payload = xaiNormalizeReasoningSummaryData(payload)
+					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, payload)
 					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
 						idMapper.state.recordTranscriptTurn(wsReqBody, payload)
 						recordedTranscript = true
@@ -812,8 +821,18 @@ func buildXAIWebsocketWarmupCompletedPayload(createdPayload []byte) []byte {
 }
 
 func parseXAIWebsocketError(payload []byte) (error, bool) {
-	if wsErr, ok := parseCodexWebsocketError(payload); ok {
-		return wsErr, true
+	isBareError := gjson.GetBytes(payload, "type").String() == "" && gjson.GetBytes(payload, "error").Exists()
+	if !isBareError {
+		if wsErr, ok := parseCodexWebsocketError(payload); ok {
+			if statusError, okStatus := wsErr.(statusErrWithHeaders); okStatus {
+				xaiError := xaiStatusErr(statusError.code, payload)
+				if xaiError.retryAfter != nil {
+					statusError.retryAfter = xaiError.retryAfter
+				}
+				return statusError, true
+			}
+			return wsErr, true
+		}
 	}
 	if len(payload) == 0 || !gjson.GetBytes(payload, "error").Exists() {
 		return nil, false
@@ -831,7 +850,7 @@ func parseXAIWebsocketError(payload []byte) (error, bool) {
 	if errNode := gjson.GetBytes(payload, "error"); errNode.Exists() {
 		out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
 	}
-	return statusErr{code: status, msg: string(out)}, true
+	return xaiStatusErr(status, out), true
 }
 
 func xaiBareWebsocketErrorStatus(payload []byte) int {

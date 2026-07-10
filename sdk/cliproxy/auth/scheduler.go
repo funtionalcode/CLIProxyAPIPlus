@@ -84,7 +84,7 @@ type readyBucket struct {
 	ws  readyView
 }
 
-// readyView holds the selection order for flat or grouped round-robin traversal.
+// readyView holds the selection order for flat round-robin traversal.
 type readyView struct {
 	flat             []*scheduledAuth
 	cursor           int
@@ -762,7 +762,7 @@ func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
 		return
 	}
 	authID := strings.TrimSpace(auth.ID)
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := executorKeyFromAuth(auth)
 	if authID == "" || providerKey == "" || auth.Disabled {
 		s.removeAuthLocked(authID)
 		return
@@ -809,7 +809,7 @@ func (s *authScheduler) ensureProviderLocked(providerKey string) *providerSchedu
 
 // buildScheduledAuthMeta extracts the scheduling metadata needed for shard bookkeeping.
 func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
-	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := executorKeyFromAuth(auth)
 	virtualParent := ""
 	if auth.Attributes != nil {
 		virtualParent = strings.TrimSpace(auth.Attributes["gemini_virtual_parent"])
@@ -1325,32 +1325,9 @@ func buildReadyBucket(entries []*scheduledAuth) *readyBucket {
 	return bucket
 }
 
-// buildReadyView creates either a flat view or a grouped parent/child view for rotation.
+// buildReadyView creates a flat view for rotation.
 func buildReadyView(entries []*scheduledAuth) readyView {
-	view := readyView{flat: append([]*scheduledAuth(nil), entries...)}
-	if len(entries) == 0 {
-		return view
-	}
-	groups := make(map[string][]*scheduledAuth)
-	for _, entry := range entries {
-		if entry == nil || entry.meta == nil || entry.meta.virtualParent == "" {
-			return view
-		}
-		groups[entry.meta.virtualParent] = append(groups[entry.meta.virtualParent], entry)
-	}
-	if len(groups) <= 1 {
-		return view
-	}
-	view.children = make(map[string]*childBucket, len(groups))
-	view.parentOrder = make([]string, 0, len(groups))
-	for parent := range groups {
-		view.parentOrder = append(view.parentOrder, parent)
-	}
-	sort.Strings(view.parentOrder)
-	for _, parent := range view.parentOrder {
-		view.children[parent] = &childBucket{items: append([]*scheduledAuth(nil), groups[parent]...)}
-	}
-	return view
+	return readyView{flat: append([]*scheduledAuth(nil), entries...)}
 }
 
 // pickFirst returns the first ready entry that satisfies predicate without advancing cursors.

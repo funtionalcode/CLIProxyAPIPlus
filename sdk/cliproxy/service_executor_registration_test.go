@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -78,6 +80,7 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 		"codex",
 		"claude",
 		"gemini",
+		"gemini-interactions",
 		"vertex",
 		"gemini-cli",
 		"aistudio",
@@ -97,5 +100,80 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 	resolved, _ := service.coreManager.Executor("plugin-provider")
 	if _, isPlugin := resolved.(serviceTestPluginExecutor); !isPlugin {
 		t.Fatalf("executor type = %T, want serviceTestPluginExecutor", resolved)
+	}
+}
+
+func TestRegisterExecutorForAuth_OpenAICompatUsesNamespacedProviderKey(t *testing.T) {
+	testCases := []struct {
+		name  string
+		auths []*coreauth.Auth
+	}{
+		{
+			name: "native first",
+			auths: []*coreauth.Auth{
+				{ID: "native-kimi", Provider: "kimi"},
+				openAICompatKimiAuth(),
+			},
+		},
+		{
+			name: "compat first",
+			auths: []*coreauth.Auth{
+				openAICompatKimiAuth(),
+				{ID: "native-kimi", Provider: "kimi"},
+			},
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &Service{
+				cfg:         &config.Config{},
+				coreManager: coreauth.NewManager(nil, nil, nil),
+			}
+
+			service.registerExecutorsForAuths(tt.auths, true)
+
+			nativeExecutor, okNative := service.coreManager.Executor("kimi")
+			if !okNative {
+				t.Fatal("expected native kimi executor")
+			}
+			if _, okKimi := nativeExecutor.(*runtimeexecutor.KimiExecutor); !okKimi {
+				t.Fatalf("native executor type = %T, want *executor.KimiExecutor", nativeExecutor)
+			}
+
+			compatExecutor, okCompat := service.coreManager.Executor("openai-compatible-kimi")
+			if !okCompat {
+				t.Fatal("expected namespaced OpenAI-compatible executor")
+			}
+			if _, okOpenAICompat := compatExecutor.(*runtimeexecutor.OpenAICompatExecutor); !okOpenAICompat {
+				t.Fatalf("compat executor type = %T, want *executor.OpenAICompatExecutor", compatExecutor)
+			}
+		})
+	}
+}
+
+func TestRegisterModelsForAuth_GeminiCLIUsesStaticCatalog(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{ID: "gemini-cli-auth", Provider: "gemini-cli"}
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	if models := modelRegistry.GetModelsForClient(auth.ID); len(models) == 0 {
+		t.Fatal("expected Gemini CLI models to be registered")
+	}
+}
+
+func openAICompatKimiAuth() *coreauth.Auth {
+	return &coreauth.Auth{
+		ID:       "compat-kimi",
+		Provider: "openai-compatibility",
+		Label:    "kimi",
+		Attributes: map[string]string{
+			"compat_name":  "kimi",
+			"provider_key": "kimi",
+		},
 	}
 }

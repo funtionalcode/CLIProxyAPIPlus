@@ -1,14 +1,24 @@
 package util
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"fmt"
+	"regexp"
+	"sync/atomic"
+	"time"
+)
+
+var (
+	claudeToolUseIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	claudeToolUseIDCounter   uint64
 )
 
 // SanitizeClaudeToolID ensures the given id conforms to Claude's
 // tool_use.id regex ^[a-zA-Z0-9_-]+$.  Non-conforming characters are
 // replaced with '_'; an empty result gets a generated fallback.
-//
-// Deprecated: Use common.SanitizeToolCallID instead.
 func SanitizeClaudeToolID(id string) string {
-	return common.SanitizeToolCallID(id)
+	sanitized := claudeToolUseIDSanitizer.ReplaceAllString(id, "_")
+	if sanitized == "" {
+		sanitized = fmt.Sprintf("toolu_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&claudeToolUseIDCounter, 1))
+	}
+	return sanitized
 }

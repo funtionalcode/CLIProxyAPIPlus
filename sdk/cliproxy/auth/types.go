@@ -101,6 +101,49 @@ type Auth struct {
 }
 
 const (
+	AttributeAuthIndexSeed   = "auth_index_seed"
+	AttributePluginVirtual   = "plugin_virtual"
+	AttributeVirtualSource   = "virtual_source"
+	pluginVirtualAttrEnabled = "true"
+)
+
+// MarkPluginVirtualAuth marks an auth that was expanded from a plugin-owned source file.
+func MarkPluginVirtualAuth(auth *Auth, sourcePath string, ordinal int) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes[AttributePluginVirtual] = pluginVirtualAttrEnabled
+	sourcePath = strings.TrimSpace(sourcePath)
+	if sourcePath != "" {
+		auth.Attributes[AttributeVirtualSource] = sourcePath
+	}
+	seedID := strings.TrimSpace(auth.ID)
+	if seedID == "" {
+		seedID = strings.TrimSpace(auth.FileName)
+	}
+	if seedID == "" {
+		seedID = strconv.Itoa(ordinal)
+	}
+	auth.Attributes[AttributeAuthIndexSeed] = strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(auth.Provider)),
+		sourcePath,
+		seedID,
+		strconv.Itoa(ordinal),
+	}, "|")
+}
+
+// IsPluginVirtualAuth reports whether an auth was expanded from a plugin-owned source file.
+func IsPluginVirtualAuth(auth *Auth) bool {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes[AttributePluginVirtual]), pluginVirtualAttrEnabled)
+}
+
+const (
 	recentRequestBucketSeconds int64 = 10 * 60
 	recentRequestBucketCount         = 20
 )
@@ -257,6 +300,12 @@ func (a *Auth) indexSeed() string {
 		return ""
 	}
 
+	if a.Attributes != nil {
+		if seed := strings.TrimSpace(a.Attributes[AttributeAuthIndexSeed]); seed != "" {
+			return AttributeAuthIndexSeed + ":" + seed
+		}
+	}
+
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
 	compatName := ""
 	baseURL := ""
@@ -308,6 +357,8 @@ func (a *Auth) indexSeed() string {
 			apiPrefix = "openai-compatibility"
 		case strings.EqualFold(provider, "gemini"):
 			apiPrefix = "gemini-api-key"
+		case strings.EqualFold(provider, "gemini-interactions"):
+			apiPrefix = "interactions-api-key"
 		case strings.EqualFold(provider, "codex"):
 			apiPrefix = "codex-api-key"
 		case strings.EqualFold(provider, "claude"):
@@ -330,8 +381,10 @@ func (a *Auth) EnsureIndex() string {
 	if a == nil {
 		return ""
 	}
-	if a.indexAssigned && a.Index != "" {
-		return a.Index
+	if existingIndex := strings.TrimSpace(a.Index); existingIndex != "" {
+		a.Index = existingIndex
+		a.indexAssigned = true
+		return existingIndex
 	}
 
 	seed := a.indexSeed()
@@ -509,15 +562,15 @@ func (a *Auth) AccountInfo() (string, string) {
 		return "", ""
 	}
 	// For Gemini CLI, include project ID in the OAuth account info if present.
-	if strings.ToLower(a.Provider) == "gemini-cli" {
+	if strings.EqualFold(a.Provider, "gemini-cli") {
 		if a.Metadata != nil {
 			email, _ := a.Metadata["email"].(string)
 			email = strings.TrimSpace(email)
 			if email != "" {
-				if p, ok := a.Metadata["project_id"].(string); ok {
-					p = strings.TrimSpace(p)
-					if p != "" {
-						return "oauth", email + " (" + p + ")"
+				if projectID, ok := a.Metadata["project_id"].(string); ok {
+					projectID = strings.TrimSpace(projectID)
+					if projectID != "" {
+						return "oauth", email + " (" + projectID + ")"
 					}
 				}
 				return "oauth", email
@@ -526,7 +579,7 @@ func (a *Auth) AccountInfo() (string, string) {
 	}
 
 	// For iFlow provider, prioritize OAuth type if email is present
-	if strings.ToLower(a.Provider) == "iflow" {
+	if strings.EqualFold(a.Provider, "iflow") {
 		if a.Metadata != nil {
 			if email, ok := a.Metadata["email"].(string); ok {
 				email = strings.TrimSpace(email)
@@ -579,11 +632,14 @@ func (a *Auth) AccountInfo() (string, string) {
 			}
 		}
 	}
-	// Fall back to API key (API-key auth)
-	if a.Attributes != nil {
-		if v := a.Attributes["api_key"]; v != "" {
-			return "api_key", v
-		}
+	if apiKey := authAttribute(a, AttributeAPIKey); apiKey != "" {
+		return "api_key", apiKey
+	}
+	if a.AuthKind() == AuthKindOAuth {
+		return "oauth", ""
+	}
+	if a.AuthKind() == AuthKindAPIKey {
+		return "api_key", ""
 	}
 	return "", ""
 }
