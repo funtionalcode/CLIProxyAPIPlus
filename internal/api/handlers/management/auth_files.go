@@ -76,14 +76,31 @@ var authFileLocalMetadataKeys = []string{
 }
 
 const (
-	anthropicCallbackPort = 54545
-	geminiCallbackPort    = 8085
-	codexCallbackPort     = codex.DefaultCallbackPort
-	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion      = "v1internal"
-	gitLabLoginModeOAuth  = "oauth"
-	gitLabLoginModePAT    = "pat"
+	anthropicCallbackPort    = 54545
+	geminiCallbackPort       = 8085
+	codexCallbackPort        = codex.DefaultCallbackPort
+	geminiCLIEndpoint        = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion         = "v1internal"
+	gitLabLoginModeOAuth     = "oauth"
+	gitLabLoginModePAT       = "pat"
+	defaultAuthFilesPage     = 1
+	defaultAuthFilesPageSize = 200
+	maximumAuthFilesPageSize = 1000
 )
+
+type authFileListOptions struct {
+	paginated       bool
+	page            int
+	pageSize        int
+	includeBalances bool
+}
+
+type authFilePageBounds struct {
+	page       int
+	totalPages int
+	start      int
+	end        int
+}
 
 type callbackForwarder struct {
 	provider string
@@ -479,19 +496,38 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 	return true
 }
 
+// ListAuthFiles returns auth metadata. page/page_size enable bounded responses;
+// include_balances=true explicitly opts into synchronous remote balance lookups.
 func (h *Handler) ListAuthFiles(c *gin.Context) {
 	if h == nil {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
 		return
 	}
+	options, errOptions := parseAuthFileListOptions(c)
+	if errOptions != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errOptions.Error()})
+		return
+	}
 	if h.authManager == nil {
-		h.listAuthFilesFromDisk(c)
+		h.listAuthFilesFromDisk(c, options)
 		return
 	}
 	auths := h.authManager.List()
+	if options.paginated {
+		auths = preparePaginatedAuthFiles(auths)
+		bounds := calculateAuthFilePageBounds(len(auths), options)
+		files := make([]gin.H, 0, bounds.end-bounds.start)
+		for _, auth := range auths[bounds.start:bounds.end] {
+			if entry := h.buildAuthFileEntry(auth, options.includeBalances); entry != nil {
+				files = append(files, entry)
+			}
+		}
+		writeAuthFilesResponse(c, files, len(auths), bounds, options)
+		return
+	}
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
-		if entry := h.buildAuthFileEntry(auth); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, options.includeBalances); entry != nil {
 			files = append(files, entry)
 		}
 	}
@@ -499,6 +535,110 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return compareAuthFileEntries(files[i], files[j]) < 0
 	})
 	c.JSON(200, gin.H{"files": files})
+}
+
+func parseAuthFileListOptions(c *gin.Context) (authFileListOptions, error) {
+	options := authFileListOptions{page: defaultAuthFilesPage, pageSize: defaultAuthFilesPageSize}
+	rawPage, hasPage := c.GetQuery("page")
+	rawPageSize, hasPageSize := c.GetQuery("page_size")
+	if hasPage || hasPageSize {
+		options.paginated = true
+	}
+	if hasPage {
+		page, errParse := strconv.Atoi(strings.TrimSpace(rawPage))
+		if errParse != nil || page < 1 {
+			return authFileListOptions{}, errors.New("page must be a positive integer")
+		}
+		options.page = page
+	}
+	if hasPageSize {
+		pageSize, errParse := strconv.Atoi(strings.TrimSpace(rawPageSize))
+		if errParse != nil || pageSize < 1 || pageSize > maximumAuthFilesPageSize {
+			return authFileListOptions{}, fmt.Errorf("page_size must be between 1 and %d", maximumAuthFilesPageSize)
+		}
+		options.pageSize = pageSize
+	}
+	if rawIncludeBalances, ok := c.GetQuery("include_balances"); ok {
+		includeBalances, errParse := strconv.ParseBool(strings.TrimSpace(rawIncludeBalances))
+		if errParse != nil {
+			return authFileListOptions{}, errors.New("include_balances must be a boolean")
+		}
+		options.includeBalances = includeBalances
+	}
+	return options, nil
+}
+
+func preparePaginatedAuthFiles(auths []*coreauth.Auth) []*coreauth.Auth {
+	filtered := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		auth.EnsureIndex()
+		runtimeOnly := isRuntimeOnlyAuth(auth)
+		if runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
+			continue
+		}
+		if !runtimeOnly && strings.TrimSpace(authAttribute(auth, "path")) == "" {
+			continue
+		}
+		filtered = append(filtered, auth)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		leftProvider := strings.ToLower(strings.TrimSpace(filtered[i].Provider))
+		rightProvider := strings.ToLower(strings.TrimSpace(filtered[j].Provider))
+		if providerCompare := strings.Compare(leftProvider, rightProvider); providerCompare != 0 {
+			return providerCompare < 0
+		}
+		leftName := authFileListName(filtered[i])
+		rightName := authFileListName(filtered[j])
+		if nameCompare := strings.Compare(strings.ToLower(leftName), strings.ToLower(rightName)); nameCompare != 0 {
+			return nameCompare < 0
+		}
+		return strings.Compare(strings.TrimSpace(filtered[i].Index), strings.TrimSpace(filtered[j].Index)) < 0
+	})
+	return filtered
+}
+
+func authFileListName(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(auth.FileName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
+func calculateAuthFilePageBounds(total int, options authFileListOptions) authFilePageBounds {
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + options.pageSize - 1) / options.pageSize
+	}
+	page := options.page
+	if totalPages > 0 && page > totalPages {
+		page = totalPages
+	}
+	start := 0
+	end := 0
+	if total > 0 {
+		start = (page - 1) * options.pageSize
+		end = start + options.pageSize
+		if end > total {
+			end = total
+		}
+	}
+	return authFilePageBounds{page: page, totalPages: totalPages, start: start, end: end}
+}
+
+func writeAuthFilesResponse(c *gin.Context, files []gin.H, total int, bounds authFilePageBounds, options authFileListOptions) {
+	c.JSON(http.StatusOK, gin.H{
+		"files":       files,
+		"page":        bounds.page,
+		"page_size":   options.pageSize,
+		"total":       total,
+		"total_pages": bounds.totalPages,
+	})
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
@@ -550,14 +690,30 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 }
 
 // List auth files from disk when the auth manager is unavailable.
-func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
+func (h *Handler) listAuthFilesFromDisk(c *gin.Context, options authFileListOptions) {
 	entries, err := os.ReadDir(h.cfg.AuthDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 		return
 	}
-	files := make([]gin.H, 0)
-	for _, e := range entries {
+	jsonEntries := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			continue
+		}
+		jsonEntries = append(jsonEntries, entry)
+	}
+	sort.SliceStable(jsonEntries, func(i, j int) bool {
+		return strings.Compare(strings.ToLower(jsonEntries[i].Name()), strings.ToLower(jsonEntries[j].Name())) < 0
+	})
+	selectedEntries := jsonEntries
+	var bounds authFilePageBounds
+	if options.paginated {
+		bounds = calculateAuthFilePageBounds(len(jsonEntries), options)
+		selectedEntries = jsonEntries[bounds.start:bounds.end]
+	}
+	files := make([]gin.H, 0, len(selectedEntries))
+	for _, e := range selectedEntries {
 		if e.IsDir() {
 			continue
 		}
@@ -641,6 +797,10 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 	sort.SliceStable(files, func(i, j int) bool {
 		return compareAuthFileEntries(files[i], files[j]) < 0
 	})
+	if options.paginated {
+		writeAuthFilesResponse(c, files, len(jsonEntries), bounds, options)
+		return
+	}
 	c.JSON(200, gin.H{"files": files})
 }
 
@@ -708,7 +868,7 @@ func compareAuthFileEntries(left gin.H, right gin.H) int {
 	return strings.Compare(strings.ToLower(nameI), strings.ToLower(nameJ))
 }
 
-func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, includeBalances bool) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -883,6 +1043,16 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if v := strings.TrimSpace(authAttribute(auth, "api_key")); v != "" {
 		entry["api_key"] = v
 	}
+	if includeBalances {
+		h.appendAuthFileBalances(entry, auth)
+	}
+	if websockets, ok := authWebsocketsValue(auth); ok {
+		entry["websockets"] = websockets
+	}
+	return entry
+}
+
+func (h *Handler) appendAuthFileBalances(entry gin.H, auth *coreauth.Auth) {
 	// For ollama providers, fetch and display cloud usage/balance.
 	// Tries Bearer (API key / OAuth token) first, then session cookies.
 	// Accepts entries registered both as native "ollama" and via
@@ -946,10 +1116,6 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
-	if websockets, ok := authWebsocketsValue(auth); ok {
-		entry["websockets"] = websockets
-	}
-	return entry
 }
 
 // matchesCompatProvider reports whether the auth entry targets the named
