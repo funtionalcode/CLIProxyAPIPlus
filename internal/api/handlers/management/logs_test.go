@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -733,4 +734,120 @@ func appendMainLog(t *testing.T, dir, content string) {
 	if errClose := file.Close(); errClose != nil {
 		t.Fatalf("close main log: %v", errClose)
 	}
+}
+
+func TestGetRequestErrorLogsSupportsPagination(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logDir := t.TempDir()
+	for i := 0; i < 5; i++ {
+		name := filepath.Join(logDir, fmt.Sprintf("error-%d.log", i))
+		if err := os.WriteFile(name, []byte("log"), 0o644); err != nil {
+			t.Fatalf("write log file: %v", err)
+		}
+		modified := time.Unix(int64(i+1), 0)
+		if err := os.Chtimes(name, modified, modified); err != nil {
+			t.Fatalf("set log mtime: %v", err)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	h.SetLogDirectory(logDir)
+	status, body := performRequestLogListRaw(t, h, "/v0/management/request-error-logs?page=2&page_size=2")
+	if status != http.StatusOK {
+		t.Fatalf("GetRequestErrorLogs status = %d, body = %s", status, body)
+	}
+
+	var response struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+		Page       int `json:"page"`
+		PageSize   int `json:"page_size"`
+		Total      int `json:"total"`
+		TotalPages int `json:"total_pages"`
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := []string{response.Files[0].Name, response.Files[1].Name}; !reflect.DeepEqual(got, []string{"error-2.log", "error-1.log"}) {
+		t.Fatalf("files = %#v, want page 2 in descending mtime order", got)
+	}
+	if response.Page != 2 || response.PageSize != 2 || response.Total != 5 || response.TotalPages != 3 {
+		t.Fatalf("pagination = page %d size %d total %d pages %d, want 2/2/5/3", response.Page, response.PageSize, response.Total, response.TotalPages)
+	}
+}
+
+func TestGetRequestSuccessLogsClampsPageAndRejectsInvalidPageSize(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logDir := t.TempDir()
+	for i := 0; i < 2; i++ {
+		name := filepath.Join(logDir, fmt.Sprintf("success-%d.log", i))
+		if err := os.WriteFile(name, []byte("log"), 0o644); err != nil {
+			t.Fatalf("write log file: %v", err)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{SDKConfig: config.SDKConfig{RequestLog: true, SuccessRequestLog: true}}, nil)
+	h.SetLogDirectory(logDir)
+	status, body := performRequestLogListRaw(t, h, "/v0/management/request-success-logs?page=99&page_size=1")
+	if status != http.StatusOK {
+		t.Fatalf("GetRequestSuccessLogs status = %d, body = %s", status, body)
+	}
+	var response struct {
+		Page       int `json:"page"`
+		TotalPages int `json:"total_pages"`
+		Files      []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Page != 2 || response.TotalPages != 2 || len(response.Files) != 1 {
+		t.Fatalf("clamped response = page %d pages %d files %d, want 2/2/1", response.Page, response.TotalPages, len(response.Files))
+	}
+
+	status, body = performRequestLogListRaw(t, h, "/v0/management/request-success-logs?page_size=0")
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid page_size status = %d, body = %s", status, body)
+	}
+}
+
+func TestGetRequestErrorLogsKeepsLegacyResponseWithoutPagination(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logDir := t.TempDir()
+	name := filepath.Join(logDir, "error-legacy.log")
+	if err := os.WriteFile(name, []byte("log"), 0o644); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	h.SetLogDirectory(logDir)
+	status, body := performRequestLogListRaw(t, h, "/v0/management/request-error-logs")
+	if status != http.StatusOK {
+		t.Fatalf("GetRequestErrorLogs status = %d, body = %s", status, body)
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response) != 1 {
+		t.Fatalf("legacy response fields = %d, want only files: %s", len(response), body)
+	}
+	if _, ok := response["files"]; !ok {
+		t.Fatalf("legacy response missing files: %s", body)
+	}
+}
+
+func performRequestLogListRaw(t *testing.T, h *Handler, target string) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+	if strings.Contains(target, "request-success-logs") {
+		h.GetRequestSuccessLogs(c)
+	} else {
+		h.GetRequestErrorLogs(c)
+	}
+	return rec.Code, rec.Body.String()
 }

@@ -29,7 +29,22 @@ const (
 	formattedRequestLogMaxSize int64 = 64 * 1024 * 1024
 	logCursorVersion                 = 1
 	logCursorFingerprintMax          = 4 * 1024
+	defaultRequestLogPage            = 1
+	defaultRequestLogPageSize        = 10
+	maxRequestLogPageSize            = 100
 )
+
+type requestLogFile struct {
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	Modified int64  `json:"modified"`
+}
+
+type requestLogPagination struct {
+	enabled  bool
+	page     int
+	pageSize int
+}
 
 // GetLogs returns log lines with optional incremental loading.
 //
@@ -222,8 +237,13 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
+	pagination, errPagination := parseRequestLogPagination(c)
+	if errPagination != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errPagination.Error()})
+		return
+	}
 	if h.cfg.RequestLog {
-		c.JSON(http.StatusOK, gin.H{"files": []any{}})
+		writeRequestLogFilesResponse(c, []requestLogFile{}, pagination)
 		return
 	}
 
@@ -233,46 +253,16 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		return
 	}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(http.StatusOK, gin.H{"files": []any{}})
+	files, errList := collectRequestLogFiles(dir, "error-")
+	if errList != nil {
+		if os.IsNotExist(errList) {
+			writeRequestLogFilesResponse(c, []requestLogFile{}, pagination)
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list request error logs: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
 		return
 	}
-
-	type errorLog struct {
-		Name     string `json:"name"`
-		Size     int64  `json:"size"`
-		Modified int64  `json:"modified"`
-	}
-
-	files := make([]errorLog, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
-			continue
-		}
-		info, errInfo := entry.Info()
-		if errInfo != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log info for %s: %v", name, errInfo)})
-			return
-		}
-		files = append(files, errorLog{
-			Name:     name,
-			Size:     info.Size(),
-			Modified: info.ModTime().Unix(),
-		})
-	}
-
-	sort.Slice(files, func(i, j int) bool { return files[i].Modified > files[j].Modified })
-
-	c.JSON(http.StatusOK, gin.H{"files": files})
+	writeRequestLogFilesResponse(c, files, pagination)
 }
 
 // GetRequestSuccessLogs lists success request log files when SuccessRequestLog is enabled.
@@ -286,8 +276,13 @@ func (h *Handler) GetRequestSuccessLogs(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
+	pagination, errPagination := parseRequestLogPagination(c)
+	if errPagination != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errPagination.Error()})
+		return
+	}
 	if !h.cfg.RequestLog || !h.cfg.SuccessRequestLog {
-		c.JSON(http.StatusOK, gin.H{"files": []any{}})
+		writeRequestLogFilesResponse(c, []requestLogFile{}, pagination)
 		return
 	}
 
@@ -297,46 +292,104 @@ func (h *Handler) GetRequestSuccessLogs(c *gin.Context) {
 		return
 	}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(http.StatusOK, gin.H{"files": []any{}})
+	files, errList := collectRequestLogFiles(dir, "success-")
+	if errList != nil {
+		if os.IsNotExist(errList) {
+			writeRequestLogFilesResponse(c, []requestLogFile{}, pagination)
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list success request logs: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
 		return
 	}
+	writeRequestLogFilesResponse(c, files, pagination)
+}
 
-	type successLog struct {
-		Name     string `json:"name"`
-		Size     int64  `json:"size"`
-		Modified int64  `json:"modified"`
+func parseRequestLogPagination(c *gin.Context) (requestLogPagination, error) {
+	pagination := requestLogPagination{page: defaultRequestLogPage, pageSize: defaultRequestLogPageSize}
+	rawPage, hasPage := c.GetQuery("page")
+	rawPageSize, hasPageSize := c.GetQuery("page_size")
+	if !hasPage && !hasPageSize {
+		return pagination, nil
 	}
+	pagination.enabled = true
+	if hasPage {
+		page, err := strconv.Atoi(strings.TrimSpace(rawPage))
+		if err != nil || page < 1 {
+			return requestLogPagination{}, errors.New("page must be a positive integer")
+		}
+		pagination.page = page
+	}
+	if hasPageSize {
+		pageSize, err := strconv.Atoi(strings.TrimSpace(rawPageSize))
+		if err != nil || pageSize < 1 || pageSize > maxRequestLogPageSize {
+			return requestLogPagination{}, fmt.Errorf("page_size must be between 1 and %d", maxRequestLogPageSize)
+		}
+		pagination.pageSize = pageSize
+	}
+	return pagination, nil
+}
 
-	files := make([]successLog, 0, len(entries))
+func collectRequestLogFiles(dir, prefix string) ([]requestLogFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]requestLogFile, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasPrefix(name, "success-") || !strings.HasSuffix(name, ".log") {
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".log") {
 			continue
 		}
 		info, errInfo := entry.Info()
 		if errInfo != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log info for %s: %v", name, errInfo)})
-			return
+			return nil, fmt.Errorf("failed to read log info for %s: %w", name, errInfo)
 		}
-		files = append(files, successLog{
-			Name:     name,
-			Size:     info.Size(),
-			Modified: info.ModTime().Unix(),
-		})
+		files = append(files, requestLogFile{Name: name, Size: info.Size(), Modified: info.ModTime().Unix()})
 	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].Modified == files[j].Modified {
+			return files[i].Name > files[j].Name
+		}
+		return files[i].Modified > files[j].Modified
+	})
+	return files, nil
+}
 
-	sort.Slice(files, func(i, j int) bool { return files[i].Modified > files[j].Modified })
-
-	c.JSON(http.StatusOK, gin.H{"files": files})
+func writeRequestLogFilesResponse(c *gin.Context, files []requestLogFile, pagination requestLogPagination) {
+	if !pagination.enabled {
+		c.JSON(http.StatusOK, gin.H{"files": files})
+		return
+	}
+	total := len(files)
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + pagination.pageSize - 1) / pagination.pageSize
+	}
+	page := pagination.page
+	if totalPages > 0 && page > totalPages {
+		page = totalPages
+	}
+	pageFiles := make([]requestLogFile, 0)
+	if total > 0 {
+		start := (page - 1) * pagination.pageSize
+		if start < total {
+			end := start + pagination.pageSize
+			if end > total {
+				end = total
+			}
+			pageFiles = files[start:end]
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"files":       pageFiles,
+		"page":        page,
+		"page_size":   pagination.pageSize,
+		"total":       total,
+		"total_pages": totalPages,
+	})
 }
 
 // DownloadRequestSuccessLog downloads a specific success request log file by name.
