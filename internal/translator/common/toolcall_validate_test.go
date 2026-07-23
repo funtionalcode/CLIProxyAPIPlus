@@ -543,10 +543,10 @@ func TestIsToolCallOutputType(t *testing.T) {
 
 func TestTruncateString(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
-		maxLen  int
-		want    string
+		name   string
+		input  string
+		maxLen int
+		want   string
 	}{
 		{"short string", "hello", 10, "hello"},
 		{"exact length", "hello", 5, "hello"},

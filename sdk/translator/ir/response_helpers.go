@@ -83,9 +83,9 @@ func BuildClaudeToolCallIDMap(originalRequest []byte) map[string]string {
 
 		for _, rawBlock := range rawBlocks {
 			var block struct {
-				Type       string `json:"type"`
-				ID         string `json:"id"`
-				ToolUseID  string `json:"tool_use_id"`
+				Type      string `json:"type"`
+				ID        string `json:"id"`
+				ToolUseID string `json:"tool_use_id"`
 			}
 			if err := json.Unmarshal(rawBlock, &block); err != nil {
 				continue

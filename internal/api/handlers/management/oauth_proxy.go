@@ -65,4 +65,3 @@ func withLoginProxy(cfg *config.Config, proxyURL string) *config.Config {
 	cfgCopy.SDKConfig = sdkCopy
 	return &cfgCopy
 }
-

@@ -23,19 +23,19 @@ import (
 // internal economy); the frontend renders them as raw numbers since the unit
 // label belongs to the platform UI rather than this proxy.
 type AnyrouterBalance struct {
-	UserID            int64     `json:"user_id"`
-	Username          string    `json:"username,omitempty"`
-	DisplayName       string    `json:"display_name,omitempty"`
-	Group             string    `json:"group,omitempty"`
-	Quota             int64     `json:"quota"`
-	UsedQuota         int64     `json:"used_quota"`
-	RequestCount      int64     `json:"request_count"`
-	AffCode           string    `json:"aff_code,omitempty"`
-	AffCount          int64     `json:"aff_count"`
-	AffQuota          int64     `json:"aff_quota"`
-	AffHistoryQuota   int64     `json:"aff_history_quota"`
-	Source            string    `json:"source,omitempty"`
-	FetchedAt         time.Time `json:"fetched_at"`
+	UserID          int64     `json:"user_id"`
+	Username        string    `json:"username,omitempty"`
+	DisplayName     string    `json:"display_name,omitempty"`
+	Group           string    `json:"group,omitempty"`
+	Quota           int64     `json:"quota"`
+	UsedQuota       int64     `json:"used_quota"`
+	RequestCount    int64     `json:"request_count"`
+	AffCode         string    `json:"aff_code,omitempty"`
+	AffCount        int64     `json:"aff_count"`
+	AffQuota        int64     `json:"aff_quota"`
+	AffHistoryQuota int64     `json:"aff_history_quota"`
+	Source          string    `json:"source,omitempty"`
+	FetchedAt       time.Time `json:"fetched_at"`
 }
 
 // AnyrouterCredentials carries the Cookie + new-api-user header.
@@ -194,17 +194,17 @@ func parseAnyrouterUserSelf(body []byte) (*AnyrouterBalance, error) {
 		Success bool   `json:"success"`
 		Message string `json:"message"`
 		Data    struct {
-			ID                int64  `json:"id"`
-			Username          string `json:"username"`
-			DisplayName       string `json:"display_name"`
-			Group             string `json:"group"`
-			Quota             int64  `json:"quota"`
-			UsedQuota         int64  `json:"used_quota"`
-			RequestCount      int64  `json:"request_count"`
-			AffCode           string `json:"aff_code"`
-			AffCount          int64  `json:"aff_count"`
-			AffQuota          int64  `json:"aff_quota"`
-			AffHistoryQuota   int64  `json:"aff_history_quota"`
+			ID              int64  `json:"id"`
+			Username        string `json:"username"`
+			DisplayName     string `json:"display_name"`
+			Group           string `json:"group"`
+			Quota           int64  `json:"quota"`
+			UsedQuota       int64  `json:"used_quota"`
+			RequestCount    int64  `json:"request_count"`
+			AffCode         string `json:"aff_code"`
+			AffCount        int64  `json:"aff_count"`
+			AffQuota        int64  `json:"aff_quota"`
+			AffHistoryQuota int64  `json:"aff_history_quota"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
