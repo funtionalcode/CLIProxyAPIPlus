@@ -2,10 +2,13 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -25,6 +28,21 @@ func validCodexReasoningEncryptedContentForTestSeed(seed byte) string {
 		payload[i] = seed + byte(i)
 	}
 	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func shortenedCodexReplayCallIDForTest(id string) string {
+	const limit = 64
+	if len(id) <= limit {
+		return id
+	}
+
+	sum := sha256.Sum256([]byte(id))
+	suffix := "_" + hex.EncodeToString(sum[:8])
+	prefixLen := limit - len(suffix)
+	if prefixLen <= 0 {
+		return suffix[len(suffix)-limit:]
+	}
+	return id[:prefixLen] + suffix
 }
 
 func TestCodexExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeRequest(t *testing.T) {
@@ -978,5 +996,119 @@ func TestCodexExecutorReasoningReplayCacheDropsFunctionCallWithoutMatchingOutput
 	}
 	if gjson.GetBytes(updated, `input.#(call_id=="call_dropped")`).Exists() {
 		t.Fatalf("cached function_call without matching output should not be replayed; body=%s", string(updated))
+	}
+}
+
+func TestCodexExecutorReasoningReplayCacheMatchesShortenedClaudeToolResultCallID(t *testing.T) {
+	internalcache.ClearCodexReasoningReplayCache()
+	t.Cleanup(internalcache.ClearCodexReasoningReplayCache)
+
+	longCallID := "call_" + strings.Repeat("a", 62)
+	shortCallID := shortenedCodexReplayCallIDForTest(longCallID)
+	if len(longCallID) <= 64 || len(shortCallID) > 64 || shortCallID == longCallID {
+		t.Fatalf("invalid test setup: long=%q short=%q", longCallID, shortCallID)
+	}
+
+	reasoningEncryptedContent := validCodexReasoningEncryptedContentForTestSeed(13)
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		bodies = append(bodies, body)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"rs_long","type":"reasoning","summary":[],"encrypted_content":"` + reasoningEncryptedContent + `"},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"fc_long","type":"function_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{\"q\":\"weather\"}","status":"completed"},"output_index":1}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"gpt-5.4","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-replay-claude-short-tool",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+		Stream:       false,
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"claude-session-short-tool\"}"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"call lookup"}]}],
+			"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]
+		}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("first Execute error: %v", err)
+	}
+
+	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"device_id\":\"device-test\",\"account_uuid\":\"\",\"session_id\":\"claude-session-short-tool\"}"},
+			"messages":[
+				{"role":"user","content":[{"type":"text","text":"call lookup"}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + shortCallID + `","content":"sunny"}]}
+			],
+			"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]
+		}`),
+	}, opts)
+	if err != nil {
+		t.Fatalf("second Execute error: %v", err)
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("upstream request count = %d, want 2", len(bodies))
+	}
+	secondBody := bodies[1]
+	if got := gjson.GetBytes(secondBody, "input.0.type").String(); got != "message" {
+		t.Fatalf("input.0.type = %q, want initial user message; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.1.type").String(); got != "reasoning" {
+		t.Fatalf("input.1.type = %q, want cached reasoning; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("input.2.type = %q, want cached function_call; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.2.call_id").String(); got != shortCallID {
+		t.Fatalf("input.2.call_id = %q, want shortened call_id %q; body=%s", got, shortCallID, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.3.type").String(); got != "function_call_output" {
+		t.Fatalf("input.3.type = %q, want function_call_output after cached call; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.3.call_id").String(); got != shortCallID {
+		t.Fatalf("input.3.call_id = %q, want shortened call_id %q; body=%s", got, shortCallID, string(secondBody))
+	}
+}
+
+func TestCodexReplayPrefixFingerprintsMatchesDirectComputation(t *testing.T) {
+	items := []gjson.Result{
+		gjson.Parse(`{"type":"message","role":"user","content":"a"}`),
+		gjson.Parse(`{"type":"reasoning","encrypted_content":"abc"}`),
+		gjson.Parse(`{"type":"function_call","call_id":"call_1"}`),
+		gjson.Parse(`{"type":"function_call_output","call_id":"call_1","output":"ok"}`),
+	}
+	cache := newCodexReplayPrefixFingerprints(items)
+	// Out-of-order and repeated probes mirror the downward anchor scan.
+	for _, end := range []int{4, 2, 0, 3, 1, 4, 2} {
+		want := codexReplayInputPrefixFingerprint(items, end)
+		if got := cache.at(end); got != want {
+			t.Fatalf("cache.at(%d) = %q, want %q", end, got, want)
+		}
+	}
+	for _, end := range []int{-1, 5} {
+		if got := cache.at(end); got != "" {
+			t.Fatalf("cache.at(%d) = %q, want empty for out-of-range", end, got)
+		}
 	}
 }

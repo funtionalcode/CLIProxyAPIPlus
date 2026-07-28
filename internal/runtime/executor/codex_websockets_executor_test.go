@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -358,6 +359,176 @@ func TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream(t *testing.T)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamUpgradeRequiredReturnsWithoutLockingSession(t *testing.T) {
+	upgradeAttempts := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			t.Errorf("unexpected HTTP fallback request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		upgradeAttempts <- struct{}{}
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_, _ = w.Write([]byte(`{"error":{"message":"websocket unavailable"}}`))
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	const executionSessionID = "ws-upgrade-required-session"
+	t.Cleanup(func() { exec.CloseExecutionSession(executionSessionID) })
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: executionSessionID,
+		},
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	execute := func(payload string) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() {
+			_, errExecute := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+				Model:   "gpt-5.4",
+				Payload: []byte(payload),
+			}, opts)
+			done <- errExecute
+		}()
+
+		select {
+		case errExecute := <-done:
+			if errExecute == nil {
+				t.Fatal("upgrade-required error = nil")
+			}
+			statusErr, ok := errExecute.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != http.StatusUpgradeRequired {
+				t.Fatalf("upgrade-required error = %T %v, want status 426", errExecute, errExecute)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for upgrade-required error; execution session may still be locked")
+		}
+	}
+
+	execute(`{"model":"gpt-5.4","generate":false,"input":[]}`)
+	execute(`{"model":"gpt-5.4","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`)
+
+	if got := len(upgradeAttempts); got != 2 {
+		t.Fatalf("websocket upgrade attempts = %d, want 2", got)
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamHandshakeErrorReturnsWithoutLockingSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"unauthorized"}}`))
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	const executionSessionID = "ws-handshake-error-session"
+	t.Cleanup(func() { exec.CloseExecutionSession(executionSessionID) })
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: executionSessionID,
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		done := make(chan error, 1)
+		go func() {
+			_, errExecute := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "gpt-5.4",
+				Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","id":"msg-1"}]}`),
+			}, opts)
+			done <- errExecute
+		}()
+		select {
+		case errExecute := <-done:
+			statusErr, ok := errExecute.(interface{ StatusCode() int })
+			if !ok || statusErr.StatusCode() != http.StatusUnauthorized {
+				t.Fatalf("attempt %d error = %T %v, want status 401", i+1, errExecute, errExecute)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("attempt %d timed out; execution session remained locked", i+1)
+		}
+	}
+}
+
+func TestExistingWebsocketSessionConnRequiresMatchingHealthyConnection(t *testing.T) {
+	conn := &websocket.Conn{}
+	closer := newWebsocketConnectionCloser(conn)
+	sess := &codexWebsocketSession{
+		conn:       conn,
+		connCloser: closer,
+		authID:     "auth-a",
+		wsURL:      "ws://example.test/responses",
+	}
+	sess.resetUpstreamDisconnectError(conn)
+	if gotConn, gotCloser := existingWebsocketSessionConn(sess, "auth-a", "ws://example.test/responses"); gotConn != conn || gotCloser != closer {
+		t.Fatal("matching healthy websocket session was not reusable")
+	}
+	if got, _ := existingWebsocketSessionConn(sess, "auth-b", "ws://example.test/responses"); got != nil {
+		t.Fatal("websocket session matched a different auth")
+	}
+	if got, _ := existingWebsocketSessionConn(sess, "auth-a", "ws://other.test/responses"); got != nil {
+		t.Fatal("websocket session matched a different URL")
+	}
+	sess.setUpstreamDisconnectError(conn, errors.New("upstream disconnected"))
+	if got, _ := existingWebsocketSessionConn(sess, "auth-a", "ws://example.test/responses"); got != nil {
+		t.Fatal("disconnected websocket session remained reusable")
+	}
+}
+
+func TestCodexAutoExecutorRequiredUpstreamWebsocketRejectsHTTPFallback(t *testing.T) {
+	exec := NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-http-only",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key": "sk-test",
+		},
+	}
+	ctx := cliproxyexecutor.WithRequiredUpstreamWebsocket(
+		cliproxyexecutor.WithDownstreamWebsocket(context.Background()),
+	)
+	_, errExecute := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if errExecute == nil {
+		t.Fatal("ExecuteStream() error = nil, want replay-required error")
+	}
+	statusErr, ok := errExecute.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusUpgradeRequired {
+		t.Fatalf("ExecuteStream() error = %T %v, want status 426", errExecute, errExecute)
+	}
+	if got := gjson.Get(errExecute.Error(), "error.code").String(); got != "upstream_http_replay_required" {
+		t.Fatalf("ExecuteStream() error code = %q, want upstream_http_replay_required", got)
+	}
+	requestScoped, ok := errExecute.(cliproxyexecutor.RequestScopedError)
+	if !ok || !requestScoped.IsRequestScoped() {
+		t.Fatalf("ExecuteStream() error = %T, want request-scoped replay signal", errExecute)
 	}
 }
 
@@ -1076,6 +1247,55 @@ func TestApplyCodexPromptCacheHeadersSetsSessionIDAndLegacyConversation(t *testi
 	}
 	if got := headers.Get("Conversation_id"); got != "cache-1" {
 		t.Fatalf("Conversation_id = %s, want cache-1", got)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersUsesDerivedSessionUUID(t *testing.T) {
+	t.Parallel()
+
+	req := cliproxyexecutor.Request{
+		Model:    "gpt-5-codex",
+		Payload:  []byte(`{"input":"hello"}`),
+		Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-root"},
+	}
+	body, headers := applyCodexPromptCacheHeaders(sdktranslator.FormatInteractions, req, []byte(`{"model":"gpt-5-codex"}`))
+	cacheKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	if _, errParse := uuid.Parse(cacheKey); errParse != nil {
+		t.Fatalf("prompt_cache_key %q is not a UUID: %v", cacheKey, errParse)
+	}
+	if got := headers["session_id"]; len(got) != 1 || got[0] != cacheKey {
+		t.Fatalf("session_id = %#v, want [%q]", got, cacheKey)
+	}
+	if got := headers.Get("Conversation_id"); got != cacheKey {
+		t.Fatalf("Conversation_id = %q, want %q", got, cacheKey)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersKeepsExecutionSessionAcrossIncrementalRoots(t *testing.T) {
+	t.Parallel()
+
+	firstReq := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"input":"first"}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "connection-1",
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:first-root",
+		},
+	}
+	secondReq := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"input":"second"}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "connection-1",
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:second-root",
+		},
+	}
+	firstBody, _ := applyCodexPromptCacheHeaders(sdktranslator.FormatOpenAIResponse, firstReq, []byte(`{"model":"gpt-5-codex"}`))
+	secondBody, _ := applyCodexPromptCacheHeaders(sdktranslator.FormatOpenAIResponse, secondReq, []byte(`{"model":"gpt-5-codex"}`))
+	firstKey := gjson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondKey := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	if firstKey == "" || firstKey != secondKey {
+		t.Fatalf("incremental websocket roots changed prompt cache key: first=%q second=%q", firstKey, secondKey)
 	}
 }
 

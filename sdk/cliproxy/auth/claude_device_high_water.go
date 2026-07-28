@@ -1,9 +1,11 @@
 package auth
 
 import (
+	"context"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ClaudeDeviceHighWaterMetadataKey stores the persisted Claude client
@@ -184,4 +186,56 @@ func claudeDeviceHighWaterToMetadataMap(hw ClaudeDeviceHighWater) map[string]any
 		out["last_seen_at"] = v
 	}
 	return out
+}
+
+// RaiseClaudeDeviceHighWater persists a newer Claude device-profile observation.
+func (m *Manager) RaiseClaudeDeviceHighWater(ctx context.Context, authID string, highWater ClaudeDeviceHighWater) (*Auth, error) {
+	if m == nil {
+		return nil, nil
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" || !highWater.valid() {
+		return nil, nil
+	}
+	candidateVersion, ok := highWater.parsedVersion()
+	if !ok {
+		return nil, nil
+	}
+
+	now := time.Now().UTC()
+	if strings.TrimSpace(highWater.LastSeenAt) == "" {
+		highWater.LastSeenAt = now.Format(time.RFC3339)
+	}
+
+	var snapshot *Auth
+	m.mu.Lock()
+	auth, found := m.auths[authID]
+	if !found || auth == nil {
+		m.mu.Unlock()
+		return nil, &Error{Code: "auth_not_found", Message: "auth not found"}
+	}
+	if current, okCurrent := ClaudeDeviceHighWaterFromMetadata(auth.Metadata); okCurrent {
+		currentVersion, okCurrentVersion := current.parsedVersion()
+		if okCurrentVersion && candidateVersion.compare(currentVersion) <= 0 {
+			snapshot = auth.Clone()
+			m.mu.Unlock()
+			return snapshot, nil
+		}
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata[ClaudeDeviceHighWaterMetadataKey] = claudeDeviceHighWaterToMetadataMap(highWater)
+	auth.UpdatedAt = now
+	errPersist := m.persist(ctx, auth)
+	snapshot = auth.Clone()
+	m.mu.Unlock()
+
+	if snapshot != nil && m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+	if snapshot != nil {
+		m.hook.OnAuthUpdated(ctx, snapshot.Clone())
+	}
+	return snapshot, errPersist
 }

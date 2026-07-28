@@ -113,14 +113,25 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 
 	var translated []byte
+	var originalTranslated []byte
 	if opts.Alt == "responses/compact" {
 		// Use pipeline with CompactPassthrough middleware to preserve
 		// context_management and truncation fields through translation.
 		compactPipeline := sdktranslator.NewPipeline(nil)
 		compactPipeline.UseRequest(sdktranslator.WrapIRRequestMiddleware(middleware.CompactPassthrough()))
+		originalEnvelope, originalPipelineErr := compactPipeline.TranslateRequest(ctx, from, to, sdktranslator.RequestEnvelope{
+			Format:   from,
+			Model:    baseModel,
+			Stream:   opts.Stream,
+			Body:     originalPayload,
+			Metadata: map[string]any{"compact": true, "__to_format": to.String()},
+		})
+		if originalPipelineErr != nil {
+			return resp, fmt.Errorf("compact original request translation: %w", originalPipelineErr)
+		}
+		originalTranslated = originalEnvelope.Body
 		compactEnvelope, pipelineErr := compactPipeline.TranslateRequest(ctx, from, to, sdktranslator.RequestEnvelope{
 			Format:   from,
 			Model:    baseModel,
@@ -133,7 +144,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 		translated = compactEnvelope.Body
 	} else {
-		translated = sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+		originalTranslated = helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, opts.Stream)
+		translated = helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, opts.Stream)
 	}
 	translated = adaptOpenAICompatTTSPayload(baseModel, from.String(), translated)
 
@@ -374,8 +386,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
+	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true)
 	translated = adaptOpenAICompatTTSPayload(baseModel, from.String(), translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
@@ -646,7 +658,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
 
 	modelForCounting := baseModel
 
