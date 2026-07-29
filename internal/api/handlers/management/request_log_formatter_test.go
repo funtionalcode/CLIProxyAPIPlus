@@ -173,3 +173,41 @@ func TestDownloadFormattedRequestLog_RejectsInvalidNames(t *testing.T) {
 		}
 	}
 }
+
+func TestDownloadFormattedRequestSuccessLog_TruncatesOversizedFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logDir := t.TempDir()
+	fileName := "success-large-format.log"
+	logPath := filepath.Join(logDir, fileName)
+
+	var content strings.Builder
+	content.WriteString("=== REQUEST INFO ===\nURL: http://localhost/v1/responses\nMethod: POST\n\n")
+	content.WriteString("=== REQUEST BODY ===\n")
+	content.WriteString(`{"input":"hello-large"}`)
+	content.WriteString("\n\n=== RESPONSE ===\n")
+	// Force the file past the formatted-download size cap.
+	content.WriteString(strings.Repeat("x", int(formattedRequestLogMaxSize)+1024))
+	if err := os.WriteFile(logPath, []byte(content.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	h.SetLogDirectory(logDir)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{{Key: "name", Value: fileName}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/request-success-logs/"+fileName+"/formatted", nil)
+
+	h.DownloadFormattedRequestSuccessLog(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for oversized formatted download, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "hello-large") {
+		t.Fatalf("expected truncated formatted body to keep early content, got:\n%s", body)
+	}
+	if !strings.Contains(body, "=== Truncation Notice ===") {
+		t.Fatalf("expected truncation notice, got:\n%s", body)
+	}
+}

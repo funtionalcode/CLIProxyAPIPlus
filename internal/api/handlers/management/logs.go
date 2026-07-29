@@ -542,12 +542,8 @@ func (h *Handler) downloadFormattedRequestLog(c *gin.Context, requiredPrefix str
 	if !ok {
 		return
 	}
-	if info.Size() > formattedRequestLogMaxSize {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "log file too large to format"})
-		return
-	}
 
-	data, errRead := os.ReadFile(fullPath)
+	data, truncated, errRead := readRequestLogForFormat(fullPath, info.Size(), formattedRequestLogMaxSize)
 	if errRead != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errRead)})
 		return
@@ -555,8 +551,50 @@ func (h *Handler) downloadFormattedRequestLog(c *gin.Context, requiredPrefix str
 
 	name := strings.TrimSpace(c.Param("name"))
 	formattedName := formattedRequestLogFileName(name)
+	formatted := formatRequestLog(string(data), name)
+	if truncated {
+		formatted = appendFormattedLogTruncationNotice(formatted, info.Size(), formattedRequestLogMaxSize)
+	}
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", formattedName))
-	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(formatRequestLog(string(data), name)))
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(formatted))
+}
+
+// readRequestLogForFormat loads a request log for formatting. Files larger than
+// maxBytes are truncated so formatting stays bounded in memory.
+func readRequestLogForFormat(path string, size, maxBytes int64) ([]byte, bool, error) {
+	if maxBytes <= 0 {
+		maxBytes = formattedRequestLogMaxSize
+	}
+	if size <= maxBytes {
+		data, err := os.ReadFile(path)
+		return data, false, err
+	}
+
+	file, errOpen := os.Open(path)
+	if errOpen != nil {
+		return nil, false, errOpen
+	}
+	defer func() {
+		if errClose := file.Close(); errClose != nil {
+			// Best-effort close; the read result is already decided.
+		}
+	}()
+
+	data := make([]byte, maxBytes)
+	n, errRead := io.ReadFull(file, data)
+	if errRead != nil && errRead != io.EOF && errRead != io.ErrUnexpectedEOF {
+		return nil, false, errRead
+	}
+	return data[:n], true, nil
+}
+
+func appendFormattedLogTruncationNotice(formatted string, originalSize, keptBytes int64) string {
+	notice := fmt.Sprintf(
+		"\n=== Truncation Notice ===\nOriginal size: %d bytes\nFormatted from the first %d bytes only. Download the raw log file for the full content.\n",
+		originalSize,
+		keptBytes,
+	)
+	return strings.TrimRight(formatted, "\n") + notice
 }
 
 func formattedRequestLogFileName(name string) string {
