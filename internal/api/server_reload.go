@@ -98,6 +98,27 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		}
 	}
 
+	if s.requestLogger != nil && (oldCfg == nil || oldCfg.SuccessLogsMaxFiles != cfg.SuccessLogsMaxFiles) {
+		if setter, ok := s.requestLogger.(interface{ SetSuccessLogsMaxFiles(int) }); ok {
+			setter.SetSuccessLogsMaxFiles(cfg.SuccessLogsMaxFiles)
+		}
+	}
+
+	// Update success logging state when request-log or success-request-log changes.
+	if s.requestLogger != nil {
+		needUpdate := false
+		if oldCfg == nil {
+			needUpdate = true
+		} else if oldCfg.RequestLog != cfg.RequestLog || oldCfg.SuccessRequestLog != cfg.SuccessRequestLog {
+			needUpdate = true
+		}
+		if needUpdate {
+			if setter, ok := s.requestLogger.(interface{ SetSuccessEnabled(bool) }); ok {
+				setter.SetSuccessEnabled(cfg.RequestLog && cfg.SuccessRequestLog)
+			}
+		}
+	}
+
 	if oldCfg == nil || oldCfg.DisableCooling != cfg.DisableCooling {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	}
