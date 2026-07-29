@@ -174,20 +174,79 @@ func TestDownloadFormattedRequestLog_RejectsInvalidNames(t *testing.T) {
 	}
 }
 
-func TestDownloadFormattedRequestSuccessLog_TruncatesOversizedFile(t *testing.T) {
-	gin.SetMode(gin.TestMode)
+func TestReadRequestLogForFormat_KeepsHeadAndTail(t *testing.T) {
 	logDir := t.TempDir()
-	fileName := "success-large-format.log"
-	logPath := filepath.Join(logDir, fileName)
+	logPath := filepath.Join(logDir, "success-large-format.log")
 
 	var content strings.Builder
 	content.WriteString("=== REQUEST INFO ===\nURL: http://localhost/v1/responses\nMethod: POST\n\n")
 	content.WriteString("=== REQUEST BODY ===\n")
-	content.WriteString(`{"input":"hello-large"}`)
-	content.WriteString("\n\n=== RESPONSE ===\n")
-	// Force the file past the formatted-download size cap.
-	content.WriteString(strings.Repeat("x", int(formattedRequestLogMaxSize)+1024))
+	content.WriteString(`{"model":"gpt-5","input":[{"role":"user","content":[{"type":"input_text","text":"hello-large"}]}]}`)
+	content.WriteString("\n")
+	content.WriteString(strings.Repeat("m", 64*1024))
+	content.WriteString("\n=== RESPONSE ===\n")
+	content.WriteString(`{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"tail-response-end"}]}]}`)
+	content.WriteString("\n")
 	if err := os.WriteFile(logPath, []byte(content.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, errStat := os.Stat(logPath)
+	if errStat != nil {
+		t.Fatal(errStat)
+	}
+
+	// Cap far below the real file so head/tail sampling is exercised.
+	data, truncated, kept, errRead := readRequestLogForFormat(logPath, info.Size(), 8*1024)
+	if errRead != nil {
+		t.Fatalf("readRequestLogForFormat: %v", errRead)
+	}
+	if !truncated {
+		t.Fatal("expected truncated=true for oversized file")
+	}
+	if kept <= 0 || kept > 8*1024+64 {
+		t.Fatalf("kept=%d, expected around the 8KiB sample budget", kept)
+	}
+	raw := string(data)
+	if !strings.Contains(raw, "hello-large") {
+		t.Fatalf("expected head content, got:\n%s", raw)
+	}
+	if !strings.Contains(raw, "tail-response-end") {
+		t.Fatalf("expected tail content, got:\n%s", raw)
+	}
+	if !strings.Contains(raw, "TRUNCATED MIDDLE OMITTED") {
+		t.Fatalf("expected middle marker, got:\n%s", raw)
+	}
+
+	formatted := formatRequestLog(raw, "success-large-format.log")
+	formatted = appendFormattedLogTruncationNotice(formatted, info.Size(), kept)
+	if !strings.Contains(formatted, "hello-large") {
+		t.Fatalf("expected formatted head content, got:\n%s", formatted)
+	}
+	if !strings.Contains(formatted, "tail-response-end") {
+		t.Fatalf("expected formatted tail content, got:\n%s", formatted)
+	}
+	if !strings.Contains(formatted, "=== Truncation Notice ===") {
+		t.Fatalf("expected truncation notice, got:\n%s", formatted)
+	}
+}
+
+func TestDownloadFormattedRequestSuccessLog_FullFileUnderCap(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logDir := t.TempDir()
+	fileName := "success-under-cap.log"
+	logPath := filepath.Join(logDir, fileName)
+	content := `=== REQUEST INFO ===
+URL: http://localhost/v1/responses
+Method: POST
+
+=== REQUEST BODY ===
+{"model":"gpt-5","input":[{"role":"user","content":[{"type":"input_text","text":"hello-full"}]}]}
+
+=== RESPONSE ===
+{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done-full"}]}]}
+`
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -201,13 +260,13 @@ func TestDownloadFormattedRequestSuccessLog_TruncatesOversizedFile(t *testing.T)
 	h.DownloadFormattedRequestSuccessLog(ctx)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for oversized formatted download, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "hello-large") {
-		t.Fatalf("expected truncated formatted body to keep early content, got:\n%s", body)
+	if !strings.Contains(body, "hello-full") || !strings.Contains(body, "done-full") {
+		t.Fatalf("expected full formatted content, got:\n%s", body)
 	}
-	if !strings.Contains(body, "=== Truncation Notice ===") {
-		t.Fatalf("expected truncation notice, got:\n%s", body)
+	if strings.Contains(body, "=== Truncation Notice ===") {
+		t.Fatalf("did not expect truncation notice for small file, got:\n%s", body)
 	}
 }

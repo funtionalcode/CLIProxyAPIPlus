@@ -851,3 +851,110 @@ func performRequestLogListRaw(t *testing.T, h *Handler, target string) (int, str
 	}
 	return rec.Code, rec.Body.String()
 }
+
+func TestRequestLogModelFromName(t *testing.T) {
+	cases := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{name: "success-gpt-5.6-sol-017be4c8.log", prefix: "success-", want: "gpt-5.6-sol"},
+		{name: "error-glm-5.2-0cd29872.log", prefix: "error-", want: "glm-5.2"},
+		{name: "error-unknown-model-1.log", prefix: "error-", want: "unknown-model"},
+		{name: "success-only.log", prefix: "success-", want: "only"},
+		{name: "error-bad.txt", prefix: "error-", want: ""},
+		{name: "success-gpt-5.log", prefix: "error-", want: ""},
+	}
+	for _, tc := range cases {
+		if got := requestLogModelFromName(tc.name, tc.prefix); got != tc.want {
+			t.Fatalf("requestLogModelFromName(%q, %q) = %q, want %q", tc.name, tc.prefix, got, tc.want)
+		}
+	}
+}
+
+func TestFilterRequestLogFilesByModelAndTime(t *testing.T) {
+	files := []requestLogFile{
+		{Name: "success-gpt-5.6-sol-a1.log", Modified: 100},
+		{Name: "success-glm-5.2-b2.log", Modified: 200},
+		{Name: "success-gpt-4o-c3.log", Modified: 300},
+		{Name: "success-claude-opus-d4.log", Modified: 400},
+	}
+
+	byModel := filterRequestLogFiles(files, "success-", requestLogFilter{model: "GPT"})
+	if got := []string{byModel[0].Name, byModel[1].Name}; !reflect.DeepEqual(got, []string{"success-gpt-5.6-sol-a1.log", "success-gpt-4o-c3.log"}) {
+		t.Fatalf("model filter = %#v", got)
+	}
+
+	byTime := filterRequestLogFiles(files, "success-", requestLogFilter{from: 200, to: 300})
+	if len(byTime) != 2 || byTime[0].Name != "success-glm-5.2-b2.log" || byTime[1].Name != "success-gpt-4o-c3.log" {
+		t.Fatalf("time filter = %#v", byTime)
+	}
+
+	combined := filterRequestLogFiles(files, "success-", requestLogFilter{model: "gpt", from: 250, to: 350})
+	if len(combined) != 1 || combined[0].Name != "success-gpt-4o-c3.log" {
+		t.Fatalf("combined filter = %#v", combined)
+	}
+}
+
+func TestGetRequestSuccessLogsFiltersByModelAndTime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logDir := t.TempDir()
+	entries := []struct {
+		name string
+		mod  int64
+	}{
+		{"success-gpt-5.6-sol-a1.log", 100},
+		{"success-glm-5.2-b2.log", 200},
+		{"success-gpt-4o-c3.log", 300},
+		{"success-claude-opus-d4.log", 400},
+	}
+	for _, entry := range entries {
+		path := filepath.Join(logDir, entry.name)
+		if err := os.WriteFile(path, []byte("log"), 0o644); err != nil {
+			t.Fatalf("write log file: %v", err)
+		}
+		modified := time.Unix(entry.mod, 0)
+		if err := os.Chtimes(path, modified, modified); err != nil {
+			t.Fatalf("set log mtime: %v", err)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{SDKConfig: config.SDKConfig{RequestLog: true, SuccessRequestLog: true}}, nil)
+	h.SetLogDirectory(logDir)
+
+	status, body := performRequestLogListRaw(t, h, "/v0/management/request-success-logs?page=1&page_size=10&model=gpt&from=150&to=350")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", status, body)
+	}
+	var response struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Total != 1 || len(response.Files) != 1 || response.Files[0].Name != "success-gpt-4o-c3.log" {
+		t.Fatalf("filtered response = total %d files %#v", response.Total, response.Files)
+	}
+}
+
+func TestGetRequestErrorLogsRejectsInvalidTimeFilter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	h.SetLogDirectory(t.TempDir())
+
+	status, body := performRequestLogListRaw(t, h, "/v0/management/request-error-logs?from=not-a-time")
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", status, body)
+	}
+	if !strings.Contains(body, "from") {
+		t.Fatalf("expected from validation error, body = %s", body)
+	}
+
+	status, body = performRequestLogListRaw(t, h, "/v0/management/request-error-logs?from=200&to=100")
+	if status != http.StatusBadRequest {
+		t.Fatalf("from>to status = %d, body = %s", status, body)
+	}
+}

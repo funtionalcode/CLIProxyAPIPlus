@@ -23,10 +23,12 @@ import (
 )
 
 const (
-	defaultLogFileName               = "main.log"
-	logScannerInitialBuffer          = 64 * 1024
-	logScannerMaxBuffer              = 8 * 1024 * 1024
-	formattedRequestLogMaxSize int64 = 64 * 1024 * 1024
+	defaultLogFileName      = "main.log"
+	logScannerInitialBuffer = 64 * 1024
+	logScannerMaxBuffer     = 8 * 1024 * 1024
+	// formattedRequestLogMaxSize bounds memory used while formatting request logs.
+	// Large Codex-style logs commonly reach ~200MB; keep enough room for full files.
+	formattedRequestLogMaxSize int64 = 512 * 1024 * 1024
 	logCursorVersion                 = 1
 	logCursorFingerprintMax          = 4 * 1024
 	defaultRequestLogPage            = 1
@@ -44,6 +46,14 @@ type requestLogPagination struct {
 	enabled  bool
 	page     int
 	pageSize int
+}
+
+// requestLogFilter filters request-error/success log listings by model name and
+// modified-time range. Empty fields are ignored.
+type requestLogFilter struct {
+	model string
+	from  int64 // inclusive unix seconds; 0 means unbounded
+	to    int64 // inclusive unix seconds; 0 means unbounded
 }
 
 // GetLogs returns log lines with optional incremental loading.
@@ -242,6 +252,11 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errPagination.Error()})
 		return
 	}
+	filter, errFilter := parseRequestLogFilter(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
+		return
+	}
 	if h.cfg.RequestLog {
 		writeRequestLogFilesResponse(c, []requestLogFile{}, pagination)
 		return
@@ -262,7 +277,7 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
 		return
 	}
-	writeRequestLogFilesResponse(c, files, pagination)
+	writeRequestLogFilesResponse(c, filterRequestLogFiles(files, "error-", filter), pagination)
 }
 
 // GetRequestSuccessLogs lists success request log files when SuccessRequestLog is enabled.
@@ -279,6 +294,11 @@ func (h *Handler) GetRequestSuccessLogs(c *gin.Context) {
 	pagination, errPagination := parseRequestLogPagination(c)
 	if errPagination != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errPagination.Error()})
+		return
+	}
+	filter, errFilter := parseRequestLogFilter(c)
+	if errFilter != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errFilter.Error()})
 		return
 	}
 	if !h.cfg.RequestLog || !h.cfg.SuccessRequestLog {
@@ -301,7 +321,7 @@ func (h *Handler) GetRequestSuccessLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
 		return
 	}
-	writeRequestLogFilesResponse(c, files, pagination)
+	writeRequestLogFilesResponse(c, filterRequestLogFiles(files, "success-", filter), pagination)
 }
 
 func parseRequestLogPagination(c *gin.Context) (requestLogPagination, error) {
@@ -327,6 +347,49 @@ func parseRequestLogPagination(c *gin.Context) (requestLogPagination, error) {
 		pagination.pageSize = pageSize
 	}
 	return pagination, nil
+}
+
+// parseRequestLogFilter reads optional model/from/to query parameters.
+// model: case-insensitive substring match against the model segment in the file name
+// from/to: inclusive unix seconds, or RFC3339 timestamps
+func parseRequestLogFilter(c *gin.Context) (requestLogFilter, error) {
+	filter := requestLogFilter{
+		model: strings.TrimSpace(c.Query("model")),
+	}
+	from, errFrom := parseRequestLogTimeBound(c.Query("from"), "from")
+	if errFrom != nil {
+		return requestLogFilter{}, errFrom
+	}
+	to, errTo := parseRequestLogTimeBound(c.Query("to"), "to")
+	if errTo != nil {
+		return requestLogFilter{}, errTo
+	}
+	if from > 0 && to > 0 && from > to {
+		return requestLogFilter{}, errors.New("from must be less than or equal to to")
+	}
+	filter.from = from
+	filter.to = to
+	return filter, nil
+}
+
+func parseRequestLogTimeBound(raw, field string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	if unix, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if unix < 0 {
+			return 0, fmt.Errorf("%s must be a non-negative unix timestamp", field)
+		}
+		return unix, nil
+	}
+	if ts, err := time.Parse(time.RFC3339, value); err == nil {
+		return ts.Unix(), nil
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return ts.Unix(), nil
+	}
+	return 0, fmt.Errorf("%s must be a unix timestamp or RFC3339 datetime", field)
 }
 
 func collectRequestLogFiles(dir, prefix string) ([]requestLogFile, error) {
@@ -356,6 +419,47 @@ func collectRequestLogFiles(dir, prefix string) ([]requestLogFile, error) {
 		return files[i].Modified > files[j].Modified
 	})
 	return files, nil
+}
+
+func filterRequestLogFiles(files []requestLogFile, prefix string, filter requestLogFilter) []requestLogFile {
+	if filter.model == "" && filter.from == 0 && filter.to == 0 {
+		return files
+	}
+	modelNeedle := strings.ToLower(filter.model)
+	out := make([]requestLogFile, 0, len(files))
+	for _, file := range files {
+		if modelNeedle != "" {
+			modelName := strings.ToLower(requestLogModelFromName(file.Name, prefix))
+			if modelName == "" || !strings.Contains(modelName, modelNeedle) {
+				continue
+			}
+		}
+		if filter.from > 0 && file.Modified < filter.from {
+			continue
+		}
+		if filter.to > 0 && file.Modified > filter.to {
+			continue
+		}
+		out = append(out, file)
+	}
+	return out
+}
+
+// requestLogModelFromName extracts the model segment from names like:
+// success-gpt-5.6-sol-017be4c8.log or error-glm-5.2-0cd29872.log
+func requestLogModelFromName(name, prefix string) string {
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".log") {
+		return ""
+	}
+	base := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".log")
+	if base == "" {
+		return ""
+	}
+	idx := strings.LastIndex(base, "-")
+	if idx <= 0 {
+		return base
+	}
+	return base[:idx]
 }
 
 func writeRequestLogFilesResponse(c *gin.Context, files []requestLogFile, pagination requestLogPagination) {
@@ -543,7 +647,7 @@ func (h *Handler) downloadFormattedRequestLog(c *gin.Context, requiredPrefix str
 		return
 	}
 
-	data, truncated, errRead := readRequestLogForFormat(fullPath, info.Size(), formattedRequestLogMaxSize)
+	data, truncated, keptBytes, errRead := readRequestLogForFormat(fullPath, info.Size(), formattedRequestLogMaxSize)
 	if errRead != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errRead)})
 		return
@@ -553,7 +657,7 @@ func (h *Handler) downloadFormattedRequestLog(c *gin.Context, requiredPrefix str
 	formattedName := formattedRequestLogFileName(name)
 	formatted := formatRequestLog(string(data), name)
 	if truncated {
-		formatted = appendFormattedLogTruncationNotice(formatted, info.Size(), formattedRequestLogMaxSize)
+		formatted = appendFormattedLogTruncationNotice(formatted, info.Size(), keptBytes)
 	}
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", formattedName))
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(formatted))
@@ -561,18 +665,20 @@ func (h *Handler) downloadFormattedRequestLog(c *gin.Context, requiredPrefix str
 
 // readRequestLogForFormat loads a request log for formatting. Files larger than
 // maxBytes are truncated so formatting stays bounded in memory.
-func readRequestLogForFormat(path string, size, maxBytes int64) ([]byte, bool, error) {
+// Oversized files keep the head and tail so request metadata and final responses
+// both survive when the middle payload is too large.
+func readRequestLogForFormat(path string, size, maxBytes int64) ([]byte, bool, int64, error) {
 	if maxBytes <= 0 {
 		maxBytes = formattedRequestLogMaxSize
 	}
 	if size <= maxBytes {
 		data, err := os.ReadFile(path)
-		return data, false, err
+		return data, false, size, err
 	}
 
 	file, errOpen := os.Open(path)
 	if errOpen != nil {
-		return nil, false, errOpen
+		return nil, false, 0, errOpen
 	}
 	defer func() {
 		if errClose := file.Close(); errClose != nil {
@@ -580,17 +686,47 @@ func readRequestLogForFormat(path string, size, maxBytes int64) ([]byte, bool, e
 		}
 	}()
 
-	data := make([]byte, maxBytes)
-	n, errRead := io.ReadFull(file, data)
-	if errRead != nil && errRead != io.EOF && errRead != io.ErrUnexpectedEOF {
-		return nil, false, errRead
+	headBytes := maxBytes / 2
+	if headBytes < 1 {
+		headBytes = maxBytes
 	}
-	return data[:n], true, nil
+	tailBytes := maxBytes - headBytes
+	if tailBytes < 1 {
+		tailBytes = 0
+	}
+
+	head := make([]byte, headBytes)
+	nHead, errHead := io.ReadFull(file, head)
+	if errHead != nil && errHead != io.EOF && errHead != io.ErrUnexpectedEOF {
+		return nil, false, 0, errHead
+	}
+	head = head[:nHead]
+
+	if tailBytes == 0 {
+		return head, true, int64(len(head)), nil
+	}
+
+	if _, errSeek := file.Seek(-tailBytes, io.SeekEnd); errSeek != nil {
+		return nil, false, 0, errSeek
+	}
+	tail := make([]byte, tailBytes)
+	nTail, errTail := io.ReadFull(file, tail)
+	if errTail != nil && errTail != io.EOF && errTail != io.ErrUnexpectedEOF {
+		return nil, false, 0, errTail
+	}
+	tail = tail[:nTail]
+
+	marker := []byte("\n\n=== TRUNCATED MIDDLE OMITTED ===\n\n")
+	out := make([]byte, 0, len(head)+len(marker)+len(tail))
+	out = append(out, head...)
+	out = append(out, marker...)
+	out = append(out, tail...)
+	return out, true, int64(len(out)), nil
 }
 
 func appendFormattedLogTruncationNotice(formatted string, originalSize, keptBytes int64) string {
 	notice := fmt.Sprintf(
-		"\n=== Truncation Notice ===\nOriginal size: %d bytes\nFormatted from the first %d bytes only. Download the raw log file for the full content.\n",
+		"\n=== Truncation Notice ===\nOriginal size: %d bytes\nFormatted from %d bytes sampled from the start and end of the file. Download the raw log file for the full content.\n",
 		originalSize,
 		keptBytes,
 	)
