@@ -44,10 +44,14 @@ func GinLogrusLogger() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 
-		// Only generate request ID for AI API paths
+		// Only attach request ID for AI API paths. Prefer an inbound correlation ID
+		// from gateways such as new-api so request-log-by-id can use the same value.
 		var requestID string
 		if isAIAPIPath(path) {
-			requestID = GenerateRequestID()
+			requestID = ResolveIncomingRequestID(c)
+			if requestID == "" {
+				requestID = GenerateRequestID()
+			}
 			SetGinRequestID(c, requestID)
 			ctx := WithRequestID(c.Request.Context(), requestID)
 			c.Request = c.Request.WithContext(ctx)

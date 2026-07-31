@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"regexp"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -14,6 +16,25 @@ type requestIDKey struct{}
 // ginRequestIDKey is the Gin context key for request IDs.
 const ginRequestIDKey = "__request_id__"
 
+// Incoming request-id headers accepted from upstream gateways such as new-api.
+// Prefer the client-facing correlation header, then the new-api instance header.
+var incomingRequestIDHeaders = []string{
+	"X-Client-Request-Id",
+	"X-Oneapi-Request-Id",
+}
+
+const (
+	// maxIncomingRequestIDLen bounds log filenames and lookup keys.
+	maxIncomingRequestIDLen = 128
+)
+
+var (
+	// unsafeRequestIDChars matches characters that cannot appear in a log filename segment.
+	unsafeRequestIDChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+	// multiHyphen collapses repeated separators produced by sanitization.
+	multiHyphen = regexp.MustCompile(`-+`)
+)
+
 // GenerateRequestID creates a new 8-character hex request ID.
 func GenerateRequestID() string {
 	b := make([]byte, 4)
@@ -21,6 +42,40 @@ func GenerateRequestID() string {
 		return "00000000"
 	}
 	return hex.EncodeToString(b)
+}
+
+// SanitizeRequestID normalizes an external request ID for log filenames and lookups.
+// Empty or unsafe-only input returns an empty string so callers can fall back to a local ID.
+func SanitizeRequestID(raw string) string {
+	sanitized := strings.TrimSpace(raw)
+	if sanitized == "" {
+		return ""
+	}
+	// Keep only filename-safe characters so request-log-by-id can match the on-disk suffix.
+	sanitized = unsafeRequestIDChars.ReplaceAllString(sanitized, "-")
+	sanitized = multiHyphen.ReplaceAllString(sanitized, "-")
+	sanitized = strings.Trim(sanitized, "-.")
+	if sanitized == "" {
+		return ""
+	}
+	if len(sanitized) > maxIncomingRequestIDLen {
+		sanitized = strings.Trim(sanitized[:maxIncomingRequestIDLen], "-.")
+	}
+	return sanitized
+}
+
+// ResolveIncomingRequestID returns a sanitized request ID from known inbound headers.
+// Returns empty string when no usable external ID is present.
+func ResolveIncomingRequestID(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	for _, header := range incomingRequestIDHeaders {
+		if id := SanitizeRequestID(c.GetHeader(header)); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // WithRequestID returns a new context with the request ID attached.

@@ -550,6 +550,11 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request ID"})
 		return
 	}
+	// Match the same sanitization used when writing log filenames so callers can
+	// look up logs with either the original gateway request id or the on-disk form.
+	if sanitized := logging.SanitizeRequestID(requestID); sanitized != "" {
+		requestID = sanitized
+	}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
