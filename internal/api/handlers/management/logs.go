@@ -48,12 +48,13 @@ type requestLogPagination struct {
 	pageSize int
 }
 
-// requestLogFilter filters request-error/success log listings by model name and
-// modified-time range. Empty fields are ignored.
+// requestLogFilter filters request-error/success log listings by model name,
+// request id suffix, and modified-time range. Empty fields are ignored.
 type requestLogFilter struct {
-	model string
-	from  int64 // inclusive unix seconds; 0 means unbounded
-	to    int64 // inclusive unix seconds; 0 means unbounded
+	model     string
+	requestID string // sanitized; matched against the filename request-id suffix
+	from      int64  // inclusive unix seconds; 0 means unbounded
+	to        int64  // inclusive unix seconds; 0 means unbounded
 }
 
 // GetLogs returns log lines with optional incremental loading.
@@ -349,12 +350,30 @@ func parseRequestLogPagination(c *gin.Context) (requestLogPagination, error) {
 	return pagination, nil
 }
 
-// parseRequestLogFilter reads optional model/from/to query parameters.
+// parseRequestLogFilter reads optional model/request_id/from/to query parameters.
 // model: case-insensitive substring match against the model segment in the file name
+// request_id / id: sanitized request id; matched as a case-insensitive substring of the file name
+//
+//	(covers exact suffix -{id}.log as well as partial paste of gateway ids)
+//
 // from/to: inclusive unix seconds, or RFC3339 timestamps
 func parseRequestLogFilter(c *gin.Context) (requestLogFilter, error) {
 	filter := requestLogFilter{
 		model: strings.TrimSpace(c.Query("model")),
+	}
+	rawRequestID := strings.TrimSpace(c.Query("request_id"))
+	if rawRequestID == "" {
+		rawRequestID = strings.TrimSpace(c.Query("id"))
+	}
+	if rawRequestID != "" {
+		if strings.ContainsAny(rawRequestID, "/\\") {
+			return requestLogFilter{}, errors.New("request_id is invalid")
+		}
+		if sanitized := logging.SanitizeRequestID(rawRequestID); sanitized != "" {
+			filter.requestID = sanitized
+		} else {
+			return requestLogFilter{}, errors.New("request_id is invalid")
+		}
 	}
 	from, errFrom := parseRequestLogTimeBound(c.Query("from"), "from")
 	if errFrom != nil {
@@ -422,15 +441,25 @@ func collectRequestLogFiles(dir, prefix string) ([]requestLogFile, error) {
 }
 
 func filterRequestLogFiles(files []requestLogFile, prefix string, filter requestLogFilter) []requestLogFile {
-	if filter.model == "" && filter.from == 0 && filter.to == 0 {
+	if filter.model == "" && filter.requestID == "" && filter.from == 0 && filter.to == 0 {
 		return files
 	}
 	modelNeedle := strings.ToLower(filter.model)
+	requestIDNeedle := strings.ToLower(filter.requestID)
 	out := make([]requestLogFile, 0, len(files))
 	for _, file := range files {
 		if modelNeedle != "" {
 			modelName := strings.ToLower(requestLogModelFromName(file.Name, prefix))
 			if modelName == "" || !strings.Contains(modelName, modelNeedle) {
+				continue
+			}
+		}
+		if requestIDNeedle != "" {
+			// Prefer exact suffix match (same contract as request-log-by-id), then
+			// fall back to case-insensitive substring so partial gateway ids work.
+			nameLower := strings.ToLower(file.Name)
+			if !strings.HasSuffix(nameLower, "-"+requestIDNeedle+".log") &&
+				!strings.Contains(nameLower, requestIDNeedle) {
 				continue
 			}
 		}

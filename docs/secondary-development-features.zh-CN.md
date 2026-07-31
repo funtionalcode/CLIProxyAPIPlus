@@ -55,7 +55,7 @@ go build -o /tmp/cli-proxy-api-test ./cmd/server && rm /tmp/cli-proxy-api-test
 
 **行为：**
 
-- 错误/成功请求日志列表支持按 **模型名**（文件名中的 model 段，大小写不敏感子串）与 **修改时间**（`from`/`to`，unix 秒或 RFC3339）筛选
+- 错误/成功请求日志列表支持按 **模型名**（文件名中的 model 段，大小写不敏感子串）、**请求 ID**（`request_id`/`id`，经 `SanitizeRequestID` 后匹配文件名后缀或子串）与 **修改时间**（`from`/`to`，unix 秒或 RFC3339）筛选
 - 超大请求日志格式化下载：**截断**输出并成功返回，而不是 413 直接失败（上限见 `formattedRequestLogMaxSize`）
 - 成功请求日志管理路由必须存在（`success-request-log` 列表/下载等），与错误请求日志对称
 
@@ -134,7 +134,7 @@ go build -o /tmp/cli-proxy-api-test ./cmd/server && rm /tmp/cli-proxy-api-test
 
 1. AI 路径是否仍优先外部 request id；无头时是否仍生成 8 hex。
 2. `SanitizeRequestID` 与 `request-log-by-id` 是否同源规范化。
-3. 错误/成功请求日志列表的 `model`/`from`/`to` 筛选是否有效。
+3. 错误/成功请求日志列表的 `model`/`request_id`/`from`/`to` 筛选是否有效。
 4. 超大日志格式化下载是否截断成功而非 413。
 5. 成功请求日志管理路由是否注册。
 6. 认证文件 `weight` / `model_aliases` 读写是否仍生效。
@@ -153,3 +153,4 @@ go build -o /tmp/cli-proxy-api-test ./cmd/server && rm /tmp/cli-proxy-api-test
 | 日期 | 说明 |
 | --- | --- |
 | 2026-07-31 | 初建清单：入站 request id、请求日志筛选/大文件下载、单账号别名与 weight 同步要点、三端联调契约 |
+| 2026-07-31 | 请求日志列表补充 `request_id`/`id` 筛选（与 request-log-by-id 同源 sanitize） |

@@ -896,6 +896,40 @@ func TestFilterRequestLogFilesByModelAndTime(t *testing.T) {
 	}
 }
 
+func TestFilterRequestLogFilesByRequestID(t *testing.T) {
+	files := []requestLogFile{
+		{Name: "success-grok-4.5-202607311304210806440308268d9d6hRIDy1BW.log", Modified: 100},
+		{Name: "success-gpt-5-202607311301428373439638268d9d6tX6BBjia.log", Modified: 200},
+		{Name: "error-claude-sonnet-a1b2c3d4.log", Modified: 300},
+		{Name: "success-glm-5.2-b2.log", Modified: 400},
+	}
+
+	exact := filterRequestLogFiles(files, "success-", requestLogFilter{
+		requestID: "202607311301428373439638268d9d6tX6BBjia",
+	})
+	if len(exact) != 1 || exact[0].Name != "success-gpt-5-202607311301428373439638268d9d6tX6BBjia.log" {
+		t.Fatalf("exact request id filter = %#v", exact)
+	}
+
+	partial := filterRequestLogFiles(files, "success-", requestLogFilter{requestID: "RIDy1BW"})
+	if len(partial) != 1 || !strings.Contains(partial[0].Name, "RIDy1BW") {
+		t.Fatalf("partial request id filter = %#v", partial)
+	}
+
+	combined := filterRequestLogFiles(files, "error-", requestLogFilter{
+		model:     "claude",
+		requestID: "a1b2c3d4",
+	})
+	if len(combined) != 1 || combined[0].Name != "error-claude-sonnet-a1b2c3d4.log" {
+		t.Fatalf("model+request id filter = %#v", combined)
+	}
+
+	miss := filterRequestLogFiles(files, "success-", requestLogFilter{requestID: "not-present-id"})
+	if len(miss) != 0 {
+		t.Fatalf("expected empty for missing request id, got %#v", miss)
+	}
+}
+
 func TestGetRequestSuccessLogsFiltersByModelAndTime(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logDir := t.TempDir()
