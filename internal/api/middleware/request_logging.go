@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20  // 1 MiB
-	maxDeferredErrorRequestBodyBytes     int64 = 32 << 20 // 32 MiB
+	maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20   // 1 MiB: in-memory cap when only error logging is active
+	maxCapturedRequestBodyBytes          int64 = 10 << 20  // 10 MiB: in-memory cap when full request logging is enabled; larger bodies spool to disk
+	maxDeferredErrorRequestBodyBytes     int64 = 128 << 20 // 128 MiB: spooled-to-disk cap for large request bodies
 )
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
@@ -97,7 +98,9 @@ type deferredRequestBodyCapture struct {
 }
 
 func attachDeferredRequestBodyCapture(req *http.Request, logger logging.RequestLogger, requestInfo *RequestInfo, loggerEnabled, bodyCaptured bool) *deferredRequestBodyCapture {
-	if loggerEnabled || bodyCaptured || req == nil || req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0 || requestInfo == nil {
+	// Spool to disk whenever the body was not captured in memory (large, unknown-size,
+	// or over the in-memory cap), regardless of whether full request logging is enabled.
+	if bodyCaptured || req == nil || req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0 || requestInfo == nil {
 		return nil
 	}
 	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
@@ -290,9 +293,6 @@ func isResponsesWebsocketUpgrade(req *http.Request) bool {
 }
 
 func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
-	if loggerEnabled {
-		return true
-	}
 	if req == nil || req.Body == nil {
 		return false
 	}
@@ -303,7 +303,13 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 	if req.ContentLength <= 0 {
 		return false
 	}
-	return req.ContentLength <= maxErrorOnlyCapturedRequestBodyBytes
+	// Cap in-memory request body capture. Bodies exceeding the limit are spooled
+	// to disk by the deferred capture instead of being read fully into memory.
+	limit := maxErrorOnlyCapturedRequestBodyBytes
+	if loggerEnabled {
+		limit = maxCapturedRequestBodyBytes
+	}
+	return req.ContentLength <= limit
 }
 
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
