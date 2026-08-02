@@ -16,6 +16,12 @@ import (
 const (
 	websocketToolOutputCacheMaxPerSession = 256
 	websocketToolOutputCacheTTL           = 30 * time.Minute
+	// maxWebsocketToolCacheRequestBytes caps the request payload that the tool-call
+	// cache will parse. Very large payloads (e.g. long Codex sessions that resend the
+	// full history each turn) are skipped to avoid the multi-GB gjson allocations that
+	// otherwise dominate heap usage. Tool-call repair still reads from the existing
+	// cache; only recording of oversized turns is skipped.
+	maxWebsocketToolCacheRequestBytes = 16 << 20 // 16 MiB
 )
 
 var defaultWebsocketToolOutputCache = newWebsocketToolOutputCache(0, websocketToolOutputCacheMaxPerSession)
@@ -254,6 +260,11 @@ func newResponsesWebsocketToolCacheTurn(sessionKey string) *responsesWebsocketTo
 
 func (t *responsesWebsocketToolCacheTurn) recordRequest(payload []byte) {
 	if t == nil || len(payload) == 0 {
+		return
+	}
+	// Skip oversized payloads: parsing/caching a full multi-MB Codex history each turn
+	// is the dominant heap consumer (gjson.getBytes). Repair still works from prior cache.
+	if len(payload) > maxWebsocketToolCacheRequestBytes {
 		return
 	}
 	input := gjson.GetBytes(payload, "input")

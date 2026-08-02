@@ -1763,6 +1763,25 @@ func TestResponsesWebsocketToolCacheTurnCommitsOnlyOnSuccess(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketToolCacheTurnSkipsOversizedRequest(t *testing.T) {
+	const sessionKey = "tool-cache-turn-oversized-session"
+	defer defaultWebsocketToolOutputCache.deleteSession(sessionKey)
+	defer defaultWebsocketToolCallCache.deleteSession(sessionKey)
+
+	// A payload exceeding maxWebsocketToolCacheRequestBytes must be skipped entirely
+	// to avoid the multi-GB gjson allocations seen with very long Codex sessions.
+	padding := strings.Repeat("x", maxWebsocketToolCacheRequestBytes)
+	payload := []byte(`{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"` + padding + `"}]}`)
+
+	turn := newResponsesWebsocketToolCacheTurn(sessionKey)
+	turn.recordRequest(payload)
+	turn.commit()
+
+	if _, ok := defaultWebsocketToolOutputCache.get(sessionKey, "call-1"); ok {
+		t.Fatal("oversized request was recorded into tool cache; expected it to be skipped")
+	}
+}
+
 func TestResponsesWebsocketToolCacheRetainPreventsOverlappingReleaseDeletion(t *testing.T) {
 	const sessionKey = "tool-cache-overlapping-retain-session"
 	retainResponsesWebsocketToolCaches(sessionKey)
