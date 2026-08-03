@@ -482,8 +482,8 @@ func TestSchedulerPick_MixedProvidersSessionAffinityNewBindingsUseWeight(t *test
 		authID   string
 	}{
 		{provider: "provider-a", authID: "provider-a"},
-		{provider: "provider-a", authID: "provider-a"},
 		{provider: "provider-b", authID: "provider-b"},
+		{provider: "provider-a", authID: "provider-a"},
 	}
 	for index, tc := range want {
 		headers := http.Header{}
@@ -640,8 +640,11 @@ func TestManagerSelectAuthByKindSkipsAPIKey(t *testing.T) {
 	if selected == nil || selected.ID != "codex-oauth" {
 		t.Fatalf("SelectAuthByKind() auth = %#v, want codex-oauth", selected)
 	}
-	if scheduler.calls != 2 {
-		t.Fatalf("scheduler.calls = %d, want 2", scheduler.calls)
+	if scheduler.calls != 1 {
+		t.Fatalf("scheduler.calls = %d, want 1", scheduler.calls)
+	}
+	if len(scheduler.requests) != 1 || len(scheduler.requests[0].Candidates) != 1 || scheduler.requests[0].Candidates[0].ID != "codex-oauth" {
+		t.Fatalf("scheduler candidates = %#v, want only codex-oauth", scheduler.requests)
 	}
 }
 

@@ -1501,6 +1501,9 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 				}
 			}
 		}
+	} else if codexCloakingEnabled(cfg, auth) {
+		headers.Set("User-Agent", codexUserAgent)
+		headers.Set("Originator", codexOriginator)
 	}
 
 	return headers

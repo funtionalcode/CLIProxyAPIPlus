@@ -17,6 +17,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -25,12 +26,42 @@ import (
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
-	mu               sync.Mutex
-	cursors          map[string]int
-	weightedCurrents map[string]map[string]int
-	maxKeys          int
+	mu             sync.Mutex
+	cursors        map[string]int
+	weightedStates map[string]*smoothWeightedState
+	maxKeys        int
 	// Weighted enables weighted round-robin across all available auths, ignoring priority.
 	Weighted bool
+}
+
+// WeightedRoundRobinSelector provides smooth weighted round-robin selection.
+type WeightedRoundRobinSelector struct {
+	mu      sync.Mutex
+	states  map[string]*smoothWeightedState
+	maxKeys int
+}
+
+type smoothWeightedState struct {
+	current map[string]int64
+	weights map[string]int64
+}
+
+type weightedSelectorStateModelKey struct{}
+
+func withWeightedSelectorStateModel(ctx context.Context, selector Selector, routeModel string) context.Context {
+	if _, ok := selector.(*WeightedRoundRobinSelector); !ok || strings.TrimSpace(routeModel) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, weightedSelectorStateModelKey{}, routeModel)
+}
+
+func weightedSelectorStateModel(ctx context.Context, availabilityModel string) string {
+	if ctx != nil {
+		if routeModel, ok := ctx.Value(weightedSelectorStateModelKey{}).(string); ok && strings.TrimSpace(routeModel) != "" {
+			return routeModel
+		}
+	}
+	return availabilityModel
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -131,57 +162,25 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
-func authWeight(auth *Auth) int {
+func authWeight(auth *Auth) int64 {
 	if auth == nil {
-		return 1
+		return credentialweight.Default
 	}
-	if auth.Attributes != nil {
-		if parsed, ok := parsePositiveInt(auth.Attributes["weight"]); ok {
-			return parsed
+	if rawWeight, ok := auth.Attributes[AttributeWeight]; ok && strings.TrimSpace(rawWeight) != "" {
+		weight, errParse := credentialweight.ParseString(rawWeight)
+		if errParse != nil {
+			return 0
 		}
+		return weight
 	}
-	if auth.Metadata != nil {
-		if parsed, ok := metadataPositiveInt(auth.Metadata["weight"]); ok {
-			return parsed
+	if rawWeight, ok := auth.Metadata[AttributeWeight]; ok {
+		weight, errParse := credentialweight.ParseValue(rawWeight)
+		if errParse != nil {
+			return 0
 		}
+		return weight
 	}
-	return 1
-}
-
-func parsePositiveInt(raw string) (int, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0, false
-	}
-	parsed, err := strconv.Atoi(raw)
-	if err != nil || parsed <= 0 {
-		return 0, false
-	}
-	return parsed, true
-}
-
-func metadataPositiveInt(value any) (int, bool) {
-	switch typed := value.(type) {
-	case int:
-		if typed > 0 {
-			return typed, true
-		}
-	case int64:
-		if typed > 0 {
-			return int(typed), true
-		}
-	case float64:
-		if typed > 0 {
-			return int(typed), true
-		}
-	case json.Number:
-		if parsed, err := typed.Int64(); err == nil && parsed > 0 {
-			return int(parsed), true
-		}
-	case string:
-		return parsePositiveInt(typed)
-	}
-	return 0, false
+	return credentialweight.Default
 }
 
 func canonicalModelKey(model string) string {
@@ -376,7 +375,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 			groupIndex = 0
 		}
 		if s.Weighted {
-			selectedParent := pickSmoothWeightedParent(parentOrder, groups, s.weightedCurrentsForKey(groupKey, limit))
+			selectedParent := pickSmoothWeightedParent(parentOrder, groups, s.weightedStateForKey(groupKey, limit))
 			group := groups[selectedParent]
 			innerKey := key + "::cred:" + selectedParent
 			s.ensureCursorKey(innerKey, limit)
@@ -411,7 +410,9 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		index = 0
 	}
 	if s.Weighted {
-		picked := pickSmoothWeightedAuth(available, s.weightedCurrentsForKey(key, limit))
+		state := s.weightedStateForKey(key, limit)
+		state.prepare(authWeightVector(available))
+		picked := pickSmoothWeightedAuth(available, state.current)
 		s.mu.Unlock()
 		return picked, nil
 	}
@@ -420,74 +421,51 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	return available[index%len(available)], nil
 }
 
-func pickSmoothWeightedAuth(auths []*Auth, currents map[string]int) *Auth {
-	if len(auths) == 0 {
-		return nil
-	}
-	if currents == nil {
-		currents = make(map[string]int)
-	}
-	active := make(map[string]struct{}, len(auths))
-	total := 0
-	var picked *Auth
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		id := auth.ID
-		active[id] = struct{}{}
-		weight := authWeight(auth)
-		total += weight
-		currents[id] += weight
-		if picked == nil || currents[id] > currents[picked.ID] {
-			picked = auth
-		}
-	}
-	for id := range currents {
-		if _, ok := active[id]; !ok {
-			delete(currents, id)
-		}
-	}
-	if picked == nil {
-		return auths[0]
-	}
-	currents[picked.ID] -= total
-	return picked
-}
-
-func pickSmoothWeightedParent(parentOrder []string, groups map[string][]*Auth, currents map[string]int) string {
+func pickSmoothWeightedParent(parentOrder []string, groups map[string][]*Auth, state *smoothWeightedState) string {
 	if len(parentOrder) == 0 {
 		return ""
 	}
-	if currents == nil {
-		currents = make(map[string]int)
-	}
-	active := make(map[string]struct{}, len(parentOrder))
-	total := 0
-	picked := ""
+	weights := make(map[string]int64, len(parentOrder))
 	for _, parent := range parentOrder {
-		active[parent] = struct{}{}
-		weight := groupAuthWeight(groups[parent])
-		total += weight
-		currents[parent] += weight
-		if picked == "" || currents[parent] > currents[picked] {
-			picked = parent
+		if weight := groupAuthWeight(groups[parent]); weight > 0 {
+			weights[parent] = weight
 		}
 	}
-	for parent := range currents {
+	if state == nil {
+		state = &smoothWeightedState{}
+	}
+	state.prepare(weights)
+	active := make(map[string]struct{}, len(parentOrder))
+	var total int64
+	picked := ""
+	var pickedCurrent int64
+	for _, parent := range parentOrder {
+		weight := weights[parent]
+		if weight <= 0 {
+			continue
+		}
+		active[parent] = struct{}{}
+		total = saturatingAddInt64(total, weight)
+		state.current[parent] = saturatingAddInt64(state.current[parent], weight)
+		if picked == "" || state.current[parent] > pickedCurrent {
+			picked = parent
+			pickedCurrent = state.current[parent]
+		}
+	}
+	for parent := range state.current {
 		if _, ok := active[parent]; !ok {
-			delete(currents, parent)
+			delete(state.current, parent)
 		}
 	}
 	if picked == "" {
 		return parentOrder[0]
 	}
-	currents[picked] -= total
+	state.current[picked] = saturatingAddInt64(state.current[picked], -total)
 	return picked
 }
 
-func groupAuthWeight(auths []*Auth) int {
-	weight := 1
+func groupAuthWeight(auths []*Auth) int64 {
+	weight := credentialweight.Default
 	for _, auth := range auths {
 		if candidate := authWeight(auth); candidate > weight {
 			weight = candidate
@@ -515,19 +493,19 @@ func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
 	}
 }
 
-// weightedCurrentsForKey returns the smooth weighted round-robin state for key.
+// weightedStateForKey returns the smooth weighted round-robin state for key.
 // Must be called with s.mu held.
-func (s *RoundRobinSelector) weightedCurrentsForKey(key string, limit int) map[string]int {
-	if s.weightedCurrents == nil {
-		s.weightedCurrents = make(map[string]map[string]int)
+func (s *RoundRobinSelector) weightedStateForKey(key string, limit int) *smoothWeightedState {
+	if s.weightedStates == nil {
+		s.weightedStates = make(map[string]*smoothWeightedState)
 	}
-	if _, ok := s.weightedCurrents[key]; !ok && len(s.weightedCurrents) >= limit {
-		s.weightedCurrents = make(map[string]map[string]int)
+	if _, ok := s.weightedStates[key]; !ok && len(s.weightedStates) >= limit {
+		s.weightedStates = make(map[string]*smoothWeightedState)
 	}
-	state := s.weightedCurrents[key]
+	state := s.weightedStates[key]
 	if state == nil {
-		state = make(map[string]int)
-		s.weightedCurrents[key] = state
+		state = &smoothWeightedState{}
+		s.weightedStates[key] = state
 	}
 	return state
 }
@@ -559,6 +537,124 @@ func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
 	}
 	sort.Strings(parentOrder)
 	return groups, parentOrder
+}
+
+func positiveWeightAuths(auths []*Auth) []*Auth {
+	weightedCandidates := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth != nil && authWeight(auth) > 0 {
+			weightedCandidates = append(weightedCandidates, auth)
+		}
+	}
+	return weightedCandidates
+}
+
+// Pick selects the next available auth using smooth weighted round-robin.
+func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	available, errAvailable := getAvailableAuths(positiveWeightAuths(auths), provider, model, time.Now(), true)
+	if errAvailable != nil {
+		return nil, errAvailable
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	stateModel := weightedSelectorStateModel(ctx, model)
+	key := provider + ":" + canonicalModelKey(stateModel)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.states == nil {
+		s.states = make(map[string]*smoothWeightedState)
+	}
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+	if _, ok := s.states[key]; !ok && len(s.states) >= limit {
+		s.states = make(map[string]*smoothWeightedState)
+	}
+	state := s.states[key]
+	if state == nil {
+		state = &smoothWeightedState{}
+		s.states[key] = state
+	}
+	state.prepare(authWeightVector(available))
+	picked := pickSmoothWeightedAuth(available, state.current)
+	if picked == nil {
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
+	}
+	return picked, nil
+}
+
+func (s *smoothWeightedState) prepare(weights map[string]int64) {
+	if s.current == nil || !weightVectorsEqual(s.weights, weights) {
+		s.current = make(map[string]int64)
+	}
+	s.weights = weights
+}
+
+func weightVectorsEqual(left, right map[string]int64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for authID, weight := range left {
+		if right[authID] != weight {
+			return false
+		}
+	}
+	return true
+}
+
+func authWeightVector(auths []*Auth) map[string]int64 {
+	weights := make(map[string]int64, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if weight := authWeight(auth); weight > 0 {
+			weights[auth.ID] = weight
+		}
+	}
+	return weights
+}
+
+func pickSmoothWeightedAuth(auths []*Auth, current map[string]int64) *Auth {
+	active := make(map[string]struct{}, len(auths))
+	var picked *Auth
+	var pickedCurrent int64
+	var totalWeight int64
+	for _, auth := range auths {
+		weight := authWeight(auth)
+		if auth == nil || weight <= 0 {
+			continue
+		}
+		active[auth.ID] = struct{}{}
+		current[auth.ID] = saturatingAddInt64(current[auth.ID], weight)
+		totalWeight = saturatingAddInt64(totalWeight, weight)
+		if picked == nil || current[auth.ID] > pickedCurrent {
+			picked = auth
+			pickedCurrent = current[auth.ID]
+		}
+	}
+	for authID := range current {
+		if _, ok := active[authID]; !ok {
+			delete(current, authID)
+		}
+	}
+	if picked == nil {
+		return nil
+	}
+	current[picked.ID] = saturatingAddInt64(current[picked.ID], -totalWeight)
+	return picked
+}
+
+func saturatingAddInt64(value, delta int64) int64 {
+	if delta > 0 && value > math.MaxInt64-delta {
+		return math.MaxInt64
+	}
+	if delta < 0 && value < math.MinInt64-delta {
+		return math.MinInt64
+	}
+	return value + delta
 }
 
 // Pick selects the first available auth for the provider in a deterministic manner.

@@ -159,6 +159,8 @@ type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// NormalizeEnvironment controls account-scoped environment text normalization.
 	NormalizeEnvironment ClaudeEnvironmentNormalizationConfig `yaml:"normalize-environment,omitempty" json:"normalize-environment,omitempty"`
+	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
+	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
@@ -285,7 +287,7 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// Weighted enables weighted round-robin when Strategy is round-robin.
@@ -427,8 +429,9 @@ type ClaudeKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
-	// Weight controls weighted round-robin selection when routing.weighted is enabled.
-	Weight int `yaml:"weight,omitempty" json:"weight,omitempty"`
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/claude-sonnet-4").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
@@ -468,6 +471,10 @@ func (k ClaudeKey) GetAPIKey() string { return k.APIKey }
 
 func (k ClaudeKey) GetBaseURL() string { return k.BaseURL }
 
+func (k ClaudeKey) GetPrefix() string { return k.Prefix }
+
+func (k ClaudeKey) GetProxyURL() string { return k.ProxyURL }
+
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
 type ClaudeModel struct {
 	// Name is the upstream model identifier used when issuing requests.
@@ -479,17 +486,25 @@ type ClaudeModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
 func (m ClaudeModel) GetName() string { return m.Name }
 
 func (m ClaudeModel) GetAlias() string { return m.Alias }
 
-func (m ClaudeModel) GetDisplayName() string { return m.DisplayName }
+func (m ClaudeModel) GetDisplayName() string   { return m.DisplayName }
+func (m ClaudeModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m ClaudeModel) GetForceMapping() bool    { return m.ForceMapping }
 
-func (m ClaudeModel) GetForceMapping() bool { return m.ForceMapping }
+func (m ClaudeModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
@@ -501,8 +516,9 @@ type CodexKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
-	// Weight controls weighted round-robin selection when routing.weighted is enabled.
-	Weight int `yaml:"weight,omitempty" json:"weight,omitempty"`
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
@@ -513,6 +529,9 @@ type CodexKey struct {
 
 	// Websockets enables the Responses API websocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
+
+	// AlphaSearch allows this Codex API key to serve the Alpha Search endpoint.
+	AlphaSearch bool `yaml:"alpha-search,omitempty" json:"alpha-search,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
@@ -534,6 +553,10 @@ func (k CodexKey) GetAPIKey() string { return k.APIKey }
 
 func (k CodexKey) GetBaseURL() string { return k.BaseURL }
 
+func (k CodexKey) GetPrefix() string { return k.Prefix }
+
+func (k CodexKey) GetProxyURL() string { return k.ProxyURL }
+
 // CodexModel describes a mapping between an alias and the actual upstream model name.
 type CodexModel struct {
 	// Name is the upstream model identifier used when issuing requests.
@@ -545,17 +568,25 @@ type CodexModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
 func (m CodexModel) GetName() string { return m.Name }
 
 func (m CodexModel) GetAlias() string { return m.Alias }
 
-func (m CodexModel) GetDisplayName() string { return m.DisplayName }
+func (m CodexModel) GetDisplayName() string   { return m.DisplayName }
+func (m CodexModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m CodexModel) GetForceMapping() bool    { return m.ForceMapping }
 
-func (m CodexModel) GetForceMapping() bool { return m.ForceMapping }
+func (m CodexModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
 // XAIKey uses the Codex API key structure for native xAI execution.
 type XAIKey = CodexKey
@@ -573,8 +604,9 @@ type GeminiKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
-	// Weight controls weighted round-robin selection when routing.weighted is enabled.
-	Weight int `yaml:"weight,omitempty" json:"weight,omitempty"`
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gemini-3-pro-preview").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
@@ -602,6 +634,10 @@ func (k GeminiKey) GetAPIKey() string { return k.APIKey }
 
 func (k GeminiKey) GetBaseURL() string { return k.BaseURL }
 
+func (k GeminiKey) GetPrefix() string { return k.Prefix }
+
+func (k GeminiKey) GetProxyURL() string { return k.ProxyURL }
+
 // GeminiModel describes a mapping between an alias and the actual upstream model name.
 type GeminiModel struct {
 	// Name is the upstream model identifier used when issuing requests.
@@ -613,17 +649,25 @@ type GeminiModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
 func (m GeminiModel) GetName() string { return m.Name }
 
 func (m GeminiModel) GetAlias() string { return m.Alias }
 
-func (m GeminiModel) GetDisplayName() string { return m.DisplayName }
+func (m GeminiModel) GetDisplayName() string   { return m.DisplayName }
+func (m GeminiModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m GeminiModel) GetForceMapping() bool    { return m.ForceMapping }
 
-func (m GeminiModel) GetForceMapping() bool { return m.ForceMapping }
+func (m GeminiModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
 type KiroKey struct {
 	// TokenFile is the path to the Kiro token file (default: ~/.aws/sso/cache/kiro-auth-token.json)
@@ -701,6 +745,9 @@ type OpenAICompatibility struct {
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
+	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
+	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
+
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 }
@@ -713,8 +760,9 @@ type OpenAICompatibilityAPIKey struct {
 	// BalanceToken is an optional token used for provider balance checks.
 	BalanceToken string `yaml:"balance-token,omitempty" json:"balance-token,omitempty"`
 
-	// Weight controls weighted round-robin selection for this API key.
-	Weight int `yaml:"weight,omitempty" json:"weight,omitempty"`
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
@@ -741,6 +789,9 @@ type OpenAICompatibilityModel struct {
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
@@ -763,6 +814,8 @@ func (m OpenAICompatibilityModel) GetName() string { return m.Name }
 
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
 
-func (m OpenAICompatibilityModel) GetDisplayName() string { return m.DisplayName }
+func (m OpenAICompatibilityModel) GetDisplayName() string   { return m.DisplayName }
+func (m OpenAICompatibilityModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapping }
 
-func (m OpenAICompatibilityModel) GetForceMapping() bool { return m.ForceMapping }
+func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }

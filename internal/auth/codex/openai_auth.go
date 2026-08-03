@@ -29,6 +29,8 @@ const (
 	ClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
 	DefaultCallbackPort = 1455
 	defaultRedirectPath = "/auth/callback"
+	RedirectURI         = "http://localhost:1455/auth/callback"
+	codexRefreshTimeout = 30 * time.Second
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -258,7 +260,9 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	}
 
 	result, err, _ := codexRefreshGroup.Do(refreshToken, func() (interface{}, error) {
-		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
+		defer cancelRefresh()
+		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 	})
 	if err != nil {
 		return nil, err

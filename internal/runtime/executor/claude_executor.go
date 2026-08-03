@@ -48,6 +48,11 @@ type ClaudeExecutor struct {
 // Previously "proxy_" was used but this is a detectable fingerprint difference.
 const claudeToolPrefix = ""
 
+const (
+	claudeFastModeBeta = "fast-mode-2026-02-01"
+	claudeDefaultBetas = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+)
+
 func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 	return sigcompat.SignatureProviderFromModelName(baseModel) == sigcompat.SignatureProviderClaude
 }
@@ -305,8 +310,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
-	// Use streaming translation to preserve function calling, except for claude.
-	stream := from != to
+	// Use streaming translation unless the caller wants native Claude JSON back.
+	stream := responseFormat != to
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -361,10 +366,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	body = helps.SetBoolIfDifferent(body, "stream", stream)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	extraBetas = appendClaudeFastModeBeta(body, extraBetas)
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -386,7 +393,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
+	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, stream, extraBetas, e.cfg, opts.Headers); errHeaders != nil {
 		return resp, errHeaders
 	}
 	e.persistClaudeDeviceHighWater(auth, apiKey)
@@ -566,6 +573,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	extraBetas = appendClaudeFastModeBeta(body, extraBetas)
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
@@ -918,6 +926,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	extraBetas = appendClaudeFastModeBeta(body, extraBetas)
 	if isClaudeOAuthToken(apiKey) {
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, claudeToolPrefix, auth.ToolPrefixDisabled())
 	}
@@ -1062,6 +1071,58 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	}
 	body, _ = sjson.DeleteBytes(body, "betas")
 	return betas, body
+}
+
+func appendClaudeFastModeBeta(body []byte, extraBetas []string) []string {
+	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "speed").String()), "fast") {
+		return appendClaudeBetaIfMissing(extraBetas, claudeFastModeBeta)
+	}
+	return extraBetas
+}
+
+func appendClaudeBetaIfMissing(betas []string, beta string) []string {
+	beta = strings.TrimSpace(beta)
+	if beta == "" {
+		return betas
+	}
+	for _, existing := range betas {
+		if strings.EqualFold(strings.TrimSpace(existing), beta) {
+			return betas
+		}
+	}
+	return append(betas, beta)
+}
+
+func claudeBetasContain(betas []string, beta string) bool {
+	for _, existing := range betas {
+		if strings.EqualFold(strings.TrimSpace(existing), beta) {
+			return true
+		}
+	}
+	return false
+}
+
+func insertClaudeFastModeBeta(baseBetas string) string {
+	parts := strings.Split(baseBetas, ",")
+	out := make([]string, 0, len(parts)+1)
+	inserted := false
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.EqualFold(part, claudeFastModeBeta) {
+			inserted = true
+		} else if !inserted && strings.HasPrefix(part, "redact-thinking-") {
+			out = append(out, claudeFastModeBeta)
+			inserted = true
+		}
+		out = append(out, part)
+	}
+	if !inserted {
+		out = append(out, claudeFastModeBeta)
+	}
+	return strings.Join(out, ",")
 }
 
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
@@ -1318,7 +1379,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, incomingHeaders, cfg)
 	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+	baseBetas := claudeDefaultBetas
 	if val := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ",")); val != "" && !stabilizeDeviceProfile {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
@@ -1327,6 +1388,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 	if !strings.Contains(baseBetas, "interleaved-thinking") {
 		baseBetas += ",interleaved-thinking-2025-05-14"
+	}
+	if claudeBetasContain(extraBetas, claudeFastModeBeta) && !strings.Contains(baseBetas, claudeFastModeBeta) {
+		baseBetas = insertClaudeFastModeBeta(baseBetas)
 	}
 
 	// Merge extra betas from request body and request flags.
@@ -1402,10 +1466,10 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("X-Stainless-Lang", "js")
 		r.Header.Set("X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	}
-	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
-	// may override it with a user-configured value.  Compressed SSE breaks the line
-	// scanner regardless of user preference, so this is non-negotiable for streams.
+	// Re-enforce SSE transport headers after ApplyCustomHeadersFromAttrs, which
+	// may override them with user-configured values.
 	if stream {
+		r.Header.Set("Accept", "text/event-stream")
 		r.Header.Set("Accept-Encoding", "identity")
 	}
 	return nil

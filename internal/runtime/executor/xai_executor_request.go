@@ -73,7 +73,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = preserveXAIResponsesOutputControls(body, req.Payload, from)
 
 	var err error
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), e.Identifier(), e.Identifier())
+	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), e.Identifier(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = sanitizeXAIResponsesBody(body, baseModel)
 	body = normalizeXAIImageRefs(body)
 
-	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
+	sessionID, errSession := xaiResolveSessionID(ctx, req, opts, baseModel)
 	if errSession != nil {
 		return nil, errSession
 	}
@@ -323,12 +323,9 @@ func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string,
 	applyXAICustomHeaders(r, auth)
 }
 
-func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {
+func xaiResolveSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {
 	if sessionID := xaiExecutionSessionID(req, opts); sessionID != "" {
 		return sessionID, nil
-	}
-	if !xaiRequiresIsolatedConversation(baseModel) {
-		return "", nil
 	}
 	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, baseModel, req.Payload, opts.Headers)
 	if errCache != nil {
@@ -336,6 +333,9 @@ func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Reque
 	}
 	if ok {
 		return cached.ID, nil
+	}
+	if !xaiRequiresIsolatedConversation(baseModel) {
+		return "", nil
 	}
 	return uuid.NewString(), nil
 }

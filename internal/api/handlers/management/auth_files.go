@@ -38,6 +38,7 @@ import (
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -837,13 +838,17 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, options authFileListOpti
 						}
 					}
 				}
-				if wv := gjson.GetBytes(data, "weight"); wv.Exists() {
+				if wv := gjson.GetBytes(data, coreauth.AttributeWeight); wv.Exists() {
+					var rawWeight string
 					switch wv.Type {
 					case gjson.Number:
-						fileData["weight"] = int(wv.Int())
+						rawWeight = wv.Raw
 					case gjson.String:
-						if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(wv.String())); errAtoi == nil {
-							fileData["weight"] = parsed
+						rawWeight = wv.String()
+					}
+					if rawWeight != "" {
+						if weight, errWeight := credentialweight.ParseString(rawWeight); errWeight == nil {
+							fileData[coreauth.AttributeWeight] = weight
 						}
 					}
 				}
@@ -1134,6 +1139,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances 
 	if v := strings.TrimSpace(authAttribute(auth, "api_key")); v != "" {
 		entry["api_key"] = v
 	}
+	if weight, ok := authWeightValue(auth); ok {
+		entry[coreauth.AttributeWeight] = weight
+	}
 	if includeBalances {
 		h.appendAuthFileBalances(entry, auth)
 	}
@@ -1317,6 +1325,25 @@ func ollamaCookiesFromAuth(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func authWeightValue(auth *coreauth.Auth) (int64, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if rawWeight := strings.TrimSpace(authAttribute(auth, coreauth.AttributeWeight)); rawWeight != "" {
+		weight, errWeight := credentialweight.ParseString(rawWeight)
+		return weight, errWeight == nil
+	}
+	if auth.Metadata == nil {
+		return 0, false
+	}
+	rawWeight, ok := auth.Metadata[coreauth.AttributeWeight]
+	if !ok || rawWeight == nil {
+		return 0, false
+	}
+	weight, errWeight := credentialweight.ParseValue(rawWeight)
+	return weight, errWeight == nil
 }
 
 func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
@@ -2742,7 +2769,11 @@ func (h *Handler) buildAuthFromFileMetadata(path string, data []byte, metadata m
 			Now:         time.Now(),
 			IDGenerator: synthesizer.NewStableIDGenerator(),
 		}
-		if generated := synthesizer.SynthesizeAuthFile(sctx, path, data); len(generated) > 0 && generated[0] != nil {
+		generated, errSynthesize := synthesizer.SynthesizeAuthFile(sctx, path, data)
+		if errSynthesize != nil {
+			return nil, errSynthesize
+		}
+		if len(generated) > 0 && generated[0] != nil {
 			auth = generated[0].Clone()
 		}
 	}
@@ -3029,6 +3060,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
 		return
 	}
+	updatedAuth := targetAuth.Clone()
+	if updatedAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
 
 	changed := false
 	touchedRoots := make(map[string]struct{}, len(req))
@@ -3043,13 +3079,19 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
 			return
 		}
-		if targetAuth.Metadata == nil {
-			targetAuth.Metadata = make(map[string]any)
+		if updatedAuth.Metadata == nil {
+			updatedAuth.Metadata = make(map[string]any)
+		}
+		if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
+			if errWeight := validateAuthFilePatchWeightValue(value); errWeight != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errWeight.Error()})
+				return
+			}
 		}
 
 		if fieldPath == "headers" {
-			applyAuthFileHeadersPatch(targetAuth, value)
-		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
+			applyAuthFileHeadersPatch(updatedAuth, value)
+		} else if errSet := setAuthFileMetadataValue(updatedAuth.Metadata, fieldPath, value); errSet != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
 			return
 		}
@@ -3059,7 +3101,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		changed = true
 	}
 	if changed {
-		syncAuthFileMetadataFields(targetAuth, touchedRoots)
+		syncAuthFileMetadataFields(updatedAuth, touchedRoots)
+		if errWeight := coreauth.ValidateAuthWeight(updatedAuth); errWeight != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errWeight.Error()})
+			return
+		}
 	}
 
 	if !changed {
@@ -3067,9 +3113,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 
-	targetAuth.UpdatedAt = time.Now()
+	updatedAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	if _, err := h.authManager.Update(ctx, updatedAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
@@ -3085,6 +3131,19 @@ func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+func validateAuthFilePatchWeightValue(value any) error {
+	if value == nil {
+		return nil
+	}
+	if _, ok := value.(json.Number); !ok {
+		return fmt.Errorf("weight must be a JSON integer or null")
+	}
+	if _, errWeight := credentialweight.ParseValue(value); errWeight != nil {
+		return errWeight
+	}
+	return nil
 }
 
 func rootAuthFileField(path string) string {
@@ -3110,7 +3169,11 @@ func setAuthFileMetadataValue(metadata map[string]any, path string, value any) e
 			return fmt.Errorf("invalid field path: %s", path)
 		}
 		if i == len(parts)-1 {
-			current[part] = value
+			if value == nil {
+				delete(current, part)
+			} else {
+				current[part] = value
+			}
 			return nil
 		}
 		next, ok := current[part].(map[string]any)

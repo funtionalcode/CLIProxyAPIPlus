@@ -2034,6 +2034,18 @@ func codexManagedIdentityEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bo
 	return codexIdentityConfuseEnabled(cfg) && !codexAuthUsesAPIKey(auth)
 }
 
+func codexCloakingEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if cfg == nil || cfg.Codex.DisableCodexCloaking {
+		return false
+	}
+	if auth != nil && auth.Metadata != nil {
+		if strings.TrimSpace(fmt.Sprint(auth.Metadata["duo_gateway_base_url"])) != "" {
+			return false
+		}
+	}
+	return true
+}
+
 func codexIdentityConfuseUUID(authID string, kind string, value string) string {
 	name := strings.Join([]string{"cli-proxy-api", "codex", "identity-confuse", kind, strings.TrimSpace(authID), strings.TrimSpace(value)}, ":")
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(name)).String()
@@ -2135,6 +2147,9 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 				r.Header.Set("Chatgpt-Account-Id", accountID)
 			}
 		}
+	} else if codexCloakingEnabled(cfg, auth) {
+		r.Header.Set("User-Agent", codexUserAgent)
+		r.Header.Set("Originator", codexOriginator)
 	}
 }
 

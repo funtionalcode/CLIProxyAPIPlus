@@ -51,6 +51,9 @@ type ModelInfo struct {
 	SupportedGenerationMethods []string `json:"supportedGenerationMethods,omitempty"`
 	// ContextLength is the context window size
 	ContextLength int `json:"context_length,omitempty"`
+	// MaxContextLength is an explicit per-model context window override from configuration.
+	// It is carried internally for Codex client model catalog generation.
+	MaxContextLength int `json:"-"`
 	// MaxCompletionTokens is the maximum completion tokens
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
@@ -1196,6 +1199,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["context_window_tokens"] = model.ContextLength
 			result["contextWindow"] = model.ContextLength
 			result["max_context_window"] = model.ContextLength
+		}
+		if model.MaxContextLength > 0 {
+			result["max_context_length"] = model.MaxContextLength
 		}
 		if model.MaxCompletionTokens > 0 {
 			result["max_completion_tokens"] = model.MaxCompletionTokens
