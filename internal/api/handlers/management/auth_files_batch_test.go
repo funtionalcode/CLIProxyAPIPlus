@@ -116,6 +116,9 @@ func TestUploadAuthFile_OverwritePreservesLocalFields(t *testing.T) {
 	existing.Metadata["note"] = "keep this account"
 	existing.Metadata["prefix"] = "team"
 	existing.Metadata["proxy_url"] = "socks5://127.0.0.1:1080"
+	existing.Metadata["model_aliases"] = []any{
+		map[string]any{"name": "gpt-5.4", "alias": "gpt-local"},
+	}
 	existing.Metadata["websockets"] = false
 	existing.Metadata["disabled"] = true
 	existing.Metadata["tool_prefix_disabled"] = true
@@ -128,7 +131,7 @@ func TestUploadAuthFile_OverwritePreservesLocalFields(t *testing.T) {
 		t.Fatalf("failed to update existing auth: %v", errUpdate)
 	}
 
-	if err := h.writeAuthFile(ctx, fileName, []byte(`{"type":"codex","email":"user@example.com","access_token":"new-token"}`)); err != nil {
+	if err := h.writeAuthFile(ctx, fileName, []byte(`{"type":"codex","email":"user@example.com","access_token":"new-token","proxy_url":"http://incoming.proxy","model-aliases":[{"name":"gpt-incoming","alias":"incoming"}]}`)); err != nil {
 		t.Fatalf("failed to overwrite auth file: %v", err)
 	}
 
@@ -157,6 +160,10 @@ func TestUploadAuthFile_OverwritePreservesLocalFields(t *testing.T) {
 	}
 	if got := updated.Attributes["websockets"]; got != "false" {
 		t.Fatalf("websockets attr = %q, want %q", got, "false")
+	}
+	aliases := coreauth.OAuthModelAliasesFromAttributes(updated.Attributes)
+	if len(aliases) != 1 || aliases[0].Name != "gpt-5.4" || aliases[0].Alias != "gpt-local" {
+		t.Fatalf("model aliases = %#v, want existing alias", aliases)
 	}
 	if got := updated.Attributes["header:Cache-Control"]; got != "no-cache" {
 		t.Fatalf("Cache-Control attr = %q, want %q", got, "no-cache")
@@ -188,6 +195,20 @@ func TestUploadAuthFile_OverwritePreservesLocalFields(t *testing.T) {
 	if got := disk["request_retry"]; got != float64(2) {
 		t.Fatalf("disk request_retry = %#v, want 2", got)
 	}
+	if got := disk["proxy_url"]; got != "socks5://127.0.0.1:1080" {
+		t.Fatalf("disk proxy_url = %#v, want existing proxy", got)
+	}
+	diskAliases, ok := disk["model_aliases"].([]any)
+	if !ok || len(diskAliases) != 1 {
+		t.Fatalf("disk model_aliases = %#v, want one existing alias", disk["model_aliases"])
+	}
+	diskAlias, ok := diskAliases[0].(map[string]any)
+	if !ok || diskAlias["name"] != "gpt-5.4" || diskAlias["alias"] != "gpt-local" {
+		t.Fatalf("disk model_aliases[0] = %#v, want existing alias", diskAliases[0])
+	}
+	if _, exists := disk["model-aliases"]; exists {
+		t.Fatalf("disk model-aliases should not keep incoming alias config")
+	}
 	headers, ok := disk["headers"].(map[string]any)
 	if !ok {
 		t.Fatalf("disk headers = %#v, want object", disk["headers"])
@@ -197,6 +218,52 @@ func TestUploadAuthFile_OverwritePreservesLocalFields(t *testing.T) {
 	}
 	if got := headers["Accept-Encoding"]; got != "identity" {
 		t.Fatalf("disk headers.Accept-Encoding = %#v, want %q", got, "identity")
+	}
+}
+
+func TestUploadAuthFile_OverwritePreservesAliasesAndProxyFromDisk(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	const fileName = "codex.json"
+	path := filepath.Join(authDir, fileName)
+	existing := `{"type":"codex","access_token":"old-token","proxy_url":"socks5://127.0.0.1:1080","model-aliases":[{"name":"gpt-5.4","alias":"gpt-local"}]}`
+	if errWrite := os.WriteFile(path, []byte(existing), 0o600); errWrite != nil {
+		t.Fatalf("failed to seed existing auth file: %v", errWrite)
+	}
+
+	incoming := `{"type":"codex","access_token":"new-token","proxy_url":"","model_aliases":[{"name":"gpt-incoming","alias":"incoming"}]}`
+	if errWrite := h.writeAuthFile(context.Background(), fileName, []byte(incoming)); errWrite != nil {
+		t.Fatalf("failed to overwrite auth file: %v", errWrite)
+	}
+
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("failed to read overwritten auth file: %v", errRead)
+	}
+	var disk map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &disk); errUnmarshal != nil {
+		t.Fatalf("failed to decode overwritten auth file: %v", errUnmarshal)
+	}
+	if got := disk["access_token"]; got != "new-token" {
+		t.Fatalf("disk access_token = %#v, want new token", got)
+	}
+	if got := disk["proxy_url"]; got != "socks5://127.0.0.1:1080" {
+		t.Fatalf("disk proxy_url = %#v, want existing proxy", got)
+	}
+	if _, exists := disk["model_aliases"]; exists {
+		t.Fatalf("disk model_aliases should not keep incoming alias config")
+	}
+	diskAliases, ok := disk["model-aliases"].([]any)
+	if !ok || len(diskAliases) != 1 {
+		t.Fatalf("disk model-aliases = %#v, want one existing alias", disk["model-aliases"])
+	}
+	diskAlias, ok := diskAliases[0].(map[string]any)
+	if !ok || diskAlias["name"] != "gpt-5.4" || diskAlias["alias"] != "gpt-local" {
+		t.Fatalf("disk model-aliases[0] = %#v, want existing alias", diskAliases[0])
 	}
 }
 

@@ -76,6 +76,8 @@ var authFileLocalMetadataKeys = []string{
 	"excluded-models",
 }
 
+var authFileModelAliasMetadataKeys = []string{"model_aliases", "model-aliases"}
+
 const (
 	anthropicCallbackPort    = 54545
 	geminiCallbackPort       = 8085
@@ -2310,11 +2312,25 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
+	changed := false
+	if raw, errRead := os.ReadFile(dst); errRead == nil {
+		if existingMetadata, errDecode := decodeAuthFileMetadata(raw); errDecode == nil {
+			changed = mergeAuthFileUploadProtectedFields(metadata, &coreauth.Auth{Metadata: existingMetadata})
+		}
+	}
 	authID := h.authIDForPath(dst)
 	if authID == "" {
 		authID = dst
 	}
+	if h != nil && h.authManager != nil {
+		if existing, ok := h.authManager.GetByID(authID); ok && mergeAuthFileUploadProtectedFields(metadata, existing) {
+			changed = true
+		}
+	}
 	if h.mergeExistingAuthFileLocalFields(authID, metadata) {
+		changed = true
+	}
+	if changed {
 		data, err = marshalAuthFileMetadata(metadata)
 		if err != nil {
 			return err
@@ -2572,6 +2588,55 @@ func (h *Handler) mergeExistingAuthFileLocalFields(authID string, metadata map[s
 		return false
 	}
 	return mergeAuthFileLocalFields(metadata, existing)
+}
+
+func mergeAuthFileUploadProtectedFields(metadata map[string]any, existing *coreauth.Auth) bool {
+	if metadata == nil || existing == nil {
+		return false
+	}
+	changed := false
+	preservedAliases := make(map[string]any, len(authFileModelAliasMetadataKeys))
+	if existing.Metadata != nil {
+		for _, key := range authFileModelAliasMetadataKeys {
+			if value, ok := existing.Metadata[key]; ok {
+				preservedAliases[key] = cloneAuthFileMetadataValue(value)
+			}
+		}
+	}
+	if len(preservedAliases) == 0 && existing.Attributes != nil {
+		if raw := strings.TrimSpace(existing.Attributes["model_aliases"]); raw != "" {
+			var decoded any
+			if errUnmarshal := json.Unmarshal([]byte(raw), &decoded); errUnmarshal == nil {
+				preservedAliases["model_aliases"] = decoded
+			} else {
+				preservedAliases["model_aliases"] = raw
+			}
+		}
+	}
+	if len(preservedAliases) > 0 {
+		for _, key := range authFileModelAliasMetadataKeys {
+			delete(metadata, key)
+		}
+		for key, value := range preservedAliases {
+			metadata[key] = value
+		}
+		changed = true
+	}
+
+	proxyURL := ""
+	if existing.Metadata != nil {
+		if raw, ok := existing.Metadata["proxy_url"].(string); ok {
+			proxyURL = strings.TrimSpace(raw)
+		}
+	}
+	if proxyURL == "" {
+		proxyURL = strings.TrimSpace(existing.ProxyURL)
+	}
+	if proxyURL != "" {
+		metadata["proxy_url"] = proxyURL
+		changed = true
+	}
+	return changed
 }
 
 func mergeAuthFileLocalFields(metadata map[string]any, existing *coreauth.Auth) bool {
