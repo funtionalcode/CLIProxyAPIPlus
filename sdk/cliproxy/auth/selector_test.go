@@ -361,7 +361,7 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 	})
 }
 
-func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testing.T) {
+func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsBlocked(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -380,14 +380,45 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 
 	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
-	if blocked {
-		t.Fatalf("blocked = true, want false")
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
 	}
-	if reason != blockReasonNone {
-		t.Fatalf("reason = %v, want %v", reason, blockReasonNone)
+	if reason != blockReasonOther {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonOther)
 	}
 	if !next.IsZero() {
 		t.Fatalf("next = %v, want zero", next)
+	}
+}
+
+func TestIsAuthBlockedForModel_AuthQuotaExceededWithoutRecoveryIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{ID: "a", Quota: QuotaState{Exceeded: true}}
+	for _, model := range []string{"", "test-model"} {
+		blocked, reason, next := isAuthBlockedForModel(auth, model, time.Now())
+		if !blocked || reason != blockReasonOther || !next.IsZero() {
+			t.Fatalf("isAuthBlockedForModel(%q) = %v, %v, %v; want true, other, zero", model, blocked, reason, next)
+		}
+	}
+}
+
+func TestIsAuthBlockedForModel_ExpiredRecoveryIsAvailable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID:             "a",
+		Unavailable:    true,
+		NextRetryAfter: now.Add(-time.Minute),
+		Quota: QuotaState{
+			Exceeded:      true,
+			NextRecoverAt: now.Add(-time.Second),
+		},
+	}
+	blocked, reason, next := isAuthBlockedForModel(auth, "", now)
+	if blocked || reason != blockReasonNone || !next.IsZero() {
+		t.Fatalf("isAuthBlockedForModel() = %v, %v, %v; want false, none, zero", blocked, reason, next)
 	}
 }
 
@@ -428,6 +459,43 @@ func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testin
 	}
 	if got.ID != "low" {
 		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "low")
+	}
+}
+
+func TestIsAuthBlockedForModel_ThinkingSuffixStatesBlockCanonicalModel(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	laterRetry := now.Add(2 * time.Hour)
+	auth := &Auth{
+		ID: "a",
+		ModelStates: map[string]*ModelState{
+			"test-model(high)": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Hour),
+				Quota: QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: now.Add(time.Hour),
+				},
+			},
+			"test-model(low)": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: laterRetry,
+				Quota: QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: laterRetry,
+				},
+			},
+		},
+	}
+
+	for _, model := range []string{"test-model", "test-model(medium)", "test-model(low)"} {
+		blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+		if !blocked || reason != blockReasonCooldown || !next.Equal(laterRetry) {
+			t.Fatalf("isAuthBlockedForModel(%q) = %v, %v, %v; want true, cooldown, %v", model, blocked, reason, next, laterRetry)
+		}
 	}
 }
 
@@ -687,7 +755,7 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
-func TestSessionAffinitySelector_PriorityOverridesLowerPriorityCache(t *testing.T) {
+func TestSessionAffinitySelector_PreservesLowerPriorityCache(t *testing.T) {
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		Fallback: &RoundRobinSelector{},
 		TTL:      time.Minute,
@@ -720,11 +788,17 @@ func TestSessionAffinitySelector_PriorityOverridesLowerPriorityCache(t *testing.
 	if got == nil {
 		t.Fatalf("Pick() with high-priority auths = nil")
 	}
-	if got.ID == "priority-low" {
-		t.Fatalf("Pick() used lower-priority cached auth %q", got.ID)
+	if got.ID != "priority-low" {
+		t.Fatalf("Pick() auth.ID = %q, want sticky %q", got.ID, "priority-low")
 	}
-	if got.ID != "priority-high-a" {
-		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "priority-high-a")
+
+	newSessionOpts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_priority-new"}}`)}
+	newSession, err := selector.Pick(context.Background(), "claude", "claude-3", newSessionOpts, auths)
+	if err != nil {
+		t.Fatalf("Pick() new session error = %v", err)
+	}
+	if newSession == nil || newSession.ID != "priority-high-a" {
+		t.Fatalf("Pick() new session auth = %v, want priority-high-a", newSession)
 	}
 }
 

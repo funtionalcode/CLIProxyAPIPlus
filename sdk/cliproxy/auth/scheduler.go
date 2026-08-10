@@ -345,12 +345,7 @@ func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider,
 	}
 	cacheKey := provider + "::" + primaryID + "::" + model
 	if cachedAuthID, okCache := cache.GetAndRefresh(cacheKey); okCache {
-		var auth *Auth
-		if weighted {
-			auth = shard.readyAuthLocked(preferWebsocket, cachedAuthID, predicate)
-		} else {
-			auth = shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate)
-		}
+		auth := shard.readyAuthLocked(preferWebsocket, cachedAuthID, predicate)
 		if auth != nil {
 			selectorLogEntry(ctx).Infof("session-affinity: scheduler cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 			return auth
@@ -360,12 +355,7 @@ func (s *authScheduler) pickSessionAffinityLocked(ctx context.Context, provider,
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey := provider + "::" + fallbackID + "::" + model
 		if cachedAuthID, okCache := cache.Get(fallbackKey); okCache {
-			var auth *Auth
-			if weighted {
-				auth = shard.readyAuthLocked(preferWebsocket, cachedAuthID, predicate)
-			} else {
-				auth = shard.readyAuthAtPriorityLocked(preferWebsocket, priorityReady, cachedAuthID, predicate)
-			}
+			auth := shard.readyAuthLocked(preferWebsocket, cachedAuthID, predicate)
 			if auth != nil {
 				cache.Set(cacheKey, auth.ID)
 				selectorLogEntry(ctx).Infof("session-affinity: scheduler fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
@@ -520,7 +510,7 @@ func (s *authScheduler) pickMixedSessionAffinityLocked(ctx context.Context, prov
 	}
 	cacheKey := mixedSessionAffinityCacheKey(providers, primaryID, model)
 	if cachedAuthID, okCache := cache.GetAndRefresh(cacheKey); okCache {
-		if auth, providerKey := s.readyMixedAuthLocked(providers, candidateShards, cachedAuthID, bestPriority, weighted, predicate); auth != nil {
+		if auth, providerKey := s.readyMixedAuthLocked(providers, candidateShards, cachedAuthID, predicate); auth != nil {
 			selectorLogEntry(ctx).Infof("session-affinity: mixed scheduler cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, providerKey, model)
 			return auth, providerKey
 		}
@@ -529,7 +519,7 @@ func (s *authScheduler) pickMixedSessionAffinityLocked(ctx context.Context, prov
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey := mixedSessionAffinityCacheKey(providers, fallbackID, model)
 		if cachedAuthID, okCache := cache.Get(fallbackKey); okCache {
-			if auth, providerKey := s.readyMixedAuthLocked(providers, candidateShards, cachedAuthID, bestPriority, weighted, predicate); auth != nil {
+			if auth, providerKey := s.readyMixedAuthLocked(providers, candidateShards, cachedAuthID, predicate); auth != nil {
 				cache.Set(cacheKey, auth.ID)
 				selectorLogEntry(ctx).Infof("session-affinity: mixed scheduler fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, providerKey, model)
 				return auth, providerKey
@@ -557,7 +547,7 @@ func (s *authScheduler) reselectMixedSessionAffinityLocked(ctx context.Context, 
 	return auth, providerKey
 }
 
-func (s *authScheduler) readyMixedAuthLocked(providers []string, candidateShards []*modelScheduler, authID string, bestPriority int, weighted bool, predicate func(*scheduledAuth) bool) (*Auth, string) {
+func (s *authScheduler) readyMixedAuthLocked(providers []string, candidateShards []*modelScheduler, authID string, predicate func(*scheduledAuth) bool) (*Auth, string) {
 	providerKey := s.authProviders[authID]
 	if providerKey == "" {
 		return nil, ""
@@ -570,12 +560,7 @@ func (s *authScheduler) readyMixedAuthLocked(providers []string, candidateShards
 		if shard == nil {
 			return nil, ""
 		}
-		var auth *Auth
-		if weighted {
-			auth = shard.readyAuthLocked(false, authID, predicate)
-		} else {
-			auth = shard.readyAuthAtPriorityLocked(false, bestPriority, authID, predicate)
-		}
+		auth := shard.readyAuthLocked(false, authID, predicate)
 		if auth == nil {
 			return nil, ""
 		}

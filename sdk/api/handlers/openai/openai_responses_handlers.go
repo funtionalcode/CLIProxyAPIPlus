@@ -14,8 +14,10 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -364,6 +366,35 @@ func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 	})
 }
 
+func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {
+	if h == nil || h.Cfg == nil {
+		return payload
+	}
+
+	requestCtx := context.Background()
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+	requestCtx = context.WithValue(requestCtx, "gin", c)
+
+	var requestHeaders http.Header
+	if c != nil && c.Request != nil {
+		requestHeaders = c.Request.Header
+	}
+	homeEnabled := h.AuthManager != nil && h.AuthManager.HomeEnabled()
+	updated, prepared := multiagentv2.PrepareCodexMultiAgentV2Tools(
+		requestCtx,
+		requestHeaders,
+		payload,
+		h.Cfg.CodexOptimizeMultiAgentV2,
+		homeEnabled,
+	)
+	if prepared && c != nil {
+		c.Set(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey, true)
+	}
+	return updated
+}
+
 // Responses handles the /v1/responses endpoint.
 // It determines whether the request is for a streaming or non-streaming response
 // and calls the appropriate handler based on the model provider.
@@ -383,6 +414,8 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 	rawJSON = repairOpenAIResponsesHTTPRequestToolCalls(c.Request, rawJSON)
+
+	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -577,7 +610,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			flusher.Flush()
 
 			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer, modelName, 1)
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer, responsesStreamForwardOptions{
+				model:             modelName,
+				initialChunkCount: 1,
+			})
 			return
 		}
 	}
@@ -697,19 +733,45 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 	})
 }
 
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer, modelName string, initialChunkCount int) {
+// isCodexResponsesClientRequest limits the alternate terminal event to official Codex clients.
+func isCodexResponsesClientRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if multiagentv2.IsCodexClientUserAgent(c.GetHeader("User-Agent")) {
+		return true
+	}
+
+	switch originator := strings.ToLower(strings.TrimSpace(c.GetHeader("Originator"))); originator {
+	case "codex desktop", "codex-tui", "codex_cli_rs":
+		return true
+	default:
+		return strings.HasPrefix(originator, "codex desktop/") || strings.HasPrefix(originator, "codex-tui/") || strings.HasPrefix(originator, "codex_cli_rs/")
+	}
+}
+
+type responsesStreamForwardOptions struct {
+	model             string
+	initialChunkCount int
+}
+
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer, options ...responsesStreamForwardOptions) {
 	if framer == nil {
 		framer = &responsesSSEFramer{}
 	}
+	var streamOptions responsesStreamForwardOptions
+	if len(options) > 0 {
+		streamOptions = options[0]
+	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		Model:             modelName,
-		InitialChunkCount: initialChunkCount,
+		Model:             streamOptions.model,
+		InitialChunkCount: streamOptions.initialChunkCount,
 		WriteChunk: func(chunk []byte) {
 			framer.WriteChunk(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
-			if errMsg == nil {
+			if !shouldExposeResponsesUpstreamError(errMsg) {
 				return
 			}
 			status := http.StatusInternalServerError
@@ -719,6 +781,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			errText := http.StatusText(status)
 			if errMsg.Error != nil && errMsg.Error.Error() != "" {
 				errText = errMsg.Error.Error()
+			}
+			if isCodexResponsesClientRequest(c) {
+				chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
+				_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
+				return
 			}
 			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
 			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))

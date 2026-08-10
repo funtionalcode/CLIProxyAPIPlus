@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -9,7 +10,9 @@ import (
 	"time"
 
 	tls "github.com/refraction-networking/utls"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpwire"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -17,25 +20,16 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-type utlsClientProfile int
-
-const (
-	utlsProfileClaudeCode utlsClientProfile = iota
-	utlsProfileClaudeCodeHTTP1
-	utlsProfileCodexCLI
-)
-
-// utlsRoundTripper implements http.RoundTripper using utls with a provider
-// client fingerprint and HTTP/2.
+// utlsRoundTripper implements http.RoundTripper using a Chrome fingerprint for
+// providers that require a browser-like TLS and HTTP/2 transport.
 type utlsRoundTripper struct {
 	mu          sync.Mutex
 	connections map[string]*http2.ClientConn
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
-	profile     utlsClientProfile
 }
 
-func newUtlsRoundTripper(proxyURL string, profile utlsClientProfile) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
@@ -49,7 +43,6 @@ func newUtlsRoundTripper(proxyURL string, profile utlsClientProfile) *utlsRoundT
 		connections: make(map[string]*http2.ClientConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
-		profile:     profile,
 	}
 }
 
@@ -90,8 +83,16 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 }
 
 func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
-	tlsConn, err := dialUTLSConn(t.dialer, host, addr, t.profile)
+	conn, err := t.dialer.Dial("tcp", addr)
 	if err != nil {
+		return nil, err
+	}
+
+	tlsConfig := &tls.Config{ServerName: host}
+	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+
+	if err := tlsConn.Handshake(); err != nil {
+		conn.Close()
 		return nil, err
 	}
 
@@ -131,27 +132,210 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-type utlsHTTP1RoundTripper struct {
-	transport *http.Transport
+// claudeCodeSessionCacheCapacity bounds the per-transport TLS session cache for
+// the Anthropic inference plane.
+const claudeCodeSessionCacheCapacity = 32
+
+// newClaudeCodeTLSConfig builds the uTLS config for one inference-plane dial.
+//
+// OmitEmptyPsk keeps the pre_shared_key extension silent until a session is
+// cached, so an unresumed ClientHello stays byte-identical to the captured
+// native handshake. PreferSkipResumptionOnNilExtension turns uTLS's HelloCustom
+// "resume without the matching extension" panic into a skipped resumption.
+func newClaudeCodeTLSConfig(host string, sessionCache tls.ClientSessionCache) *tls.Config {
+	return &tls.Config{
+		ServerName:                         host,
+		ClientSessionCache:                 sessionCache,
+		OmitEmptyPsk:                       true,
+		PreferSkipResumptionOnNilExtension: true,
+	}
 }
 
-func newUtlsHTTP1RoundTripper(proxyURL string, profile utlsClientProfile) *utlsHTTP1RoundTripper {
-	dialer := newUTLSDialer(proxyURL)
-	transport := &http.Transport{
-		ForceAttemptHTTP2: false,
-		DialTLSContext: func(_ context.Context, _ string, addr string) (net.Conn, error) {
-			host, _, errSplit := net.SplitHostPort(addr)
-			if errSplit != nil {
-				host = addr
-			}
-			return dialUTLSConn(dialer, host, addr, profile)
+// claudeCodeTLSClientHelloSpec reproduces the deterministic Node/OpenSSL
+// ClientHello emitted by Claude Code 2.1.220 on macOS arm64. Keep this spec in
+// sync with a fresh native capture whenever the advertised Claude Code version
+// changes.
+func claudeCodeTLSClientHelloSpec() *tls.ClientHelloSpec {
+	return &tls.ClientHelloSpec{
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		},
+		CompressionMethods: []uint8{0},
+		Extensions: []tls.TLSExtension{
+			&tls.SNIExtension{},
+			&tls.ExtendedMasterSecretExtension{},
+			&tls.RenegotiationInfoExtension{Renegotiation: tls.RenegotiateOnceAsClient},
+			&tls.SupportedCurvesExtension{Curves: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}},
+			&tls.SupportedPointsExtension{SupportedPoints: []byte{0}},
+			&tls.SessionTicketExtension{},
+			&tls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}},
+			&tls.StatusRequestExtension{},
+			&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []tls.SignatureScheme{
+				tls.ECDSAWithP256AndSHA256,
+				tls.PSSWithSHA256,
+				tls.PKCS1WithSHA256,
+				tls.ECDSAWithP384AndSHA384,
+				tls.PSSWithSHA384,
+				tls.PKCS1WithSHA384,
+				tls.PSSWithSHA512,
+				tls.PKCS1WithSHA512,
+				tls.PKCS1WithSHA1,
+			}},
+			&tls.SCTExtension{},
+			&tls.KeyShareExtension{KeyShares: []tls.KeyShare{{Group: tls.X25519}}},
+			&tls.PSKKeyExchangeModesExtension{Modes: []uint8{tls.PskModeDHE}},
+			&tls.SupportedVersionsExtension{Versions: []uint16{tls.VersionTLS13, tls.VersionTLS12}},
+			&tls.UtlsPaddingExtension{GetPaddingLen: tls.BoringPaddingStyle},
+			// pre_shared_key MUST be the final extension (RFC 8446 4.2.11), after
+			// padding. It contributes zero bytes until a cached session exists.
+			&tls.UtlsPreSharedKeyExtension{},
 		},
 	}
-	return &utlsHTTP1RoundTripper{transport: transport}
 }
 
-func (t *utlsHTTP1RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	return t.transport.RoundTrip(req)
+const claudeCodeRoundTripperCacheCapacity = 64
+
+var claudeCodeRoundTripperCache = internalcache.NewBoundedLRU[string, http.RoundTripper](
+	claudeCodeRoundTripperCacheCapacity,
+	func(_ string, roundTripper http.RoundTripper) {
+		if transport, ok := roundTripper.(interface{ CloseIdleConnections() }); ok {
+			transport.CloseIdleConnections()
+		}
+	},
+)
+
+var claudeCodeMessagesHeaderOrder = []string{
+	"Accept",
+	"Authorization",
+	"Content-Type",
+	"User-Agent",
+	"X-Claude-Code-Session-Id",
+	"X-Stainless-Arch",
+	"X-Stainless-Lang",
+	"X-Stainless-OS",
+	"X-Stainless-Package-Version",
+	"X-Stainless-Retry-Count",
+	"X-Stainless-Runtime",
+	"X-Stainless-Runtime-Version",
+	"X-Stainless-Timeout",
+	"anthropic-beta",
+	"anthropic-dangerous-direct-browser-access",
+	"anthropic-version",
+	"x-app",
+	"x-client-request-id",
+	"Connection",
+	"Host",
+	"Accept-Encoding",
+	"Content-Length",
+}
+
+var claudeCodeCountTokensHeaderOrder = []string{
+	"Accept",
+	"Authorization",
+	"Content-Type",
+	"User-Agent",
+	"X-Claude-Code-Session-Id",
+	"X-Stainless-Arch",
+	"X-Stainless-Lang",
+	"X-Stainless-OS",
+	"X-Stainless-Package-Version",
+	"X-Stainless-Retry-Count",
+	"X-Stainless-Runtime",
+	"X-Stainless-Runtime-Version",
+	"anthropic-beta",
+	"anthropic-dangerous-direct-browser-access",
+	"anthropic-version",
+	"x-app",
+	"x-client-request-id",
+	"Connection",
+	"Host",
+	"Accept-Encoding",
+	"Content-Length",
+}
+
+func claudeCodeRequestHeaderOrder(_, requestTarget string) []string {
+	if strings.HasPrefix(requestTarget, "/v1/messages/count_tokens") {
+		return claudeCodeCountTokensHeaderOrder
+	}
+	return claudeCodeMessagesHeaderOrder
+}
+
+func cachedClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
+	return claudeCodeRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
+		return newClaudeCodeRoundTripper(proxyURL)
+	})
+}
+
+func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
+	// The cache is scoped to this round tripper, which is already keyed by proxy,
+	// so resumption never crosses proxy boundaries.
+	sessionCache := tls.NewLRUClientSessionCache(claudeCodeSessionCacheCapacity)
+	var dialer proxy.Dialer = proxy.Direct
+	if proxyURL != "" {
+		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+		if errBuild != nil {
+			log.Errorf("claude tls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
+			dialer = proxyDialer
+		}
+	}
+
+	transport := &http.Transport{
+		ForceAttemptHTTP2: false,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var (
+				conn net.Conn
+				err  error
+			)
+			if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+				conn, err = contextDialer.DialContext(ctx, network, addr)
+			} else {
+				conn, err = dialer.Dial(network, addr)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("claude tls: dial upstream: %w", err)
+			}
+
+			host, _, errSplit := net.SplitHostPort(addr)
+			if errSplit != nil {
+				if errClose := conn.Close(); errClose != nil {
+					log.Debugf("claude tls: close failed connection: %v", errClose)
+				}
+				return nil, fmt.Errorf("claude tls: split upstream address: %w", errSplit)
+			}
+			tlsConn := tls.UClient(conn, newClaudeCodeTLSConfig(host, sessionCache), tls.HelloCustom)
+			if errPreset := tlsConn.ApplyPreset(claudeCodeTLSClientHelloSpec()); errPreset != nil {
+				if errClose := tlsConn.Close(); errClose != nil {
+					log.Debugf("claude tls: close connection after preset failure: %v", errClose)
+				}
+				return nil, fmt.Errorf("claude tls: apply Claude Code ClientHello: %w", errPreset)
+			}
+			if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+				if errClose := tlsConn.Close(); errClose != nil {
+					log.Debugf("claude tls: close connection after handshake failure: %v", errClose)
+				}
+				return nil, fmt.Errorf("claude tls: handshake upstream: %w", errHandshake)
+			}
+			return httpwire.NewOrderedRequestConn(tlsConn, claudeCodeRequestHeaderOrder), nil
+		},
+	}
+	return transport
 }
 
 func newUTLSDialer(proxyURL string) proxy.Dialer {
@@ -170,119 +354,48 @@ func newUTLSDialer(proxyURL string) proxy.Dialer {
 	return dialer
 }
 
-func dialUTLSConn(dialer proxy.Dialer, host, addr string, profile utlsClientProfile) (*tls.UConn, error) {
-	if dialer == nil {
-		dialer = proxy.Direct
-	}
-	conn, errDial := dialer.Dial("tcp", addr)
-	if errDial != nil {
-		return nil, errDial
-	}
-	tlsConn := tls.UClient(conn, &tls.Config{ServerName: host}, tls.HelloCustom)
-	spec := utlsClientHelloSpec(profile)
-	if errApply := tlsConn.ApplyPreset(&spec); errApply != nil {
-		conn.Close()
-		return nil, errApply
-	}
-	if errHandshake := tlsConn.Handshake(); errHandshake != nil {
-		conn.Close()
-		return nil, errHandshake
-	}
-	return tlsConn, nil
-}
-
-func utlsClientHelloSpec(profile utlsClientProfile) tls.ClientHelloSpec {
-	switch profile {
-	case utlsProfileClaudeCodeHTTP1:
-		return claudeCodeClientHelloSpec([]string{"http/1.1"})
-	case utlsProfileCodexCLI:
-		return tls.ClientHelloSpec{
-			TLSVersMin:         tls.VersionTLS10,
-			TLSVersMax:         tls.VersionTLS12,
-			CompressionMethods: []uint8{0},
-			CipherSuites: []uint16{
-				tls.FAKE_TLS_EMPTY_RENEGOTIATION_INFO_SCSV,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				0xc024,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-				tls.FAKE_TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				0xc028,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-				tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
-				tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
-				0x003d,
-				tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
-				tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-				tls.TLS_RSA_WITH_AES_128_CBC_SHA,
-				tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
-			},
-			Extensions: []tls.TLSExtension{
-				&tls.SNIExtension{},
-				&tls.SupportedCurvesExtension{Curves: []tls.CurveID{tls.CurveP256, tls.CurveP384, tls.CurveP521}},
-				&tls.SupportedPointsExtension{SupportedPoints: []byte{0}},
-				&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: defaultSignatureAlgorithms()},
-				&tls.StatusRequestExtension{},
-				&tls.SCTExtension{},
-				&tls.ExtendedMasterSecretExtension{},
-			},
-		}
-	default:
-		return claudeCodeClientHelloSpec([]string{"h2", "http/1.1"})
-	}
-}
-
-func claudeCodeClientHelloSpec(alpnProtocols []string) tls.ClientHelloSpec {
-	return tls.ClientHelloSpec{
-		TLSVersMin:         tls.VersionTLS12,
-		TLSVersMax:         tls.VersionTLS13,
+func codexCLIClientHelloSpec() *tls.ClientHelloSpec {
+	return &tls.ClientHelloSpec{
+		TLSVersMin:         tls.VersionTLS10,
+		TLSVersMax:         tls.VersionTLS12,
 		CompressionMethods: []uint8{0},
 		CipherSuites: []uint16{
-			tls.TLS_AES_128_GCM_SHA256,
-			tls.TLS_AES_256_GCM_SHA384,
-			tls.TLS_CHACHA20_POLY1305_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.FAKE_TLS_EMPTY_RENEGOTIATION_INFO_SCSV,
 			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			0xc024,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
 			tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+			tls.FAKE_TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			0xc028,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
 			tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
 			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			0x003d,
+			tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
 			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
 		},
 		Extensions: []tls.TLSExtension{
 			&tls.SNIExtension{},
-			&tls.ExtendedMasterSecretExtension{},
-			&tls.RenegotiationInfoExtension{Renegotiation: tls.RenegotiateOnceAsClient},
-			&tls.SupportedCurvesExtension{Curves: []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384}},
+			&tls.SupportedCurvesExtension{Curves: []tls.CurveID{tls.CurveP256, tls.CurveP384, tls.CurveP521}},
 			&tls.SupportedPointsExtension{SupportedPoints: []byte{0}},
-			&tls.SessionTicketExtension{},
-			&tls.ALPNExtension{AlpnProtocols: alpnProtocols},
+			&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: codexDefaultSignatureAlgorithms()},
 			&tls.StatusRequestExtension{},
-			&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: defaultSignatureAlgorithms()},
 			&tls.SCTExtension{},
-			&tls.KeyShareExtension{KeyShares: []tls.KeyShare{{Group: tls.X25519}}},
-			&tls.PSKKeyExchangeModesExtension{Modes: []uint8{tls.PskModeDHE}},
-			&tls.SupportedVersionsExtension{Versions: []uint16{tls.VersionTLS13, tls.VersionTLS12}},
-			&tls.UtlsPaddingExtension{GetPaddingLen: tls.BoringPaddingStyle},
+			&tls.ExtendedMasterSecretExtension{},
 		},
 	}
 }
 
-func defaultSignatureAlgorithms() []tls.SignatureScheme {
+func codexDefaultSignatureAlgorithms() []tls.SignatureScheme {
 	return []tls.SignatureScheme{
 		tls.ECDSAWithP256AndSHA256,
 		tls.ECDSAWithP384AndSHA384,
@@ -298,32 +411,74 @@ func defaultSignatureAlgorithms() []tls.SignatureScheme {
 	}
 }
 
-// utlsProtectedHosts contains the hosts that should use provider-specific uTLS
-// fingerprints to avoid the default Go TLS fingerprint.
-var utlsProtectedHosts = map[string]struct{}{
-	"api.anthropic.com": {},
-	"chatgpt.com":       {},
+func dialCodexUTLSConn(ctx context.Context, dialer proxy.Dialer, host, addr string) (*tls.UConn, error) {
+	if dialer == nil {
+		dialer = proxy.Direct
+	}
+	var (
+		conn net.Conn
+		err  error
+	)
+	if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+		conn, err = contextDialer.DialContext(ctx, "tcp", addr)
+	} else {
+		conn, err = dialer.Dial("tcp", addr)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("codex tls: dial upstream: %w", err)
+	}
+	tlsConn := tls.UClient(conn, &tls.Config{ServerName: host}, tls.HelloCustom)
+	if errPreset := tlsConn.ApplyPreset(codexCLIClientHelloSpec()); errPreset != nil {
+		if errClose := tlsConn.Close(); errClose != nil {
+			log.Debugf("codex tls: close connection after preset failure: %v", errClose)
+		}
+		return nil, fmt.Errorf("codex tls: apply Codex CLI ClientHello: %w", errPreset)
+	}
+	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+		if errClose := tlsConn.Close(); errClose != nil {
+			log.Debugf("codex tls: close connection after handshake failure: %v", errClose)
+		}
+		return nil, fmt.Errorf("codex tls: handshake upstream: %w", errHandshake)
+	}
+	return tlsConn, nil
 }
 
-// fallbackRoundTripper uses uTLS for protected HTTPS hosts and falls back to
-// standard transport for all other requests.
+func newCodexFingerprintRoundTripper(proxyURL string) http.RoundTripper {
+	dialer := newUTLSDialer(proxyURL)
+	return &http.Transport{
+		ForceAttemptHTTP2: false,
+		DialTLSContext: func(ctx context.Context, _ string, addr string) (net.Conn, error) {
+			host, _, errSplit := net.SplitHostPort(addr)
+			if errSplit != nil {
+				host = addr
+			}
+			return dialCodexUTLSConn(ctx, dialer, host, addr)
+		},
+	}
+}
+
+// fallbackRoundTripper uses provider-specific TLS fingerprints for protected
+// HTTPS hosts and falls back to the standard transport for all other requests.
 type fallbackRoundTripper struct {
-	utls     http.RoundTripper
-	fallback http.RoundTripper
+	anthropic http.RoundTripper
+	chrome    http.RoundTripper
+	fallback  http.RoundTripper
 }
 
 func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme == "https" {
-		if _, ok := utlsProtectedHosts[strings.ToLower(req.URL.Hostname())]; ok {
-			return f.utls.RoundTrip(req)
-		}
+	if IsAnthropicUpstreamURL(req.URL) {
+		return f.anthropic.RoundTrip(req)
+	}
+	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
+		return f.chrome.RoundTrip(req)
 	}
 	return f.fallback.RoundTrip(req)
 }
 
-// NewUtlsHTTPClient creates an HTTP client using the Claude Code TLS fingerprint.
-// Use this for Claude API requests to match real Claude Code's TLS behavior.
-// Falls back to standard transport for non-HTTPS requests.
+// NewUtlsHTTPClient creates an HTTP client using provider-specific TLS
+// fingerprints for protected hosts. It uses Claude Code's Node/OpenSSL profile
+// for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
+// fallback for other hosts.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	var proxyURL string
 	if auth != nil {
@@ -338,26 +493,24 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var utlsRT http.RoundTripper
-	if cfg != nil && cfg.Claude.TLS.HTTP1Only {
-		utlsRT = newUtlsHTTP1RoundTripper(proxyURL, utlsProfileClaudeCodeHTTP1)
-	} else {
-		utlsRT = newUtlsRoundTripper(proxyURL, utlsProfileClaudeCode)
-	}
+	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
 		}
 	} else if ctxRoundTripper != nil {
-		utlsRT = ctxRoundTripper
+		chromeRT = ctxRoundTripper
+		anthropicRT = ctxRoundTripper
 		standardTransport = ctxRoundTripper
 	}
 
 	client := &http.Client{
 		Transport: &fallbackRoundTripper{
-			utls:     utlsRT,
-			fallback: standardTransport,
+			anthropic: anthropicRT,
+			chrome:    chromeRT,
+			fallback:  standardTransport,
 		},
 	}
 	if timeout > 0 {
@@ -375,15 +528,15 @@ func NewCodexFingerprintHTTPClient(ctx context.Context, cfg *config.Config, auth
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 	if proxyURL == "" && ctx != nil {
-		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-			client := &http.Client{Transport: rt}
+		if roundTripper, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && roundTripper != nil {
+			client := &http.Client{Transport: roundTripper}
 			if timeout > 0 {
 				client.Timeout = timeout
 			}
 			return withAPIRequestLoggingHTTPClient(ctx, cfg, auth, client, timeout)
 		}
 	}
-	client := &http.Client{Transport: newUtlsHTTP1RoundTripper(proxyURL, utlsProfileCodexCLI)}
+	client := &http.Client{Transport: newCodexFingerprintRoundTripper(proxyURL)}
 	if timeout > 0 {
 		client.Timeout = timeout
 	}
@@ -399,11 +552,11 @@ func CodexFingerprintDialTLSContext(cfg *config.Config, auth *cliproxyauth.Auth)
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 	dialer := newUTLSDialer(proxyURL)
-	return func(_ context.Context, _ string, addr string) (net.Conn, error) {
+	return func(ctx context.Context, _ string, addr string) (net.Conn, error) {
 		host, _, errSplit := net.SplitHostPort(addr)
 		if errSplit != nil {
 			host = addr
 		}
-		return dialUTLSConn(dialer, host, addr, utlsProfileCodexCLI)
+		return dialCodexUTLSConn(ctx, dialer, host, addr)
 	}
 }

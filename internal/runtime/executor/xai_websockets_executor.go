@@ -984,6 +984,7 @@ func parseXAIWebsocketError(payload []byte) (error, bool) {
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
 			if statusError, okStatus := wsErr.(statusErrWithHeaders); okStatus {
 				xaiError := xaiStatusErr(statusError.code, payload)
+				statusError.code = xaiError.code
 				if xaiError.retryAfter != nil {
 					statusError.retryAfter = xaiError.retryAfter
 				}

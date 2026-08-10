@@ -1542,7 +1542,7 @@ func TestSchedulerPick_SessionAffinityWeightedNewBindingsIgnorePriority(t *testi
 	}
 }
 
-func TestSchedulerPick_SessionAffinityPriorityOverridesLowerPriorityCache(t *testing.T) {
+func TestSchedulerPick_SessionAffinityPreservesLowerPriorityCache(t *testing.T) {
 	model := "claude-3"
 	registerSchedulerModels(t, "claude", model, "priority-low", "priority-high-a", "priority-high-b")
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
@@ -1579,11 +1579,19 @@ func TestSchedulerPick_SessionAffinityPriorityOverridesLowerPriorityCache(t *tes
 	if got == nil {
 		t.Fatalf("pickSingle() with high-priority auths = nil")
 	}
-	if got.ID == "priority-low" {
-		t.Fatalf("pickSingle() used lower-priority cached auth %q", got.ID)
+	if got.ID != "priority-low" {
+		t.Fatalf("pickSingle() auth.ID = %q, want sticky %q", got.ID, "priority-low")
 	}
-	if got.ID != "priority-high-a" {
-		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "priority-high-a")
+
+	newSessionOpts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_scheduler-priority-new"}}`),
+	}
+	newSession, errPick := scheduler.pickSingle(context.Background(), "claude", model, newSessionOpts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() new session error = %v", errPick)
+	}
+	if newSession == nil || newSession.ID != "priority-high-a" {
+		t.Fatalf("pickSingle() new session auth = %v, want priority-high-a", newSession)
 	}
 }
 
@@ -1766,6 +1774,73 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
 		}
+	}
+}
+
+func TestManager_SchedulerSharesThinkingSuffixCooldownAndRegistryState(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	reg := registry.GetGlobalRegistry()
+	baseModel := "scheduler-thinking-model"
+	reg.RegisterClient("thinking-auth-a", "gemini", []*registry.ModelInfo{{ID: baseModel}})
+	reg.RegisterClient("thinking-auth-b", "gemini", []*registry.ModelInfo{{ID: baseModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("thinking-auth-a")
+		reg.UnregisterClient("thinking-auth-b")
+	})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "thinking-auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(thinking-auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "thinking-auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(thinking-auth-b) error = %v", errRegister)
+	}
+
+	retryAfter := time.Hour
+	manager.MarkResult(context.Background(), Result{
+		AuthID:     "thinking-auth-a",
+		Provider:   "gemini",
+		Model:      baseModel + "(high)",
+		Success:    false,
+		Error:      &Error{HTTPStatus: 429, Message: "quota"},
+		RetryAfter: &retryAfter,
+	})
+
+	auth, ok := manager.GetByID("thinking-auth-a")
+	if !ok || auth == nil {
+		t.Fatal("thinking-auth-a was not found")
+	}
+	if len(auth.ModelStates) != 1 || auth.ModelStates[baseModel] == nil {
+		t.Fatalf("ModelStates = %+v, want only canonical key %q", auth.ModelStates, baseModel)
+	}
+	if count := reg.GetModelCount(baseModel); count != 0 {
+		t.Fatalf("registry model count during cooldown = %d, want 0", count)
+	}
+	for _, model := range []string{baseModel, baseModel + "(medium)", baseModel + "(low)"} {
+		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("scheduler.pickSingle(%q) error = %v", model, errPick)
+		}
+		if got == nil || got.ID != "thinking-auth-b" {
+			t.Fatalf("scheduler.pickSingle(%q) auth = %v, want thinking-auth-b", model, got)
+		}
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "thinking-auth-a",
+		Provider: "gemini",
+		Model:    baseModel + "(low)",
+		Success:  true,
+	})
+
+	auth, ok = manager.GetByID("thinking-auth-a")
+	if !ok || auth == nil || auth.ModelStates[baseModel] == nil {
+		t.Fatal("canonical model state was not retained after success")
+	}
+	state := auth.ModelStates[baseModel]
+	if state.Unavailable || state.Quota.Exceeded || !state.NextRetryAfter.IsZero() {
+		t.Fatalf("canonical model state after success = %+v, want cleared", state)
+	}
+	if count := reg.GetModelCount(baseModel); count != 2 {
+		t.Fatalf("registry model count after recovery = %d, want 2", count)
 	}
 }
 

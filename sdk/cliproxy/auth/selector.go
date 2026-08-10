@@ -252,7 +252,7 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func getAvailableAuths(auths []*Auth, provider, model string, now time.Time, ignorePriority bool) ([]*Auth, error) {
+func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, now time.Time, allPriorities bool) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -265,7 +265,7 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time, ign
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			if ignorePriority {
+			if allPriorities {
 				available = append(available, candidate)
 			} else {
 				priority := authPriority(candidate)
@@ -281,14 +281,14 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time, ign
 		}
 	}
 
-	if ignorePriority && len(available) > 0 {
+	if allPriorities && len(available) > 0 {
 		if len(available) > 1 {
 			sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 		}
 		return available, nil
 	}
 
-	if !ignorePriority && len(availableByPriority) > 0 {
+	if !allPriorities && len(availableByPriority) > 0 {
 		bestPriority := 0
 		found := false
 		for priority := range availableByPriority {
@@ -319,19 +319,97 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time, ign
 	return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
+func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, false)
+}
+
+func getAvailableAuthsAcrossPriorities(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, true)
+}
+
 func getPriorityAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getAvailableAuths(auths, provider, model, now, false)
+	return getAvailableAuths(auths, provider, model, now)
 }
 
 func getWeightedAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getAvailableAuths(auths, provider, model, now, true)
+	return getAvailableAuthsAcrossPriorities(auths, provider, model, now)
 }
 
 func getAvailableAuthsForSelector(selector Selector, auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	if selectorWeighted(selector) {
+	weighted := selectorWeighted(selector)
+	if _, ok := selector.(*WeightedRoundRobinSelector); ok {
+		weighted = true
+	}
+	if weighted {
 		return getWeightedAvailableAuths(auths, provider, model, now)
 	}
 	return getPriorityAvailableAuths(auths, provider, model, now)
+}
+
+// availableAuthsFromPriorityBuckets flattens availability buckets into a stable, ID-sorted slice.
+// When allPriorities is false only the highest available priority tier is returned.
+// When allPriorities is true every tier is merged, so the result carries no priority ordering:
+// use it for membership checks or feed it to highestPriorityAuths, never as a priority-ordered
+// selection order.
+func availableAuthsFromPriorityBuckets(availableByPriority map[int][]*Auth, allPriorities bool) []*Auth {
+	var candidates []*Auth
+	if allPriorities {
+		total := 0
+		for _, bucket := range availableByPriority {
+			total += len(bucket)
+		}
+		candidates = make([]*Auth, 0, total)
+		for _, bucket := range availableByPriority {
+			candidates = append(candidates, bucket...)
+		}
+	} else {
+		bestPriority := 0
+		found := false
+		for priority := range availableByPriority {
+			if !found || priority > bestPriority {
+				bestPriority = priority
+				found = true
+			}
+		}
+		bucket := availableByPriority[bestPriority]
+		candidates = make([]*Auth, 0, len(bucket))
+		candidates = append(candidates, bucket...)
+	}
+	if len(candidates) > 1 {
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	}
+	return candidates
+}
+
+// highestPriorityAuths narrows an availability slice to its highest priority tier while
+// preserving the input order. The input slice is returned unchanged when every candidate
+// already shares the highest priority, so the common single-tier case allocates nothing.
+func highestPriorityAuths(auths []*Auth) []*Auth {
+	if len(auths) <= 1 {
+		return auths
+	}
+	bestPriority := 0
+	bestCount := 0
+	for _, auth := range auths {
+		priority := authPriority(auth)
+		switch {
+		case bestCount == 0 || priority > bestPriority:
+			bestPriority = priority
+			bestCount = 1
+		case priority == bestPriority:
+			bestCount++
+		}
+	}
+	if bestCount == len(auths) {
+		return auths
+	}
+	highest := make([]*Auth, 0, bestCount)
+	for _, auth := range auths {
+		if authPriority(auth) == bestPriority {
+			highest = append(highest, auth)
+		}
+	}
+	return highest
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
@@ -552,7 +630,7 @@ func positiveWeightAuths(auths []*Auth) []*Auth {
 // Pick selects the next available auth using smooth weighted round-robin.
 func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	available, errAvailable := getAvailableAuths(positiveWeightAuths(auths), provider, model, time.Now(), true)
+	available, errAvailable := getWeightedAvailableAuths(positiveWeightAuths(auths), provider, model, time.Now())
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
@@ -678,54 +756,65 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			state, ok := auth.ModelStates[model]
-			if (!ok || state == nil) && model != "" {
-				baseModel := canonicalModelKey(model)
-				if baseModel != "" && baseModel != model {
-					state, ok = auth.ModelStates[baseModel]
+			modelKey := canonicalModelKey(model)
+			matched := false
+			blocked := false
+			blockedReason := blockReasonNone
+			nextRetry := time.Time{}
+			for stateModel, state := range auth.ModelStates {
+				if state == nil || canonicalModelKey(stateModel) != modelKey {
+					continue
 				}
-			}
-			if ok && state != nil {
+				matched = true
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
 				}
-				if state.Unavailable {
-					if state.NextRetryAfter.IsZero() {
-						return false, blockReasonNone, time.Time{}
-					}
-					if state.NextRetryAfter.After(now) {
-						next := state.NextRetryAfter
-						if !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
-							next = state.Quota.NextRecoverAt
-						}
-						if next.Before(now) {
-							next = now
-						}
-						if state.Quota.Exceeded {
-							return true, blockReasonCooldown, next
-						}
-						return true, blockReasonOther, next
-					}
+				stateBlocked, reason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				if !stateBlocked {
+					continue
 				}
-				return false, blockReasonNone, time.Time{}
+				if next.IsZero() {
+					return true, reason, time.Time{}
+				}
+				if !blocked || next.After(nextRetry) || (next.Equal(nextRetry) && reason == blockReasonCooldown) {
+					blocked = true
+					blockedReason = reason
+					nextRetry = next
+				}
 			}
+			if matched {
+				return blocked, blockedReason, nextRetry
+			}
+			// Auth-level availability can aggregate failures from other models.
+			return false, blockReasonNone, time.Time{}
 		}
+		return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	}
+	return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+}
+
+func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextRecoverAt, now time.Time) (bool, blockReason, time.Time) {
+	if !unavailable && !quotaExceeded {
 		return false, blockReasonNone, time.Time{}
 	}
-	if auth.Unavailable && auth.NextRetryAfter.After(now) {
-		next := auth.NextRetryAfter
-		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
-			next = auth.Quota.NextRecoverAt
+
+	hasRecoveryTime := !nextRetryAfter.IsZero() || !nextRecoverAt.IsZero()
+	var next time.Time
+	for _, candidate := range []time.Time{nextRetryAfter, nextRecoverAt} {
+		if candidate.After(now) && (next.IsZero() || candidate.After(next)) {
+			next = candidate
 		}
-		if next.Before(now) {
-			next = now
-		}
-		if auth.Quota.Exceeded {
+	}
+	if !next.IsZero() {
+		if quotaExceeded {
 			return true, blockReasonCooldown, next
 		}
 		return true, blockReasonOther, next
 	}
-	return false, blockReasonNone, time.Time{}
+	if hasRecoveryTime {
+		return false, blockReasonNone, time.Time{}
+	}
+	return true, blockReasonOther, time.Time{}
 }
 
 // SessionAffinitySelector wraps another selector with session-sticky behavior.
@@ -782,21 +871,43 @@ func (s *SessionAffinitySelector) sessionCache() *SessionCache {
 // Explicit Claude Code, Codex, OpenCode, pi, and request-body session signals
 // precede execution metadata, stable derived identity, and the legacy hash fallback.
 //
+// An established binding outranks credential priority: a bound credential that is still
+// available is reused even when a higher-priority credential recovers. Credential priority
+// applies to cold bindings, requests without a session, and genuine bound-credential
+// failover. Weighted fallbacks continue to select across priorities by design.
+//
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
 	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	now := time.Now()
+	weightedFallback := selectorWeighted(s.fallback)
+	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
+		weightedFallback = true
+	}
+	availabilityCandidates := auths
+	if weightedFallback {
+		availabilityCandidates = positiveWeightAuths(auths)
+	}
 	if primaryID == "" {
+		fallbackAuths, errAvailable := getAvailableAuthsForSelector(s.fallback, availabilityCandidates, provider, model, now)
+		if errAvailable != nil {
+			return nil, errAvailable
+		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, auths)
+		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	}
 
-	now := time.Now()
-	available, err := getAvailableAuthsForSelector(s.fallback, auths, provider, model, now)
+	// A single availability pass validates the bound credential against every priority tier.
+	available, err := getAvailableAuthsAcrossPriorities(availabilityCandidates, provider, model, now)
 	if err != nil {
 		return nil, err
+	}
+	fallbackAuths := available
+	if !weightedFallback {
+		fallbackAuths = highestPriorityAuths(available)
 	}
 
 	cacheKey := provider + "::" + primaryID + "::" + model
@@ -820,7 +931,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, available)
+		// Cached auth not available, reselect via fallback selector for even distribution
+		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err
 		}
@@ -841,7 +953,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, available)
+	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
 	}

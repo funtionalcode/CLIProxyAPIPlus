@@ -1,17 +1,25 @@
 package helps
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"golang.org/x/net/proxy"
+	tls "github.com/refraction-networking/utls"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type utlsClientRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -20,283 +28,503 @@ func (f utlsClientRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, e
 	return f(req)
 }
 
-func TestNewUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *testing.T) {
+type claudeCodeTLSFingerprintFixture struct {
+	ClientHelloLength   int
+	JA3                 string
+	JA3MD5              string
+	ALPN                []string
+	HTTPVersion         string
+	CipherSuites        []uint16
+	ExtensionTypes      []uint16
+	ExtensionLengths    [][2]int
+	SupportedGroups     []uint16
+	PointFormats        []uint8
+	SignatureAlgorithms []uint16
+	SupportedVersions   []uint16
+	KeyShareGroups      []uint16
+}
+
+func TestClaudeCodeTLSClientHelloSpecMatches220Capture(t *testing.T) {
 	t.Parallel()
 
-	called := false
-	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", utlsClientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		called = true
-		if req.URL.Hostname() != "chatgpt.com" {
-			t.Fatalf("hostname = %q, want chatgpt.com", req.URL.Hostname())
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader("{}")),
-			Request:    req,
-		}, nil
-	}))
+	fixture := claudeCodeTLSFingerprintFixture{
+		ClientHelloLength: 508,
+		JA3:               "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0",
+		JA3MD5:            "d871d02cecbde59abbf8f4806134addf",
+		ALPN:              []string{"http/1.1"},
+		HTTPVersion:       "HTTP/1.1",
+		CipherSuites:      []uint16{4865, 4866, 4867, 49195, 49199, 49196, 49200, 52393, 52392, 49161, 49171, 49162, 49172, 156, 157, 47, 53},
+		ExtensionTypes:    []uint16{0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43, 21},
+		ExtensionLengths: [][2]int{
+			{0, 22}, {23, 0}, {65281, 1}, {10, 8}, {11, 2}, {35, 0}, {16, 11},
+			{5, 5}, {13, 20}, {18, 0}, {51, 38}, {45, 2}, {43, 5}, {21, 231},
+		},
+		SupportedGroups:     []uint16{29, 23, 24},
+		PointFormats:        []uint8{0},
+		SignatureAlgorithms: []uint16{1027, 2052, 1025, 1283, 2053, 1281, 2054, 1537, 513},
+		SupportedVersions:   []uint16{772, 771},
+		KeyShareGroups:      []uint16{29},
+	}
 
-	client := NewUtlsHTTPClient(ctx, nil, nil, 0)
-	resp, err := client.Get("https://chatgpt.com/backend-api/codex/responses")
-	if err != nil {
-		t.Fatalf("client.Get returned error: %v", err)
+	record := captureClaudeCodeClientHello(t)
+	if got := len(record) - 9; got != fixture.ClientHelloLength {
+		t.Fatalf("ClientHello length = %d, want %d", got, fixture.ClientHelloLength)
 	}
-	if errClose := resp.Body.Close(); errClose != nil {
-		t.Fatalf("response body close returned error: %v", errClose)
+	if got := parseClientHelloExtensionLengths(t, record); !reflect.DeepEqual(got, fixture.ExtensionLengths) {
+		t.Fatalf("extension lengths = %v, want %v", got, fixture.ExtensionLengths)
 	}
-	if !called {
-		t.Fatal("expected context RoundTripper to handle protected host request")
+
+	spec, errFingerprint := (&tls.Fingerprinter{}).FingerprintClientHello(record)
+	if errFingerprint != nil {
+		t.Fatal(errFingerprint)
+	}
+	actual := summarizeClaudeCodeClientHelloSpec(t, spec)
+	if !reflect.DeepEqual(actual.CipherSuites, fixture.CipherSuites) {
+		t.Fatalf("cipher suites = %v, want %v", actual.CipherSuites, fixture.CipherSuites)
+	}
+	if !reflect.DeepEqual(actual.ExtensionTypes, fixture.ExtensionTypes) {
+		t.Fatalf("extension types = %v, want %v", actual.ExtensionTypes, fixture.ExtensionTypes)
+	}
+	if !reflect.DeepEqual(actual.ALPN, fixture.ALPN) {
+		t.Fatalf("ALPN = %v, want %v", actual.ALPN, fixture.ALPN)
+	}
+	if !reflect.DeepEqual(actual.SupportedGroups, fixture.SupportedGroups) {
+		t.Fatalf("supported groups = %v, want %v", actual.SupportedGroups, fixture.SupportedGroups)
+	}
+	if !reflect.DeepEqual(actual.PointFormats, fixture.PointFormats) {
+		t.Fatalf("point formats = %v, want %v", actual.PointFormats, fixture.PointFormats)
+	}
+	if !reflect.DeepEqual(actual.SignatureAlgorithms, fixture.SignatureAlgorithms) {
+		t.Fatalf("signature algorithms = %v, want %v", actual.SignatureAlgorithms, fixture.SignatureAlgorithms)
+	}
+	if !reflect.DeepEqual(actual.SupportedVersions, fixture.SupportedVersions) {
+		t.Fatalf("supported versions = %v, want %v", actual.SupportedVersions, fixture.SupportedVersions)
+	}
+	if !reflect.DeepEqual(actual.KeyShareGroups, fixture.KeyShareGroups) {
+		t.Fatalf("key share groups = %v, want %v", actual.KeyShareGroups, fixture.KeyShareGroups)
+	}
+	if actual.JA3 != fixture.JA3 || actual.JA3MD5 != fixture.JA3MD5 {
+		t.Fatalf("JA3 = %q (%s), want %q (%s)", actual.JA3, actual.JA3MD5, fixture.JA3, fixture.JA3MD5)
+	}
+
+	transport, ok := newClaudeCodeRoundTripper("").(*http.Transport)
+	if !ok {
+		t.Fatalf("Claude Code transport type = %T, want *http.Transport", newClaudeCodeRoundTripper(""))
+	}
+	if transport.ForceAttemptHTTP2 {
+		t.Fatal("Claude Code transport must not force HTTP/2")
+	}
+	if fixture.HTTPVersion != "HTTP/1.1" {
+		t.Fatalf("fixture HTTP version = %q, want HTTP/1.1", fixture.HTTPVersion)
 	}
 }
 
-func TestUTLSClientHelloFingerprints(t *testing.T) {
-	tests := []struct {
-		name       string
-		profile    utlsClientProfile
-		wantJA3    string
-		wantJA3MD5 string
-	}{
-		{
-			name:       "claude code",
-			profile:    utlsProfileClaudeCode,
-			wantJA3:    "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0",
-			wantJA3MD5: "d871d02cecbde59abbf8f4806134addf",
-		},
-		{
-			name:       "codex cli",
-			profile:    utlsProfileCodexCLI,
-			wantJA3:    "771,255-49196-49195-49188-49187-49162-49161-49160-49200-49199-49192-49191-49172-49171-49170-157-156-61-60-53-47-10,0-10-11-13-5-18-23,23-24-25,0",
-			wantJA3MD5: "e4d448cdfe06dc1243c1eb026c74ac9a",
-		},
+func TestClaudeCodeTLSResumptionIsWireSafe(t *testing.T) {
+	t.Parallel()
+
+	// RFC 8446 4.2.11 requires pre_shared_key to be the final extension, after
+	// the padding extension.
+	spec := claudeCodeTLSClientHelloSpec()
+	last := spec.Extensions[len(spec.Extensions)-1]
+	if _, ok := last.(*tls.UtlsPreSharedKeyExtension); !ok {
+		t.Fatalf("last inference extension = %T, want *tls.UtlsPreSharedKeyExtension", last)
+	}
+	if _, ok := spec.Extensions[len(spec.Extensions)-2].(*tls.UtlsPaddingExtension); !ok {
+		t.Fatalf("extension before pre_shared_key = %T, want *tls.UtlsPaddingExtension", spec.Extensions[len(spec.Extensions)-2])
 	}
 
+	// Without OmitEmptyPsk uTLS refuses to marshal an empty PSK, and without
+	// PreferSkipResumptionOnNilExtension a HelloCustom resumption attempt panics.
+	cfg := newClaudeCodeTLSConfig("api.anthropic.com", tls.NewLRUClientSessionCache(claudeCodeSessionCacheCapacity))
+	if cfg.ClientSessionCache == nil {
+		t.Fatal("ClientSessionCache = nil, want a session cache so resumption is possible")
+	}
+	if !cfg.OmitEmptyPsk {
+		t.Fatal("OmitEmptyPsk = false, want true so an unresumed ClientHello stays byte-identical")
+	}
+	if !cfg.PreferSkipResumptionOnNilExtension {
+		t.Fatal("PreferSkipResumptionOnNilExtension = false, want true to avoid a HelloCustom resumption panic")
+	}
+}
+
+func TestClaudeCodeRequestHeaderOrderMatchesNative220Capture(t *testing.T) {
+	t.Parallel()
+
+	if got, want := claudeCodeRequestHeaderOrder(http.MethodPost, "/v1/messages?beta=true"), claudeCodeMessagesHeaderOrder; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Messages header order = %v, want %v", got, want)
+	}
+	if got, want := claudeCodeRequestHeaderOrder(http.MethodPost, "/v1/messages/count_tokens?beta=true"), claudeCodeCountTokensHeaderOrder; !reflect.DeepEqual(got, want) {
+		t.Fatalf("count_tokens header order = %v, want %v", got, want)
+	}
+	for _, name := range claudeCodeCountTokensHeaderOrder {
+		if name == "X-Stainless-Timeout" {
+			t.Fatal("count_tokens header order unexpectedly contains X-Stainless-Timeout")
+		}
+	}
+}
+
+func TestCachedClaudeCodeRoundTripperReusesTransport(t *testing.T) {
+	t.Parallel()
+
+	const proxyURL = "http://127.0.0.1:29653"
+	first := cachedClaudeCodeRoundTripper(proxyURL)
+	second := cachedClaudeCodeRoundTripper(proxyURL)
+	if first != second {
+		t.Fatal("Claude Code transport cache returned different transports for one proxy")
+	}
+}
+
+func TestCachedClaudeCodeRoundTripperBoundsProxyCardinality(t *testing.T) {
+	firstProxy := fmt.Sprintf("http://127.0.0.1:%d", 30000)
+	first := cachedClaudeCodeRoundTripper(firstProxy)
+	for index := 1; index <= claudeCodeRoundTripperCacheCapacity; index++ {
+		cachedClaudeCodeRoundTripper(fmt.Sprintf("http://127.0.0.1:%d", 30000+index))
+	}
+	if got := claudeCodeRoundTripperCache.Len(); got > claudeCodeRoundTripperCacheCapacity {
+		t.Fatalf("transport cache entries = %d, want at most %d", got, claudeCodeRoundTripperCacheCapacity)
+	}
+	if recreated := cachedClaudeCodeRoundTripper(firstProxy); recreated == first {
+		t.Fatal("least recently used proxy transport was not evicted")
+	}
+}
+
+func TestClaudeCodeTLSClientHelloCapture(t *testing.T) {
+	proxyURL := os.Getenv("CPA_TLS_FP_PROXY")
+	if proxyURL == "" {
+		t.Skip("CPA_TLS_FP_PROXY is not set")
+	}
+
+	client := NewUtlsHTTPClient(t.Context(), nil, &cliproxyauth.Auth{ProxyURL: proxyURL}, 0)
+	req, errRequest := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://api.anthropic.com/v1/messages", bytes.NewBufferString(`{"model":"claude-opus-4-6","max_tokens":1,"messages":[{"role":"user","content":"x"}]}`))
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", "dummy-tls-fingerprint")
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		t.Fatal(errDo)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+}
+
+func TestFallbackRoundTripperSelectsProviderFingerprint(t *testing.T) {
+	t.Parallel()
+
+	route := func(label string) http.RoundTripper {
+		return utlsClientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"X-Test-Route": []string{label}},
+				Body:       io.NopCloser(strings.NewReader("{}")),
+				Request:    req,
+			}, nil
+		})
+	}
+	roundTripper := &fallbackRoundTripper{
+		anthropic: route("anthropic"),
+		chrome:    route("chrome"),
+		fallback:  route("fallback"),
+	}
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "Anthropic HTTPS", url: "https://api.anthropic.com/v1/messages", want: "anthropic"},
+		{name: "Anthropic explicit HTTPS port", url: "https://api.anthropic.com:443/v1/messages", want: "anthropic"},
+		{name: "Anthropic custom port", url: "https://api.anthropic.com:8443/v1/messages", want: "fallback"},
+		{name: "Anthropic userinfo", url: "https://caller@api.anthropic.com/v1/messages", want: "fallback"},
+		{name: "Anthropic lookalike", url: "https://api.anthropic.com.example/v1/messages", want: "fallback"},
+		{name: "ChatGPT HTTPS", url: "https://chatgpt.com/backend-api/codex/responses", want: "chrome"},
+		{name: "Other HTTPS", url: "https://example.com/v1/messages", want: "fallback"},
+		{name: "Anthropic HTTP", url: "http://api.anthropic.com/v1/messages", want: "fallback"},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clientHello := captureUTLSClientHello(t, tt.profile)
-			gotJA3 := clientHelloJA3(t, clientHello)
-			if gotJA3 != tt.wantJA3 {
-				t.Fatalf("JA3 = %q, want %q", gotJA3, tt.wantJA3)
+			req, errRequest := http.NewRequest(http.MethodGet, tt.url, nil)
+			if errRequest != nil {
+				t.Fatal(errRequest)
 			}
-			if gotJA3MD5 := fmt.Sprintf("%x", md5.Sum([]byte(gotJA3))); gotJA3MD5 != tt.wantJA3MD5 {
-				t.Fatalf("JA3 md5 = %q, want %q", gotJA3MD5, tt.wantJA3MD5)
+			resp, errRoundTrip := roundTripper.RoundTrip(req)
+			if errRoundTrip != nil {
+				t.Fatal(errRoundTrip)
+			}
+			defer func() {
+				if errClose := resp.Body.Close(); errClose != nil {
+					t.Errorf("close response body: %v", errClose)
+				}
+			}()
+			if got := resp.Header.Get("X-Test-Route"); got != tt.want {
+				t.Fatalf("route = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestClaudeCodeClientHelloAdvertisesOnlyHTTP11(t *testing.T) {
-	clientHello := captureUTLSClientHello(t, utlsProfileClaudeCodeHTTP1)
-	protocols := clientHelloALPNProtocols(t, clientHello)
-	if got, want := strings.Join(protocols, ","), "http/1.1"; got != want {
-		t.Fatalf("ALPN protocols = %q, want %q", got, want)
+func TestNewUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *testing.T) {
+	t.Parallel()
+
+	for _, targetURL := range []string{
+		"https://api.anthropic.com/v1/messages",
+		"https://chatgpt.com/backend-api/codex/responses",
+	} {
+		t.Run(targetURL, func(t *testing.T) {
+			called := false
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", utlsClientRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				called = true
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("{}")),
+					Request:    req,
+				}, nil
+			}))
+
+			client := NewUtlsHTTPClient(ctx, nil, nil, 0)
+			resp, err := client.Get(targetURL)
+			if err != nil {
+				t.Fatalf("client.Get returned error: %v", err)
+			}
+			if errClose := resp.Body.Close(); errClose != nil {
+				t.Fatalf("response body close returned error: %v", errClose)
+			}
+			if !called {
+				t.Fatal("expected context RoundTripper to handle protected host request")
+			}
+		})
 	}
 }
 
-func TestNewUtlsHTTPClientUsesHTTP1RoundTripperWhenClaudeTLSHTTP1Only(t *testing.T) {
-	cfg := &config.Config{
-		Claude: config.ClaudeConfig{
-			TLS: config.ClaudeTLSConfig{HTTP1Only: true},
-		},
-	}
+func TestCodexCLIClientHelloSpecMatchesLocalFingerprint(t *testing.T) {
+	t.Parallel()
 
-	client := NewUtlsHTTPClient(context.Background(), cfg, nil, 0)
-	fallback, ok := client.Transport.(*fallbackRoundTripper)
-	if !ok {
-		t.Fatalf("client transport = %T, want *fallbackRoundTripper", client.Transport)
+	record := captureCodexCLIClientHello(t)
+	spec, errFingerprint := (&tls.Fingerprinter{}).FingerprintClientHello(record)
+	if errFingerprint != nil {
+		t.Fatal(errFingerprint)
 	}
-	if _, ok := fallback.utls.(*utlsHTTP1RoundTripper); !ok {
-		t.Fatalf("protected-host transport = %T, want *utlsHTTP1RoundTripper", fallback.utls)
+	actual := summarizeClaudeCodeClientHelloSpec(t, spec)
+	const wantJA3 = "771,255-49196-49195-49188-49187-49162-49161-49160-49200-49199-49192-49191-49172-49171-49170-157-156-61-60-53-47-10,0-10-11-13-5-18-23,23-24-25,0"
+	const wantJA3MD5 = "e4d448cdfe06dc1243c1eb026c74ac9a"
+	if actual.JA3 != wantJA3 || actual.JA3MD5 != wantJA3MD5 {
+		t.Fatalf("JA3 = %q (%s), want %q (%s)", actual.JA3, actual.JA3MD5, wantJA3, wantJA3MD5)
 	}
 }
 
-func captureUTLSClientHello(t *testing.T, profile utlsClientProfile) []byte {
+func captureCodexCLIClientHello(t *testing.T) []byte {
 	t.Helper()
 
-	ln, errListen := net.Listen("tcp", "127.0.0.1:0")
-	if errListen != nil {
-		t.Fatalf("listen failed: %v", errListen)
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		if errClose := clientConn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			t.Errorf("close client pipe: %v", errClose)
+		}
+		if errClose := serverConn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			t.Errorf("close server pipe: %v", errClose)
+		}
+	})
+	tlsConn := tls.UClient(clientConn, &tls.Config{ServerName: "chatgpt.com"}, tls.HelloCustom)
+	if errPreset := tlsConn.ApplyPreset(codexCLIClientHelloSpec()); errPreset != nil {
+		t.Fatal(errPreset)
 	}
-	defer ln.Close()
-
-	errCh := make(chan error, 1)
+	handshakeDone := make(chan error, 1)
 	go func() {
-		conn, errDial := dialUTLSConn(proxy.Direct, "example.com", ln.Addr().String(), profile)
-		if conn != nil {
-			conn.Close()
-		}
-		errCh <- errDial
+		handshakeDone <- tlsConn.Handshake()
 	}()
-
-	conn, errAccept := ln.Accept()
-	if errAccept != nil {
-		t.Fatalf("accept failed: %v", errAccept)
+	if errDeadline := serverConn.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+		t.Fatal(errDeadline)
 	}
-	defer conn.Close()
-
 	header := make([]byte, 5)
-	if _, errRead := conn.Read(header); errRead != nil {
-		t.Fatalf("read TLS record header failed: %v", errRead)
+	if _, errRead := io.ReadFull(serverConn, header); errRead != nil {
+		t.Fatal(errRead)
 	}
-	recordLen := int(header[3])<<8 | int(header[4])
-	body := make([]byte, recordLen)
-	read := 0
-	for read < recordLen {
-		n, errRead := conn.Read(body[read:])
-		if errRead != nil {
-			t.Fatalf("read TLS record body failed: %v", errRead)
-		}
-		read += n
+	payload := make([]byte, int(binary.BigEndian.Uint16(header[3:5])))
+	if _, errRead := io.ReadFull(serverConn, payload); errRead != nil {
+		t.Fatal(errRead)
 	}
-	conn.Close()
-	<-errCh
-
-	return append(header, body...)
+	if errClose := serverConn.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	select {
+	case <-handshakeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("uTLS handshake did not exit after the capture connection closed")
+	}
+	return append(header, payload...)
 }
 
-func clientHelloJA3(t *testing.T, record []byte) string {
+type claudeCodeClientHelloSummary struct {
+	CipherSuites        []uint16
+	ExtensionTypes      []uint16
+	ALPN                []string
+	SupportedGroups     []uint16
+	PointFormats        []uint8
+	SignatureAlgorithms []uint16
+	SupportedVersions   []uint16
+	KeyShareGroups      []uint16
+	JA3                 string
+	JA3MD5              string
+}
+
+func captureClaudeCodeClientHello(t *testing.T) []byte {
 	t.Helper()
-	if len(record) < 5 || record[0] != 22 {
-		t.Fatalf("not a TLS handshake record: %x", record[:min(len(record), 5)])
-	}
-	body := record[5:]
-	if len(body) < 4 || body[0] != 1 {
-		t.Fatalf("not a ClientHello: %x", body[:min(len(body), 4)])
-	}
 
-	p := 4
-	legacyVersion := uint16(body[p])<<8 | uint16(body[p+1])
-	p += 2 + 32
-	sessionIDLen := int(body[p])
-	p += 1 + sessionIDLen
-	cipherLen := int(body[p])<<8 | int(body[p+1])
-	p += 2
-	ciphers := make([]uint16, 0, cipherLen/2)
-	for i := p; i < p+cipherLen; i += 2 {
-		ciphers = append(ciphers, uint16(body[i])<<8|uint16(body[i+1]))
-	}
-	p += cipherLen
-	compressionLen := int(body[p])
-	p += 1 + compressionLen
-
-	var extensions, curves []uint16
-	var points []byte
-	if p+2 <= len(body) {
-		extensionsLen := int(body[p])<<8 | int(body[p+1])
-		p += 2
-		end := min(len(body), p+extensionsLen)
-		for p+4 <= end {
-			extID := uint16(body[p])<<8 | uint16(body[p+1])
-			extLen := int(body[p+2])<<8 | int(body[p+3])
-			p += 4
-			extData := body[p : p+extLen]
-			p += extLen
-			extensions = append(extensions, extID)
-			switch extID {
-			case 10:
-				if len(extData) >= 2 {
-					curvesLen := int(extData[0])<<8 | int(extData[1])
-					for i := 2; i+1 < min(len(extData), 2+curvesLen); i += 2 {
-						curves = append(curves, uint16(extData[i])<<8|uint16(extData[i+1]))
-					}
-				}
-			case 11:
-				if len(extData) >= 1 {
-					pointsLen := int(extData[0])
-					points = append(points, extData[1:min(len(extData), 1+pointsLen)]...)
-				}
-			}
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		if errClose := clientConn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			t.Errorf("close client pipe: %v", errClose)
 		}
+		if errClose := serverConn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			t.Errorf("close server pipe: %v", errClose)
+		}
+	})
+	// Use the production config so the captured bytes reflect the real dial path,
+	// including the resumption settings.
+	cfg := newClaudeCodeTLSConfig("api.anthropic.com", tls.NewLRUClientSessionCache(claudeCodeSessionCacheCapacity))
+	tlsConn := tls.UClient(clientConn, cfg, tls.HelloCustom)
+	if errPreset := tlsConn.ApplyPreset(claudeCodeTLSClientHelloSpec()); errPreset != nil {
+		t.Fatal(errPreset)
 	}
-
-	return strings.Join([]string{
-		fmt.Sprint(legacyVersion),
-		joinJA3Uint16s(ciphers),
-		joinJA3Uint16s(extensions),
-		joinJA3Uint16s(curves),
-		joinJA3Bytes(points),
-	}, ",")
+	handshakeDone := make(chan error, 1)
+	go func() {
+		handshakeDone <- tlsConn.Handshake()
+	}()
+	if errDeadline := serverConn.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+		t.Fatal(errDeadline)
+	}
+	header := make([]byte, 5)
+	if _, errRead := io.ReadFull(serverConn, header); errRead != nil {
+		t.Fatal(errRead)
+	}
+	payload := make([]byte, int(binary.BigEndian.Uint16(header[3:5])))
+	if _, errRead := io.ReadFull(serverConn, payload); errRead != nil {
+		t.Fatal(errRead)
+	}
+	if errClose := serverConn.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	select {
+	case <-handshakeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("uTLS handshake did not exit after the capture connection closed")
+	}
+	return append(header, payload...)
 }
 
-func clientHelloALPNProtocols(t *testing.T, record []byte) []string {
+func parseClientHelloExtensionLengths(t *testing.T, record []byte) [][2]int {
 	t.Helper()
-	if len(record) < 5 || record[0] != 22 {
-		t.Fatalf("not a TLS handshake record: %x", record[:min(len(record), 5)])
+	if len(record) < 9 || record[0] != 22 || record[5] != 1 {
+		t.Fatalf("invalid TLS ClientHello record")
 	}
-	body := record[5:]
-	if len(body) < 4 || body[0] != 1 {
-		t.Fatalf("not a ClientHello: %x", body[:min(len(body), 4)])
+	body := record[9:]
+	offset := 2 + 32
+	if offset >= len(body) {
+		t.Fatal("truncated ClientHello random")
 	}
+	sessionLength := int(body[offset])
+	offset += 1 + sessionLength
+	if offset+2 > len(body) {
+		t.Fatal("truncated ClientHello cipher suites")
+	}
+	cipherLength := int(binary.BigEndian.Uint16(body[offset : offset+2]))
+	offset += 2 + cipherLength
+	if offset >= len(body) {
+		t.Fatal("truncated ClientHello compression methods")
+	}
+	compressionLength := int(body[offset])
+	offset += 1 + compressionLength
+	if offset+2 > len(body) {
+		t.Fatal("truncated ClientHello extensions")
+	}
+	extensionsLength := int(binary.BigEndian.Uint16(body[offset : offset+2]))
+	offset += 2
+	end := offset + extensionsLength
+	if end > len(body) {
+		t.Fatal("truncated ClientHello extension data")
+	}
+	lengths := make([][2]int, 0)
+	for offset+4 <= end {
+		extensionType := int(binary.BigEndian.Uint16(body[offset : offset+2]))
+		extensionLength := int(binary.BigEndian.Uint16(body[offset+2 : offset+4]))
+		lengths = append(lengths, [2]int{extensionType, extensionLength})
+		offset += 4 + extensionLength
+	}
+	if offset != end {
+		t.Fatal("misaligned ClientHello extension data")
+	}
+	return lengths
+}
 
-	p := 4
-	p += 2 + 32
-	sessionIDLen := int(body[p])
-	p += 1 + sessionIDLen
-	cipherLen := int(body[p])<<8 | int(body[p+1])
-	p += 2 + cipherLen
-	compressionLen := int(body[p])
-	p += 1 + compressionLen
-	if p+2 > len(body) {
-		return nil
-	}
-	extensionsLen := int(body[p])<<8 | int(body[p+1])
-	p += 2
-	end := min(len(body), p+extensionsLen)
-	for p+4 <= end {
-		extID := uint16(body[p])<<8 | uint16(body[p+1])
-		extLen := int(body[p+2])<<8 | int(body[p+3])
-		p += 4
-		if p+extLen > end {
-			t.Fatalf("extension %d length exceeds ClientHello bounds", extID)
-		}
-		extData := body[p : p+extLen]
-		p += extLen
-		if extID != 16 {
-			continue
-		}
-		if len(extData) < 2 {
-			t.Fatalf("malformed ALPN extension: %x", extData)
-		}
-		listLen := int(extData[0])<<8 | int(extData[1])
-		q := 2
-		listEnd := min(len(extData), q+listLen)
-		var protocols []string
-		for q < listEnd {
-			nameLen := int(extData[q])
-			q++
-			if q+nameLen > listEnd {
-				t.Fatalf("malformed ALPN protocol list: %x", extData)
+func summarizeClaudeCodeClientHelloSpec(t *testing.T, spec *tls.ClientHelloSpec) claudeCodeClientHelloSummary {
+	t.Helper()
+	summary := claudeCodeClientHelloSummary{CipherSuites: append([]uint16(nil), spec.CipherSuites...)}
+	for _, extension := range spec.Extensions {
+		switch ext := extension.(type) {
+		case *tls.SNIExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 0)
+		case *tls.ExtendedMasterSecretExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 23)
+		case *tls.RenegotiationInfoExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 65281)
+		case *tls.SupportedCurvesExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 10)
+			for _, curve := range ext.Curves {
+				summary.SupportedGroups = append(summary.SupportedGroups, uint16(curve))
 			}
-			protocols = append(protocols, string(extData[q:q+nameLen]))
-			q += nameLen
+		case *tls.SupportedPointsExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 11)
+			summary.PointFormats = append(summary.PointFormats, ext.SupportedPoints...)
+		case *tls.SessionTicketExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 35)
+		case *tls.ALPNExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 16)
+			summary.ALPN = append(summary.ALPN, ext.AlpnProtocols...)
+		case *tls.StatusRequestExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 5)
+		case *tls.SignatureAlgorithmsExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 13)
+			for _, algorithm := range ext.SupportedSignatureAlgorithms {
+				summary.SignatureAlgorithms = append(summary.SignatureAlgorithms, uint16(algorithm))
+			}
+		case *tls.SCTExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 18)
+		case *tls.KeyShareExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 51)
+			for _, keyShare := range ext.KeyShares {
+				summary.KeyShareGroups = append(summary.KeyShareGroups, uint16(keyShare.Group))
+			}
+		case *tls.PSKKeyExchangeModesExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 45)
+		case *tls.SupportedVersionsExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 43)
+			summary.SupportedVersions = append(summary.SupportedVersions, ext.Versions...)
+		case *tls.UtlsPaddingExtension:
+			summary.ExtensionTypes = append(summary.ExtensionTypes, 21)
+		default:
+			t.Fatalf("unexpected ClientHello extension type %T", extension)
 		}
-		return protocols
 	}
-	return nil
-}
-
-func joinJA3Uint16s(values []uint16) string {
-	parts := make([]string, 0, len(values))
-	for _, value := range values {
-		if isJA3GREASE(value) {
-			continue
-		}
-		parts = append(parts, fmt.Sprint(value))
+	cipherStrings := make([]string, 0, len(summary.CipherSuites))
+	for _, cipher := range summary.CipherSuites {
+		cipherStrings = append(cipherStrings, strconv.Itoa(int(cipher)))
 	}
-	return strings.Join(parts, "-")
-}
-
-func joinJA3Bytes(values []byte) string {
-	parts := make([]string, 0, len(values))
-	for _, value := range values {
-		parts = append(parts, fmt.Sprint(value))
+	extensionStrings := make([]string, 0, len(summary.ExtensionTypes))
+	for _, extensionType := range summary.ExtensionTypes {
+		extensionStrings = append(extensionStrings, strconv.Itoa(int(extensionType)))
 	}
-	return strings.Join(parts, "-")
-}
-
-func isJA3GREASE(value uint16) bool {
-	return value == 0x0a0a || value == 0x1a1a || value == 0x2a2a || value == 0x3a3a ||
-		value == 0x4a4a || value == 0x5a5a || value == 0x6a6a || value == 0x7a7a ||
-		value == 0x8a8a || value == 0x9a9a || value == 0xaaaa || value == 0xbaba ||
-		value == 0xcaca || value == 0xdada || value == 0xeaea || value == 0xfafa
+	groupStrings := make([]string, 0, len(summary.SupportedGroups))
+	for _, group := range summary.SupportedGroups {
+		groupStrings = append(groupStrings, strconv.Itoa(int(group)))
+	}
+	pointStrings := make([]string, 0, len(summary.PointFormats))
+	for _, point := range summary.PointFormats {
+		pointStrings = append(pointStrings, strconv.Itoa(int(point)))
+	}
+	summary.JA3 = fmt.Sprintf("771,%s,%s,%s,%s", strings.Join(cipherStrings, "-"), strings.Join(extensionStrings, "-"), strings.Join(groupStrings, "-"), strings.Join(pointStrings, "-"))
+	digest := md5.Sum([]byte(summary.JA3)) // #nosec G401 -- JA3 requires MD5.
+	summary.JA3MD5 = hex.EncodeToString(digest[:])
+	return summary
 }
