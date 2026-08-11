@@ -26,6 +26,7 @@ type configCommit struct {
 
 type routingRuntimeState struct {
 	strategy           string
+	weighted           bool
 	sessionAffinity    bool
 	sessionAffinityTTL time.Duration
 }
@@ -45,6 +46,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
 	}
+	state.weighted = cfg.Routing.Weighted
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
@@ -62,7 +64,7 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
 	default:
-		selector = &coreauth.RoundRobinSelector{}
+		selector = &coreauth.RoundRobinSelector{Weighted: state.weighted}
 	}
 	if state.sessionAffinity {
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{

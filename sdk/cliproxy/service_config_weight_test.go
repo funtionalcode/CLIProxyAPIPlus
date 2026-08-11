@@ -19,6 +19,25 @@ func TestWeightedRoundRobinRoutingSelector(t *testing.T) {
 	}
 }
 
+func TestRoutingWeightedFlagEnablesWeightedRoundRobin(t *testing.T) {
+	state := normalizedRoutingRuntimeState(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy: "round-robin",
+			Weighted: true,
+		},
+	})
+	if !state.weighted {
+		t.Fatal("weighted = false, want true")
+	}
+	selector, ok := newRoutingSelector(state).(*coreauth.RoundRobinSelector)
+	if !ok {
+		t.Fatalf("selector type = %T, want *auth.RoundRobinSelector", newRoutingSelector(state))
+	}
+	if !selector.Weighted {
+		t.Fatal("selector.Weighted = false, want true")
+	}
+}
+
 func TestServiceRejectsInvalidCredentialWeightConfigCommit(t *testing.T) {
 	originalCfg := &internalconfig.Config{}
 	service := &Service{cfg: originalCfg}
