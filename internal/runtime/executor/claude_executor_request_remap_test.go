@@ -95,10 +95,12 @@ func TestRemapOAuthToolNamesWithOptionsFallsBackForMalformedJSON(t *testing.T) {
 }
 
 func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
-	body := []byte(`{"tools":[{"name":"glob","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}]}`)
+	const playwrightTool = "plugin_playwright_playwright__browser_navigate"
+	body := []byte(fmt.Sprintf(`{"tools":[{"name":"glob","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}},{"name":%q,"input_schema":{"type":"object"}}]}`, playwrightTool))
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "mangled-alias-caller"})
 	globAlias := gjson.GetBytes(remapped, "tools.0.name").String()
 	readAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	playwrightAlias := gjson.GetBytes(remapped, "tools.2.name").String()
 	globParts, ok := parseClaudeMCPAlias(globAlias)
 	if !ok {
 		t.Fatalf("glob alias is invalid: %q", globAlias)
@@ -107,14 +109,20 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	if !ok {
 		t.Fatalf("read alias is invalid: %q", readAlias)
 	}
+	playwrightParts, ok := parseClaudeMCPAlias(playwrightAlias)
+	if !ok {
+		t.Fatalf("playwright alias is invalid: %q", playwrightAlias)
+	}
 
 	repeatedAlias := "mcp__" + globParts.server + "__" + globAlias
 	mixedAlias := "mcp__" + globParts.server + "__" + globParts.toolID + "_" + readParts.semantic
+	missingToolDigestAlias := "mcp__" + playwrightParts.server + "__" + playwrightTool
 	response := []byte(fmt.Sprintf(`{"content":[
 		{"type":"tool_use","id":"toolu_glob","name":%q,"input":{}},
 		{"type":"tool_reference","tool_name":%q},
-		{"type":"tool_result","tool_use_id":"toolu_read","content":[{"type":"tool_reference","tool_name":%q}]}
-	]}`, repeatedAlias, mixedAlias, mixedAlias))
+		{"type":"tool_result","tool_use_id":"toolu_read","content":[{"type":"tool_reference","tool_name":%q}]},
+		{"type":"tool_use","id":"toolu_playwright","name":%q,"input":{}}
+	]}`, repeatedAlias, mixedAlias, mixedAlias, missingToolDigestAlias))
 
 	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
 	if errReverse != nil {
@@ -128,6 +136,9 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	}
 	if got := gjson.GetBytes(restored, "content.2.content.0.tool_name").String(); got != "read" {
 		t.Fatalf("nested mixed alias restored to %q, want read", got)
+	}
+	if got := gjson.GetBytes(restored, "content.3.name").String(); got != playwrightTool {
+		t.Fatalf("missing tool digest alias restored to %q, want %q", got, playwrightTool)
 	}
 
 	streamTests := []struct {
@@ -147,6 +158,12 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 			block:     fmt.Sprintf(`{"type":"tool_reference","tool_name":%q}`, mixedAlias),
 			fieldPath: "content_block.tool_name",
 			want:      "read",
+		},
+		{
+			name:      "missing tool digest alias",
+			block:     fmt.Sprintf(`{"type":"tool_use","id":"toolu_playwright","name":%q,"input":{}}`, missingToolDigestAlias),
+			fieldPath: "content_block.name",
+			want:      playwrightTool,
 		},
 	}
 	for _, test := range streamTests {

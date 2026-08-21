@@ -1516,6 +1516,19 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name)
 	}
 
+	// Claude OAuth can occasionally drop the generated tool digest and return
+	// the request-local server prefix followed by the original client tool name.
+	// Only restore this malformed shape when the suffix exactly matches a tool
+	// declared in this request; do not use a global or fuzzy name match.
+	toolName, hasToolName := strings.CutPrefix(name, "mcp__"+server+"__")
+	if hasToolName {
+		for _, entry := range resolver.aliases {
+			if entry.parts.server == server && entry.original == toolName {
+				return entry.original, true, nil
+			}
+		}
+	}
+
 	parts, ok := parseClaudeMCPAlias(name)
 	if ok {
 		for _, entry := range resolver.aliases {
