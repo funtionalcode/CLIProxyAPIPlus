@@ -10,6 +10,21 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// PendingStreamError returns an immediately available non-nil stream error.
+func PendingStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
+	if errs == nil {
+		return nil, false
+	}
+	select {
+	case errMsg, ok := <-errs:
+		if ok && errMsg != nil {
+			return errMsg, true
+		}
+	default:
+	}
+	return nil, false
+}
+
 type StreamForwardOptions struct {
 	// Model is used only for temporary disconnect diagnostics.
 	Model string
@@ -24,9 +39,21 @@ type StreamForwardOptions struct {
 	// WriteChunk writes a single data chunk to the response body. It should not flush.
 	WriteChunk func(chunk []byte)
 
+	// ChunkError optionally reports that WriteChunk emitted a terminal failure.
+	// The failure is passed to cancel without writing another terminal payload.
+	ChunkError func() *interfaces.ErrorMessage
+
+	// NormalizeTerminalError optionally replaces an upstream error before it is
+	// written or passed to cancel.
+	NormalizeTerminalError func(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage
+
 	// WriteTerminalError writes an error payload to the response body when streaming fails
 	// after headers have already been committed. It should not flush.
 	WriteTerminalError func(errMsg *interfaces.ErrorMessage)
+
+	// CloseError optionally validates a clean upstream channel close before WriteDone.
+	// Returning an error surfaces it through WriteTerminalError instead of completing the stream.
+	CloseError func() *interfaces.ErrorMessage
 
 	// WriteDone optionally writes a terminal marker when the upstream data channel closes
 	// without an error (e.g. OpenAI's `[DONE]`). It should not flush.
@@ -89,13 +116,15 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 
 				// Prefer surfacing a terminal error if one is pending.
 				if terminalErr == nil {
-					select {
-					case errMsg, ok := <-errs:
-						if ok && errMsg != nil {
-							terminalErr = errMsg
+					if errMsg, ok := PendingStreamError(errs); ok {
+						terminalErr = errMsg
+						if opts.NormalizeTerminalError != nil {
+							terminalErr = opts.NormalizeTerminalError(terminalErr)
 						}
-					default:
 					}
+				}
+				if terminalErr == nil && opts.CloseError != nil {
+					terminalErr = opts.CloseError()
 				}
 				if terminalErr != nil {
 					if opts.WriteTerminalError != nil {
@@ -115,20 +144,38 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			writeChunk(chunk)
 			chunkCount++
 			flusher.Flush()
+			if opts.ChunkError != nil {
+				chunkErr := opts.ChunkError()
+				if chunkErr != nil {
+					if opts.NormalizeTerminalError != nil {
+						chunkErr = opts.NormalizeTerminalError(chunkErr)
+					}
+					if chunkErr != nil {
+						cancel(chunkErr.Error)
+					} else {
+						cancel(nil)
+					}
+					return
+				}
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
+				errs = nil
 				continue
 			}
 			if errMsg != nil {
 				terminalErr = errMsg
+				if opts.NormalizeTerminalError != nil {
+					terminalErr = opts.NormalizeTerminalError(terminalErr)
+				}
 				if opts.WriteTerminalError != nil {
-					opts.WriteTerminalError(errMsg)
+					opts.WriteTerminalError(terminalErr)
 					flusher.Flush()
 				}
 			}
 			var execErr error
-			if errMsg != nil {
-				execErr = errMsg.Error
+			if terminalErr != nil {
+				execErr = terminalErr.Error
 			}
 			cancel(execErr)
 			return

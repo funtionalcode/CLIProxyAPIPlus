@@ -40,7 +40,7 @@ func TestWrapStreamResultPreservesRetryAfterForCooldown(t *testing.T) {
 	remaining <- cliproxyexecutor.StreamChunk{Err: streamRetryAfterStatusErr{retryAfter: retryAfter}}
 	close(remaining)
 
-	result := m.wrapStreamResult(context.Background(), auth, "codex", "gpt-5.4-mini", nil, nil, remaining, OAuthModelAliasResult{}, false)
+	result := m.wrapStreamResult(context.Background(), auth, "codex", "gpt-5.4-mini", nil, nil, remaining, OAuthModelAliasResult{}, false, cliproxyexecutor.Options{})
 	for range result.Chunks {
 	}
 
