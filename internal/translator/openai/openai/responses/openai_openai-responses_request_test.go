@@ -20,6 +20,24 @@ func prettyJSONForTest(raw []byte) string {
 	return out.String()
 }
 
+func TestConvertOpenAIChatCompletionsRequestToOpenAIResponsesPreservesOutputLimit(t *testing.T) {
+	raw := []byte(`{"model":"glm-5.3-flash","messages":[{"role":"system","content":"Be precise"},{"role":"user","content":"hello"}],"max_tokens":65536,"stream":true}`)
+	out := ConvertOpenAIChatCompletionsRequestToOpenAIResponses("glm-5.3-flash", raw, true)
+
+	if got := gjson.GetBytes(out, "max_output_tokens").Int(); got != 65536 {
+		t.Fatalf("max_output_tokens = %d, want 65536; body=%s", got, out)
+	}
+	if gjson.GetBytes(out, "max_tokens").Exists() {
+		t.Fatalf("max_tokens should not remain in Responses request: %s", out)
+	}
+	if got := gjson.GetBytes(out, "instructions").String(); got != "Be precise" {
+		t.Fatalf("instructions = %q, want Be precise; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "input.0.content.0.text").String(); got != "hello" {
+		t.Fatalf("input text = %q, want hello; body=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MergeConsecutiveFunctionCalls(t *testing.T) {
 	raw := []byte(`{
 		"input": [

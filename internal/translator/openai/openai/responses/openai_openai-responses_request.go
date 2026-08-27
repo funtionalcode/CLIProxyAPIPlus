@@ -4,9 +4,26 @@ import (
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// ConvertOpenAIChatCompletionsRequestToOpenAIResponses converts a Chat Completions
+// request into the native Responses request schema.
+func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(modelName string, rawJSON []byte, stream bool) []byte {
+	request, errParse := ir.ParseOpenAIChatRequest(rawJSON)
+	if errParse != nil {
+		return rawJSON
+	}
+	request.Model = modelName
+	request.Stream = stream
+	converted, errSerialize := ir.SerializeOpenAIResponsesRequest(request)
+	if errSerialize != nil {
+		return rawJSON
+	}
+	return converted
+}
 
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard

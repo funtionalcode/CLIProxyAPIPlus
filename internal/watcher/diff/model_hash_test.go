@@ -37,6 +37,14 @@ func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHashIncludesProtocol(t *testing.T) {
+	chatModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "glm-5.3"}})
+	responsesModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "glm-5.3", Protocol: "responses"}})
+	if chatModel == "" || chatModel == responsesModel {
+		t.Fatalf("protocol must change model hash: %q / %q", chatModel, responsesModel)
+	}
+}
+
 func TestComputeOpenAICompatModelsHashIncludesModalities(t *testing.T) {
 	base := []config.OpenAICompatibilityModel{{Name: "model", InputModalities: []string{"text"}, OutputModalities: []string{"text"}}}
 	inputChanged := []config.OpenAICompatibilityModel{{Name: "model", InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}}}

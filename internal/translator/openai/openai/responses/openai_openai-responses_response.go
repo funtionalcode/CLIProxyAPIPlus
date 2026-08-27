@@ -9,10 +9,34 @@ import (
 	"sync/atomic"
 	"time"
 
+	codexchat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// ConvertOpenAIResponsesResponseToOpenAIChatCompletions converts native Responses
+// streaming events back to Chat Completions chunks.
+func ConvertOpenAIResponsesResponseToOpenAIChatCompletions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+	return codexchat.ConvertCodexResponseToOpenAI(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+}
+
+// ConvertOpenAIResponsesResponseToOpenAIChatCompletionsNonStream converts a
+// native Responses object back to a Chat Completions response.
+func ConvertOpenAIResponsesResponseToOpenAIChatCompletionsNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+	responseType := gjson.GetBytes(rawJSON, "type").String()
+	if responseType != "response.completed" && responseType != "response.incomplete" {
+		responseType = "response.completed"
+		if strings.EqualFold(gjson.GetBytes(rawJSON, "status").String(), "incomplete") {
+			responseType = "response.incomplete"
+		}
+		wrapped := []byte(`{"type":"","response":{}}`)
+		wrapped, _ = sjson.SetBytes(wrapped, "type", responseType)
+		wrapped, _ = sjson.SetRawBytes(wrapped, "response", rawJSON)
+		rawJSON = wrapped
+	}
+	return codexchat.ConvertCodexResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+}
 
 type oaiToResponsesStateReasoning struct {
 	ReasoningID   string

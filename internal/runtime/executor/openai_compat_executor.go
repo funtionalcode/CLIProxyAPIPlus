@@ -106,8 +106,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	if e.useNativeResponsesProtocol(auth, baseModel, requestedModel) {
+		to = sdktranslator.FormatOpenAIResponse
+		endpoint = "/responses"
+	}
 	if opts.Alt == "responses/compact" {
-		to = sdktranslator.FromString("openai-response")
+		to = sdktranslator.FormatOpenAIResponse
 		endpoint = "/responses/compact"
 	}
 	originalPayloadSource := req.Payload
@@ -157,7 +162,6 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
@@ -174,6 +178,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			translated = updated
 		}
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
+	}
+	if to == sdktranslator.FormatOpenAIResponse {
+		translated = sanitizeNativeOpenAIResponsesRequest(translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -396,6 +403,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
+	endpoint := "/chat/completions"
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	if e.useNativeResponsesProtocol(auth, baseModel, requestedModel) {
+		to = sdktranslator.FormatOpenAIResponse
+		endpoint = "/responses"
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -411,7 +424,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
@@ -424,12 +436,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 	}
 
-	// Request usage data in the final streaming chunk so that token statistics
-	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	if to == sdktranslator.FormatOpenAI {
+		// Chat Completions requires an explicit usage chunk request. Responses
+		// already includes usage in its terminal event and rejects stream_options.
+		translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	} else {
+		translated = sanitizeNativeOpenAIResponsesRequest(translated)
+	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -553,6 +569,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					return true
 				}
 			}
+			terminalResponsesEvent := to == sdktranslator.FormatOpenAIResponse && isOpenAIResponsesTerminalEvent(dataPayload)
 
 			streamLine := append([]byte("data: "), dataPayload...)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
@@ -564,7 +581,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					return true
 				}
 			}
-			if isDone {
+			if isDone || terminalResponsesEvent {
 				seenDone = true
 				return true
 			}
@@ -1041,6 +1058,36 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 	return nil
 }
 
+func (e *OpenAICompatExecutor) useNativeResponsesProtocol(auth *cliproxyauth.Auth, models ...string) bool {
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil {
+		return false
+	}
+	for _, configuredModel := range compat.Models {
+		if !strings.EqualFold(strings.TrimSpace(configuredModel.Protocol), "responses") {
+			continue
+		}
+		for _, model := range models {
+			model = strings.TrimSpace(model)
+			if model == "" {
+				continue
+			}
+			if strings.EqualFold(model, strings.TrimSpace(configuredModel.Name)) || strings.EqualFold(model, strings.TrimSpace(configuredModel.Alias)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sanitizeNativeOpenAIResponsesRequest(payload []byte) []byte {
+	updated, errDelete := sjson.DeleteBytes(payload, "stream_options")
+	if errDelete != nil {
+		return payload
+	}
+	return updated
+}
+
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {
 	if len(payload) == 0 || model == "" {
 		return payload
@@ -1050,6 +1097,15 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 
 func openAICompatErrorEvent(eventName string) bool {
 	return strings.EqualFold(eventName, "error") || strings.EqualFold(eventName, "response.error") || strings.EqualFold(eventName, "response.failed")
+}
+
+func isOpenAIResponsesTerminalEvent(payload []byte) bool {
+	switch gjson.GetBytes(payload, "type").String() {
+	case "response.completed", "response.incomplete", "response.failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, bool) {
