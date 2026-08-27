@@ -894,6 +894,10 @@ type OpenAICompatibilityModel struct {
 	// "responses" converts compatible client requests and calls the Responses API.
 	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 
+	// ResponsesAutoContinue controls how many additional native Responses stream requests
+	// may be issued when the upstream stops with a length-related incomplete status.
+	ResponsesAutoContinue int `yaml:"responses-auto-continue,omitempty" json:"responses-auto-continue,omitempty"`
+
 	// IsCompat preserves Claude thinking blocks for compatible upstreams.
 	// Default false keeps the normal signature validation behavior.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`

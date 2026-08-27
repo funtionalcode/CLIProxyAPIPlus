@@ -45,6 +45,14 @@ func TestComputeOpenAICompatModelsHashIncludesProtocol(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHashIncludesResponsesAutoContinue(t *testing.T) {
+	base := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "glm-5.3", Protocol: "responses"}})
+	continued := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "glm-5.3", Protocol: "responses", ResponsesAutoContinue: 2}})
+	if base == "" || base == continued {
+		t.Fatalf("responses auto-continue must change model hash: %q / %q", base, continued)
+	}
+}
+
 func TestComputeOpenAICompatModelsHashIncludesModalities(t *testing.T) {
 	base := []config.OpenAICompatibilityModel{{Name: "model", InputModalities: []string{"text"}, OutputModalities: []string{"text"}}}
 	inputChanged := []config.OpenAICompatibilityModel{{Name: "model", InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}}}

@@ -176,7 +176,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		if dataType == "response.incomplete" {
 			nativeFinishReason = rootResult.Get("response.incomplete_details.reason").String()
 			switch nativeFinishReason {
-			case "max_tokens", "max_output_tokens":
+			case "length", "max_tokens", "max_output_tokens":
 				finishReason = "length"
 			case "content_filter":
 				finishReason = "content_filter"

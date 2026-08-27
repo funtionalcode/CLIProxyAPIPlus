@@ -30,11 +30,13 @@ import (
 )
 
 const (
-	openAICompatImageHandlerType            = "openai-image"
-	openAICompatImagesGenerationsPath       = "/images/generations"
-	openAICompatImagesEditsPath             = "/images/edits"
-	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
-	openAICompatMultipartMemory       int64 = 32 << 20
+	openAICompatImageHandlerType               = "openai-image"
+	openAICompatImagesGenerationsPath          = "/images/generations"
+	openAICompatImagesEditsPath                = "/images/edits"
+	openAICompatDefaultImageEndpoint           = openAICompatImagesGenerationsPath
+	openAICompatMultipartMemory          int64 = 32 << 20
+	openAICompatMaxResponsesAutoContinue       = 4
+	openAICompatResponsesContinuePrompt        = "Continue the previous response exactly where it stopped. Do not repeat content that was already emitted. Finish the original request and prioritize the final answer over additional reasoning."
 )
 
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
@@ -404,10 +406,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
+	responsesAutoContinue := 0
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	if e.useNativeResponsesProtocol(auth, baseModel, requestedModel) {
+	if configuredModel, ok := e.nativeResponsesModelConfig(auth, baseModel, requestedModel); ok {
 		to = sdktranslator.FormatOpenAIResponse
 		endpoint = "/responses"
+		responsesAutoContinue = normalizedResponsesAutoContinue(configuredModel.ResponsesAutoContinue)
 	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -442,6 +446,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 	} else {
 		translated = sanitizeNativeOpenAIResponsesRequest(translated)
+		if responsesAutoContinue > 0 {
+			translated = helps.SetBoolIfDifferent(translated, "store", true)
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -497,6 +504,51 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
+	}
+	if responsesAutoContinue > 0 && to == sdktranslator.FormatOpenAIResponse {
+		httpResp.Body = helps.NewOpenAIResponsesAutoContinueBody(httpResp.Body, responsesAutoContinue, func(previousResponseID string) (io.ReadCloser, error) {
+			continuationPayload := buildNativeOpenAIResponsesContinuation(translated, previousResponseID)
+			continuationReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(continuationPayload))
+			if errRequest != nil {
+				return nil, fmt.Errorf("create native Responses continuation request: %w", errRequest)
+			}
+			continuationReq.Header.Set("Content-Type", "application/json")
+			continuationReq.Header.Set("Accept", "text/event-stream")
+			continuationReq.Header.Set("Cache-Control", "no-cache")
+			continuationReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+			if apiKey != "" {
+				continuationReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			util.ApplyCustomHeadersFromAttrs(continuationReq, attrs, opts.Headers)
+			helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+				URL:       url,
+				Method:    http.MethodPost,
+				Headers:   continuationReq.Header.Clone(),
+				Body:      continuationPayload,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+
+			continuationResp, errContinue := httpClient.Do(continuationReq)
+			if errContinue != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errContinue)
+				return nil, fmt.Errorf("execute native Responses continuation: %w", errContinue)
+			}
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, continuationResp.StatusCode, continuationResp.Header.Clone())
+			if continuationResp.StatusCode >= 200 && continuationResp.StatusCode < 300 {
+				return continuationResp.Body, nil
+			}
+
+			body, _ := io.ReadAll(continuationResp.Body)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+			if errClose := continuationResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close continuation response body error: %v", errClose)
+			}
+			return nil, statusErr{code: continuationResp.StatusCode, msg: string(body)}
+		})
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -1059,9 +1111,14 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 }
 
 func (e *OpenAICompatExecutor) useNativeResponsesProtocol(auth *cliproxyauth.Auth, models ...string) bool {
+	_, ok := e.nativeResponsesModelConfig(auth, models...)
+	return ok
+}
+
+func (e *OpenAICompatExecutor) nativeResponsesModelConfig(auth *cliproxyauth.Auth, models ...string) (config.OpenAICompatibilityModel, bool) {
 	compat := e.resolveCompatConfig(auth)
 	if compat == nil {
-		return false
+		return config.OpenAICompatibilityModel{}, false
 	}
 	for _, configuredModel := range compat.Models {
 		if !strings.EqualFold(strings.TrimSpace(configuredModel.Protocol), "responses") {
@@ -1073,11 +1130,21 @@ func (e *OpenAICompatExecutor) useNativeResponsesProtocol(auth *cliproxyauth.Aut
 				continue
 			}
 			if strings.EqualFold(model, strings.TrimSpace(configuredModel.Name)) || strings.EqualFold(model, strings.TrimSpace(configuredModel.Alias)) {
-				return true
+				return configuredModel, true
 			}
 		}
 	}
-	return false
+	return config.OpenAICompatibilityModel{}, false
+}
+
+func normalizedResponsesAutoContinue(configured int) int {
+	if configured <= 0 {
+		return 0
+	}
+	if configured > openAICompatMaxResponsesAutoContinue {
+		return openAICompatMaxResponsesAutoContinue
+	}
+	return configured
 }
 
 func sanitizeNativeOpenAIResponsesRequest(payload []byte) []byte {
@@ -1086,6 +1153,14 @@ func sanitizeNativeOpenAIResponsesRequest(payload []byte) []byte {
 		return payload
 	}
 	return updated
+}
+
+func buildNativeOpenAIResponsesContinuation(payload []byte, previousResponseID string) []byte {
+	updated, _ := sjson.SetBytes(payload, "input", openAICompatResponsesContinuePrompt)
+	updated, _ = sjson.SetBytes(updated, "previous_response_id", previousResponseID)
+	updated, _ = sjson.SetBytes(updated, "stream", true)
+	updated, _ = sjson.SetBytes(updated, "store", true)
+	return sanitizeNativeOpenAIResponsesRequest(updated)
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -109,6 +110,89 @@ func TestOpenAICompatExecutorStreamsNativeResponsesProtocol(t *testing.T) {
 	}
 	if !bytes.Contains(responseBody.Bytes(), []byte(`"finish_reason":"stop"`)) {
 		t.Fatalf("stream response missing stop finish reason: %s", responseBody.Bytes())
+	}
+}
+
+func TestOpenAICompatExecutorAutoContinuesLengthLimitedResponsesStream(t *testing.T) {
+	var requests atomic.Int32
+	var initialStore atomic.Bool
+	var continuationPreviousResponseID atomic.Value
+	var continuationInput atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber := requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requestNumber == 1 {
+			initialStore.Store(gjson.GetBytes(body, "store").Bool())
+			_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_1\",\"delta\":\"part1\"}\n\n")
+			_, _ = io.WriteString(w, "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"length\"},\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens\":100,\"output_tokens_details\":{\"reasoning_tokens\":50},\"total_tokens\":110}}}\n\n")
+			return
+		}
+		if requestNumber != 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		continuationPreviousResponseID.Store(gjson.GetBytes(body, "previous_response_id").String())
+		continuationInput.Store(gjson.GetBytes(body, "input").String())
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_2\",\"delta\":\"part2\"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":3},\"output_tokens\":200,\"output_tokens_details\":{\"reasoning_tokens\":75},\"total_tokens\":220}}}\n\n")
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatible-volcengine", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "volcengine",
+			BaseURL: server.URL + "/api/plan/v3",
+			Models: []config.OpenAICompatibilityModel{{
+				Name:                  "glm-5.3-flash",
+				Protocol:              "responses",
+				ResponsesAutoContinue: 1,
+			}},
+		}},
+	})
+	result, errExecute := executor.ExecuteStream(
+		context.Background(),
+		newNativeResponsesOpenAICompatAuth(server.URL),
+		cliproxyexecutor.Request{
+			Model:   "glm-5.3-flash",
+			Payload: []byte(`{"model":"glm-5.3-flash","messages":[{"role":"user","content":"hello"}],"max_tokens":65536,"stream":true}`),
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatOpenAI, Stream: true},
+	)
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream error: %v", errExecute)
+	}
+
+	var responseBody bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		responseBody.Write(chunk.Payload)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("request count = %d, want 2", got)
+	}
+	if !initialStore.Load() {
+		t.Fatal("initial request must enable store for continuation")
+	}
+	if got, _ := continuationPreviousResponseID.Load().(string); got != "resp_1" {
+		t.Fatalf("previous_response_id = %q, want resp_1", got)
+	}
+	if got, _ := continuationInput.Load().(string); got != openAICompatResponsesContinuePrompt {
+		t.Fatalf("continuation input = %q, want configured continuation prompt", got)
+	}
+	if !bytes.Contains(responseBody.Bytes(), []byte(`"content":"part1"`)) || !bytes.Contains(responseBody.Bytes(), []byte(`"content":"part2"`)) {
+		t.Fatalf("continued stream missing content: %s", responseBody.Bytes())
+	}
+	if bytes.Contains(responseBody.Bytes(), []byte(`"finish_reason":"length"`)) {
+		t.Fatalf("intermediate length terminal leaked to client: %s", responseBody.Bytes())
+	}
+	if !bytes.Contains(responseBody.Bytes(), []byte(`"finish_reason":"stop"`)) {
+		t.Fatalf("final stop terminal missing: %s", responseBody.Bytes())
+	}
+	if !bytes.Contains(responseBody.Bytes(), []byte(`"prompt_tokens":30`)) || !bytes.Contains(responseBody.Bytes(), []byte(`"completion_tokens":300`)) {
+		t.Fatalf("continued usage was not accumulated: %s", responseBody.Bytes())
 	}
 }
 

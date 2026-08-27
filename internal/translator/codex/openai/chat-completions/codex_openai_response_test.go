@@ -37,6 +37,19 @@ func TestConvertCodexResponseToOpenAI_IncompleteTerminal(t *testing.T) {
 	}
 }
 
+func TestConvertCodexResponseToOpenAI_IncompleteLengthTerminal(t *testing.T) {
+	terminal := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","model":"glm-5.3-flash","status":"incomplete","incomplete_details":{"reason":"length"},"output":[],"usage":{"input_tokens":1,"output_tokens":32768,"total_tokens":32769}}}`)
+
+	var param any
+	streamOut := ConvertCodexResponseToOpenAI(context.Background(), "glm-5.3-flash", nil, nil, append([]byte("data: "), terminal...), &param)
+	if len(streamOut) != 1 {
+		t.Fatalf("expected 1 streaming terminal chunk, got %d", len(streamOut))
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("stream finish_reason = %q, want length; payload=%s", got, streamOut[0])
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *testing.T) {
 	ctx := context.Background()
 	var param any

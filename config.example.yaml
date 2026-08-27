@@ -786,6 +786,7 @@ codex-oauth:
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         protocol: responses             # optional: use the provider's native /responses endpoint; empty defaults to /chat/completions
+#         responses-auto-continue: 2      # optional: transparently continue length-limited native Responses streams up to this many times
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
