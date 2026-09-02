@@ -179,8 +179,12 @@ func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
 		Payload: []byte(`{"contents":[{"role":"model","parts":[{"text":"prior output"}]}]}`),
 	}
 
-	if _, errCount := executor.CountTokens(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errCount != nil {
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+	if _, errCount := executor.CountTokens(ctx, auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errCount != nil {
 		t.Fatalf("CountTokens() error = %v", errCount)
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatal("CountTokens() did not mark the HTTP request as an upstream attempt")
 	}
 	contents := gjson.GetBytes(upstreamBody, "contents").Array()
 	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
@@ -1146,5 +1150,36 @@ func TestGeminiExecutorNativeInteractionsResponsesStreamEmitsDone(t *testing.T) 
 	}
 	if !done {
 		t.Fatal("Responses [DONE] chunk not found")
+	}
+}
+
+func TestGeminiExecutor_PrepareRequest_EmptyAPIKey_OmitsAuthHeaders(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://custom-gemini.example.com/v1beta/models", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer preexisting-bearer")
+	req.Header.Set("x-goog-api-key", "preexisting-key")
+
+	auth := &cliproxyauth.Auth{
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"auth_kind":           "apikey",
+			"base_url":            "https://custom-gemini.example.com",
+			"header:Custom-Token": "gemini-secret",
+		},
+	}
+	exec := &GeminiExecutor{}
+	if errPrep := exec.PrepareRequest(req, auth); errPrep != nil {
+		t.Fatalf("PrepareRequest() error = %v", errPrep)
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty", got)
+	}
+	if got := req.Header.Get("x-goog-api-key"); got != "" {
+		t.Fatalf("x-goog-api-key = %q, want empty", got)
+	}
+	if got := req.Header.Get("Custom-Token"); got != "gemini-secret" {
+		t.Fatalf("Custom-Token = %q, want gemini-secret", got)
 	}
 }

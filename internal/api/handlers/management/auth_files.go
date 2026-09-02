@@ -881,6 +881,9 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, options authFileListOpti
 						}
 					}
 				}
+				if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
+					fileData["request_retry"] = requestRetry
+				}
 			}
 
 			files = append(files, fileData)
@@ -1007,6 +1010,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances 
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		entry["codex_header_policy"] = helps.CodexHeaderPolicy()
+	}
+	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
+	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
+		entry["model_quotas"] = modelQuotas
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
@@ -1149,6 +1156,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances 
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
+	}
+	if requestRetry, ok := auth.RequestRetryOverride(); ok {
+		entry["request_retry"] = requestRetry
 	}
 	return entry
 }
@@ -1327,6 +1337,54 @@ func ollamaCookiesFromAuth(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func authFileRequestRetryFromJSON(data []byte) (int, bool) {
+	var metadata map[string]any
+	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+		return 0, false
+	}
+	return (&coreauth.Auth{Metadata: metadata}).RequestRetryOverride()
+}
+
+// quotaObservationPayload exposes only passive provider observations. Cooldown
+// fields are intentionally excluded so this management response cannot be
+// mistaken for scheduler state or influence scheduling behavior.
+func quotaObservationPayloadForProvider(provider string, quota coreauth.QuotaState) gin.H {
+	if !coreauth.ProviderSupportsQuotaObservation(provider) {
+		return quotaObservationPayload(coreauth.QuotaState{})
+	}
+	return quotaObservationPayload(quota)
+}
+
+func quotaObservationPayload(quota coreauth.QuotaState) gin.H {
+	observed := gin.H{}
+	if !quota.ObservedAt.IsZero() {
+		observed["observed_at"] = quota.ObservedAt
+	}
+	signals := make(map[string]string, len(quota.Signals))
+	for key, value := range quota.Signals {
+		signals[key] = value
+	}
+	observed["signals"] = signals
+	return observed
+}
+
+func modelQuotaObservationPayload(provider string, states map[string]*coreauth.ModelState) gin.H {
+	if !coreauth.ProviderSupportsQuotaObservation(provider) {
+		return gin.H{}
+	}
+	observations := gin.H{}
+	for model, state := range states {
+		if state == nil {
+			continue
+		}
+		if state.Quota.ObservedAt.IsZero() && len(state.Quota.Signals) == 0 {
+			continue
+		}
+		observations[model] = quotaObservationPayloadForProvider(provider, state.Quota)
+	}
+	return observations
 }
 
 func authWeightValue(auth *coreauth.Auth) (int64, bool) {
@@ -2547,6 +2605,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if err != nil {
 		return nil, err
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	authID := h.authIDForPath(path)
 	if authID == "" {
 		authID = path
@@ -3039,6 +3098,7 @@ func setSourceAuthFileDisabled(path string, disabled bool) error {
 	if metadata == nil {
 		metadata = make(map[string]any)
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	metadata["disabled"] = disabled
 	raw, errMarshal := json.Marshal(metadata)
 	if errMarshal != nil {
@@ -3100,6 +3160,18 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 	delete(req, "name")
+	var errNormalize error
+	req, errNormalize = normalizeAuthFilePatchFields(req)
+	if errNormalize != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errNormalize.Error()})
+		return
+	}
+	requestRetryPatch, errRequestRetry := decodeAuthFileRequestRetryPatch(req)
+	if errRequestRetry != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errRequestRetry.Error()})
+		return
+	}
+	delete(req, "request_retry")
 
 	ctx := c.Request.Context()
 
@@ -3130,6 +3202,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
+	coreauth.NormalizeCredentialMetadata(updatedAuth.Metadata)
 
 	changed := false
 	touchedRoots := make(map[string]struct{}, len(req))
@@ -3165,6 +3238,17 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 		changed = true
 	}
+	if requestRetryPatch.Set {
+		if updatedAuth.Metadata == nil {
+			updatedAuth.Metadata = make(map[string]any)
+		}
+		if requestRetryPatch.Value == nil {
+			delete(updatedAuth.Metadata, "request_retry")
+		} else {
+			updatedAuth.Metadata["request_retry"] = *requestRetryPatch.Value
+		}
+		changed = true
+	}
 	if changed {
 		syncAuthFileMetadataFields(updatedAuth, touchedRoots)
 		if errWeight := coreauth.ValidateAuthWeight(updatedAuth); errWeight != nil {
@@ -3196,6 +3280,84 @@ func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+type authFileRequestRetryPatch struct {
+	Set   bool
+	Value *int
+}
+
+func normalizeAuthFilePatchFields(fields map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	normalized := make(map[string]json.RawMessage, len(fields))
+	originalNames := make(map[string]string, len(fields))
+	canonicalNames := make(map[string]bool, len(fields))
+	for key, value := range fields {
+		parts := strings.Split(strings.TrimSpace(key), ".")
+		for index := range parts {
+			parts[index] = strings.TrimSpace(parts[index])
+		}
+		originalRoot := parts[0]
+		parts[0] = coreauth.CanonicalCredentialMetadataKey(originalRoot)
+		canonicalPath := strings.Join(parts, ".")
+		if original, exists := originalNames[canonicalPath]; exists {
+			currentCanonical := originalRoot == parts[0]
+			if canonicalNames[canonicalPath] != currentCanonical {
+				if currentCanonical {
+					normalized[canonicalPath] = value
+					originalNames[canonicalPath] = key
+					canonicalNames[canonicalPath] = true
+				}
+				continue
+			}
+			return nil, fmt.Errorf("auth file fields %q and %q refer to the same field", original, key)
+		}
+		normalized[canonicalPath] = value
+		originalNames[canonicalPath] = key
+		canonicalNames[canonicalPath] = originalRoot == parts[0]
+	}
+	return normalized, nil
+}
+
+func decodeAuthFileRequestRetryPatch(fields map[string]json.RawMessage) (authFileRequestRetryPatch, error) {
+	var raw json.RawMessage
+	found := false
+	for key, value := range fields {
+		fieldPath := strings.TrimSpace(key)
+		fieldRoot := rootAuthFileField(fieldPath)
+		if fieldRoot == "request_retry" && fieldPath != fieldRoot {
+			return authFileRequestRetryPatch{}, fmt.Errorf("request_retry does not support nested fields")
+		}
+		if fieldPath == "request_retry" {
+			found = true
+			raw = value
+		}
+	}
+	if !found {
+		return authFileRequestRetryPatch{}, nil
+	}
+	value, errDecode := decodeAuthFileFieldValue(raw)
+	if errDecode != nil {
+		return authFileRequestRetryPatch{}, fmt.Errorf("request_retry must be an integer or null")
+	}
+	if value == nil {
+		return authFileRequestRetryPatch{Set: true}, nil
+	}
+	number, okNumber := value.(json.Number)
+	if !okNumber {
+		return authFileRequestRetryPatch{}, fmt.Errorf("request_retry must be an integer or null")
+	}
+	parsed, errInt := number.Int64()
+	if errInt != nil {
+		return authFileRequestRetryPatch{}, fmt.Errorf("request_retry must be an integer or null")
+	}
+	normalized := int(parsed)
+	if int64(normalized) != parsed {
+		return authFileRequestRetryPatch{}, fmt.Errorf("request_retry must be an integer or null")
+	}
+	if normalized < 0 {
+		return authFileRequestRetryPatch{Set: true}, nil
+	}
+	return authFileRequestRetryPatch{Set: true, Value: &normalized}, nil
 }
 
 func validateAuthFilePatchWeightValue(value any) error {
@@ -3635,7 +3797,26 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 		return savedPath, errSave
 	}
 	if h.postAuthPersistHook != nil {
-		if errHook := h.postAuthPersistHook(ctx, record); errHook != nil {
+		persistedRecord := record
+		if data, errRead := os.ReadFile(savedPath); errRead == nil && len(data) > 0 {
+			auths, errSynthesize := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
+				Config:           h.cfg,
+				AuthDir:          filepath.Dir(savedPath),
+				Now:              time.Now(),
+				IDGenerator:      synthesizer.NewStableIDGenerator(),
+				PluginAuthParser: h.pluginHost,
+			}, savedPath, data)
+			if errSynthesize != nil {
+				return savedPath, fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)
+			}
+			for _, auth := range auths {
+				if auth != nil && (auth.ID == record.ID || len(auths) == 1) {
+					persistedRecord = auth
+					break
+				}
+			}
+		}
+		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
 			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
 		}
 	}
