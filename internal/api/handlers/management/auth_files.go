@@ -79,16 +79,18 @@ var authFileLocalMetadataKeys = []string{
 var authFileModelAliasMetadataKeys = []string{"model_aliases", "model-aliases"}
 
 const (
-	anthropicCallbackPort    = 54545
-	geminiCallbackPort       = 8085
-	codexCallbackPort        = codex.DefaultCallbackPort
-	geminiCLIEndpoint        = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion         = "v1internal"
-	gitLabLoginModeOAuth     = "oauth"
-	gitLabLoginModePAT       = "pat"
-	defaultAuthFilesPage     = 1
-	defaultAuthFilesPageSize = 200
-	maximumAuthFilesPageSize = 1000
+	anthropicCallbackPort            = 54545
+	geminiCallbackPort               = 8085
+	codexCallbackPort                = codex.DefaultCallbackPort
+	geminiCLIEndpoint                = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion                 = "v1internal"
+	authFileWriteIdentitiesHeader    = "X-CPAMP-Auth-File-Write-Identities"
+	authFileWriteContentSHA256Header = "X-CPAMP-Auth-File-Write-Content-SHA256"
+	gitLabLoginModeOAuth             = "oauth"
+	gitLabLoginModePAT               = "pat"
+	defaultAuthFilesPage             = 1
+	defaultAuthFilesPageSize         = 200
+	maximumAuthFilesPageSize         = 1000
 )
 
 type authFileListOptions struct {
@@ -123,14 +125,24 @@ type codexRedirectOAuthService interface {
 }
 
 var (
-	callbackForwardersMu  sync.Mutex
-	callbackForwarders    = make(map[int]*callbackForwarder)
-	authFileEntryMu       sync.Mutex
-	errAuthFileMustBeJSON = errors.New("auth file must be .json")
-	errAuthFileNotFound   = errors.New("auth file not found")
-	errPluginVirtualAuth  = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
-	newCodexOAuthService  = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
+	callbackForwardersMu     sync.Mutex
+	callbackForwarders       = make(map[int]*callbackForwarder)
+	authFileEntryMu          sync.Mutex
+	errAuthFileMustBeJSON    = errors.New("auth file must be .json")
+	errAuthFileNotFound      = errors.New("auth file not found")
+	errAuthFileWriteConflict = errors.New("auth file changed; reload and retry")
+	errPluginVirtualAuth     = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
+	newCodexOAuthService     = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
 )
+
+type authFileWriteGuard struct {
+	expectedContentSHA256 string
+	identities            []authFileWriteIdentity
+}
+
+type authFileWriteIdentity struct {
+	Name string `json:"name"`
+}
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
 	if len(meta) == 0 {
@@ -2154,6 +2166,11 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
+	writeGuard, errGuard := authFileWriteGuardFromRequest(c)
+	if errGuard != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errGuard.Error()})
+		return
+	}
 
 	fileHeaders, errMultipart := h.multipartAuthFileHeaders(c)
 	if errMultipart != nil {
@@ -2161,9 +2178,13 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	if len(fileHeaders) == 1 {
-		if _, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0]); errUpload != nil {
+		if _, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0], writeGuard); errUpload != nil {
 			if errors.Is(errUpload, errAuthFileMustBeJSON) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json"})
+				return
+			}
+			if errors.Is(errUpload, errAuthFileWriteConflict) {
+				c.JSON(http.StatusConflict, gin.H{"error": errUpload.Error()})
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errUpload.Error()})
@@ -2176,7 +2197,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		uploaded := make([]string, 0, len(fileHeaders))
 		failed := make([]gin.H, 0)
 		for _, file := range fileHeaders {
-			name, errUpload := h.storeUploadedAuthFile(ctx, file)
+			name, errUpload := h.storeUploadedAuthFile(ctx, file, writeGuard)
 			if errUpload != nil {
 				failureName := ""
 				if file != nil {
@@ -2221,8 +2242,12 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	if err = h.writeAuthFileWithGuard(ctx, filepath.Base(name), data, writeGuard); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errAuthFileWriteConflict) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(200, gin.H{"status": "ok"})
@@ -2334,7 +2359,7 @@ func (h *Handler) multipartAuthFileHeaders(c *gin.Context) ([]*multipart.FileHea
 	return headers, nil
 }
 
-func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.FileHeader) (string, error) {
+func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.FileHeader, writeGuard *authFileWriteGuard) (string, error) {
 	if file == nil {
 		return "", fmt.Errorf("no file uploaded")
 	}
@@ -2352,13 +2377,17 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 	if err != nil {
 		return "", fmt.Errorf("failed to read uploaded file: %w", err)
 	}
-	if err := h.writeAuthFile(ctx, name, data); err != nil {
+	if err := h.writeAuthFileWithGuard(ctx, name, data, writeGuard); err != nil {
 		return "", err
 	}
 	return name, nil
 }
 
 func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) error {
+	return h.writeAuthFileWithGuard(ctx, name, data, nil)
+}
+
+func (h *Handler) writeAuthFileWithGuard(ctx context.Context, name string, data []byte, writeGuard *authFileWriteGuard) error {
 	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
 	if !filepath.IsAbs(dst) {
 		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
@@ -2370,23 +2399,30 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	changed := false
-	if raw, errRead := os.ReadFile(dst); errRead == nil {
-		if existingMetadata, errDecode := decodeAuthFileMetadata(raw); errDecode == nil {
-			changed = mergeAuthFileUploadProtectedFields(metadata, &coreauth.Auth{Metadata: existingMetadata})
+	if writeGuard != nil {
+		if errValidate := writeGuard.validate(filepath.Base(name), dst); errValidate != nil {
+			return errValidate
 		}
 	}
-	authID := h.authIDForPath(dst)
-	if authID == "" {
-		authID = dst
-	}
-	if h != nil && h.authManager != nil {
-		if existing, ok := h.authManager.GetByID(authID); ok && mergeAuthFileUploadProtectedFields(metadata, existing) {
+	changed := false
+	if writeGuard == nil {
+		if raw, errRead := os.ReadFile(dst); errRead == nil {
+			if existingMetadata, errDecode := decodeAuthFileMetadata(raw); errDecode == nil {
+				changed = mergeAuthFileUploadProtectedFields(metadata, &coreauth.Auth{Metadata: existingMetadata})
+			}
+		}
+		authID := h.authIDForPath(dst)
+		if authID == "" {
+			authID = dst
+		}
+		if h != nil && h.authManager != nil {
+			if existing, ok := h.authManager.GetByID(authID); ok && mergeAuthFileUploadProtectedFields(metadata, existing) {
+				changed = true
+			}
+		}
+		if h.mergeExistingAuthFileLocalFields(authID, metadata) {
 			changed = true
 		}
-	}
-	if h.mergeExistingAuthFileLocalFields(authID, metadata) {
-		changed = true
 	}
 	if changed {
 		data, err = marshalAuthFileMetadata(metadata)
@@ -2403,6 +2439,60 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
 		return err
+	}
+	return nil
+}
+
+func authFileWriteGuardFromRequest(c *gin.Context) (*authFileWriteGuard, error) {
+	if c == nil {
+		return nil, nil
+	}
+	encodedIdentities := strings.TrimSpace(c.GetHeader(authFileWriteIdentitiesHeader))
+	expectedSHA256 := strings.ToLower(strings.TrimSpace(c.GetHeader(authFileWriteContentSHA256Header)))
+	if encodedIdentities == "" && expectedSHA256 == "" {
+		return nil, nil
+	}
+	if encodedIdentities == "" || expectedSHA256 == "" {
+		return nil, fmt.Errorf("auth file write guard headers must be provided together")
+	}
+	decodedIdentities, errUnescape := url.QueryUnescape(encodedIdentities)
+	if errUnescape != nil {
+		return nil, fmt.Errorf("invalid auth file write identities")
+	}
+	var identities []authFileWriteIdentity
+	if errDecode := json.Unmarshal([]byte(decodedIdentities), &identities); errDecode != nil || len(identities) == 0 {
+		return nil, fmt.Errorf("invalid auth file write identities")
+	}
+	for _, identity := range identities {
+		if strings.TrimSpace(identity.Name) == "" {
+			return nil, fmt.Errorf("invalid auth file write identities")
+		}
+	}
+	if len(expectedSHA256) != sha256.Size*2 {
+		return nil, fmt.Errorf("invalid auth file content SHA-256")
+	}
+	if _, errDecode := hex.DecodeString(expectedSHA256); errDecode != nil {
+		return nil, fmt.Errorf("invalid auth file content SHA-256")
+	}
+	return &authFileWriteGuard{expectedContentSHA256: expectedSHA256, identities: identities}, nil
+}
+
+func (g *authFileWriteGuard) validate(name, path string) error {
+	if g == nil {
+		return nil
+	}
+	for _, identity := range g.identities {
+		if strings.TrimSpace(identity.Name) != name {
+			return fmt.Errorf("%w: identity target mismatch", errAuthFileWriteConflict)
+		}
+	}
+	existingData, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return fmt.Errorf("%w: %v", errAuthFileWriteConflict, errRead)
+	}
+	actualSHA256 := sha256.Sum256(existingData)
+	if hex.EncodeToString(actualSHA256[:]) != g.expectedContentSHA256 {
+		return errAuthFileWriteConflict
 	}
 	return nil
 }

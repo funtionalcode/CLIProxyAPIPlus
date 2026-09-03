@@ -3,6 +3,8 @@ package management
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -218,6 +220,121 @@ func TestUploadAuthFile_OverwritePreservesLocalFields(t *testing.T) {
 	}
 	if got := headers["Accept-Encoding"]; got != "identity" {
 		t.Fatalf("disk headers.Accept-Encoding = %#v, want %q", got, "identity")
+	}
+}
+
+func TestUploadAuthFile_GuardedPanelWriteCanRemoveExcludedModels(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	const fileName = "claude.json"
+	existingData := []byte(`{"type":"claude","email":"user@example.com","excluded_models":["claude-fable-5","claude-fable-5-1"]}`)
+	if errWrite := h.writeAuthFile(context.Background(), fileName, existingData); errWrite != nil {
+		t.Fatalf("failed to seed auth file: %v", errWrite)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, errPart := writer.CreateFormFile("file", fileName)
+	if errPart != nil {
+		t.Fatalf("failed to create multipart file: %v", errPart)
+	}
+	if _, errWrite := part.Write([]byte(`{"type":"claude","email":"user@example.com"}`)); errWrite != nil {
+		t.Fatalf("failed to write multipart content: %v", errWrite)
+	}
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("failed to close multipart writer: %v", errClose)
+	}
+
+	expectedSHA256 := sha256.Sum256(existingData)
+	identities := url.QueryEscape(`[{"name":"claude.json","runtimeId":"claude.json","provider":"claude"}]`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set(authFileWriteIdentitiesHeader, identities)
+	req.Header.Set(authFileWriteContentSHA256Header, hex.EncodeToString(expectedSHA256[:]))
+	ctx.Request = req
+
+	h.UploadAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	raw, errRead := os.ReadFile(filepath.Join(authDir, fileName))
+	if errRead != nil {
+		t.Fatalf("failed to read updated auth file: %v", errRead)
+	}
+	var disk map[string]any
+	if errDecode := json.Unmarshal(raw, &disk); errDecode != nil {
+		t.Fatalf("failed to decode updated auth file: %v", errDecode)
+	}
+	if _, exists := disk["excluded_models"]; exists {
+		t.Fatalf("excluded_models was restored after guarded panel write: %#v", disk["excluded_models"])
+	}
+	if _, exists := disk["excluded-models"]; exists {
+		t.Fatalf("excluded-models was restored after guarded panel write: %#v", disk["excluded-models"])
+	}
+	updated, ok := manager.GetByID(fileName)
+	if !ok || updated == nil {
+		t.Fatalf("expected updated auth record")
+	}
+	if got := updated.Attributes["excluded_models"]; got != "" {
+		t.Fatalf("excluded_models attr = %q, want empty", got)
+	}
+}
+
+func TestUploadAuthFile_GuardedPanelWriteRejectsStaleContent(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	const fileName = "claude.json"
+	currentData := []byte(`{"type":"claude","email":"current@example.com","excluded_models":["keep-me"]}`)
+	if errWrite := h.writeAuthFile(context.Background(), fileName, currentData); errWrite != nil {
+		t.Fatalf("failed to seed auth file: %v", errWrite)
+	}
+	staleSHA256 := sha256.Sum256([]byte(`{"type":"claude","email":"stale@example.com"}`))
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, errPart := writer.CreateFormFile("file", fileName)
+	if errPart != nil {
+		t.Fatalf("failed to create multipart file: %v", errPart)
+	}
+	if _, errWrite := part.Write([]byte(`{"type":"claude","email":"replacement@example.com"}`)); errWrite != nil {
+		t.Fatalf("failed to write multipart content: %v", errWrite)
+	}
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("failed to close multipart writer: %v", errClose)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set(authFileWriteIdentitiesHeader, url.QueryEscape(`[{"name":"claude.json"}]`))
+	req.Header.Set(authFileWriteContentSHA256Header, hex.EncodeToString(staleSHA256[:]))
+	ctx.Request = req
+
+	h.UploadAuthFile(ctx)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("upload status = %d, want %d; body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	raw, errRead := os.ReadFile(filepath.Join(authDir, fileName))
+	if errRead != nil {
+		t.Fatalf("failed to read auth file after conflict: %v", errRead)
+	}
+	if !bytes.Equal(raw, currentData) {
+		t.Fatalf("auth file changed after conflict: got %s, want %s", raw, currentData)
 	}
 }
 
