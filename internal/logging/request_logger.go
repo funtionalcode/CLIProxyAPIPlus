@@ -212,10 +212,11 @@ func (s *FileBodySource) Paths() []string {
 }
 
 // WriteTo merges all ordered parts into w.
-func (s *FileBodySource) WriteTo(w io.Writer) error {
+func (s *FileBodySource) WriteTo(w io.Writer) (int64, error) {
 	if s == nil || w == nil {
-		return nil
+		return 0, nil
 	}
+	var totalWritten int64
 	paths := s.Paths()
 	wrote := false
 	for _, path := range paths {
@@ -224,17 +225,20 @@ func (s *FileBodySource) WriteTo(w io.Writer) error {
 			if os.IsNotExist(errOpen) {
 				continue
 			}
-			return errOpen
+			return totalWritten, errOpen
 		}
 		if wrote {
-			if _, errWrite := io.WriteString(w, "\n"); errWrite != nil {
+			n, errWrite := io.WriteString(w, "\n")
+			totalWritten += int64(n)
+			if errWrite != nil {
 				if errClose := file.Close(); errClose != nil {
 					log.WithError(errClose).Warn("failed to close log part file")
 				}
-				return errWrite
+				return totalWritten, errWrite
 			}
 		}
-		_, errCopy := io.Copy(w, file)
+		n, errCopy := io.Copy(w, file)
+		totalWritten += n
 		if errClose := file.Close(); errClose != nil {
 			log.WithError(errClose).Warn("failed to close log part file")
 			if errCopy == nil {
@@ -242,17 +246,17 @@ func (s *FileBodySource) WriteTo(w io.Writer) error {
 			}
 		}
 		if errCopy != nil {
-			return errCopy
+			return totalWritten, errCopy
 		}
 		wrote = true
 	}
-	return nil
+	return totalWritten, nil
 }
 
 // Bytes merges all ordered parts into memory.
 func (s *FileBodySource) Bytes() ([]byte, error) {
 	var buf bytes.Buffer
-	if errWrite := s.WriteTo(&buf); errWrite != nil {
+	if _, errWrite := s.WriteTo(&buf); errWrite != nil {
 		return nil, errWrite
 	}
 	return buf.Bytes(), nil
@@ -1434,7 +1438,7 @@ func writeAPISectionWithSource(w io.Writer, sectionHeader string, sectionPrefix 
 		}
 	}
 	tracker := &trailingNewlineTrackingWriter{writer: w}
-	if errWrite := source.WriteTo(tracker); errWrite != nil {
+	if _, errWrite := source.WriteTo(tracker); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeSectionSpacing(w, tracker.trailingNewlines); errWrite != nil {
@@ -1453,7 +1457,7 @@ func writePreformattedAPISectionWithSource(w io.Writer, sectionHeader string, se
 		}
 	}
 	tracker := &trailingNewlineTrackingWriter{writer: w}
-	if errWrite := source.WriteTo(tracker); errWrite != nil {
+	if _, errWrite := source.WriteTo(tracker); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeSectionSpacing(w, tracker.trailingNewlines); errWrite != nil {
@@ -2379,15 +2383,15 @@ func (w *homeStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	client := currentHomeRequestLogClient()
-	if client == nil || !client.HeartbeatOK() {
-		return nil
-	}
-
 	if w.chunkChan != nil {
 		close(w.chunkChan)
 		<-w.doneChan
 		w.chunkChan = nil
+	}
+
+	client := currentHomeRequestLogClient()
+	if client == nil || !client.HeartbeatOK() {
+		return nil
 	}
 
 	responsePayload := w.responseBody.Bytes()
