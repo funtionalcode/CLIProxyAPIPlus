@@ -4,12 +4,37 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func TestAttachGatewayTrace(t *testing.T) {
+	cfg := &config.Config{ProxyGateway: config.ProxyGatewayConfig{Enabled: true, Port: 18898}}
+	rawProxy := "http://user:pass@127.0.0.1:18898"
+	tracedProxy, traceID := attachGatewayTrace(rawProxy, cfg)
+	if len(traceID) != 32 {
+		t.Fatalf("trace ID length = %d, want 32", len(traceID))
+	}
+	parsed, err := url.Parse(tracedProxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Query().Get("cliproxy_gateway_trace"); got != traceID {
+		t.Fatalf("proxy trace query = %q, want %q", got, traceID)
+	}
+	if parsed.User.String() != "user:pass" {
+		t.Fatal("proxy credentials changed while adding trace")
+	}
+
+	untouched, disabledTrace := attachGatewayTrace(rawProxy, &config.Config{})
+	if untouched != rawProxy || disabledTrace != "" {
+		t.Fatal("disabled gateway unexpectedly changed the proxy URL")
+	}
+}
 
 func TestNormalizeProxyURL(t *testing.T) {
 	tests := []struct {
@@ -274,6 +299,7 @@ func TestProber_ExecuteProbe(t *testing.T) {
 
 	var mockStatusCode int
 	var mockHeaderState string
+	var mockBody string
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -283,7 +309,11 @@ func TestProber_ExecuteProbe(t *testing.T) {
 			w.Header().Set(HeaderName, mockHeaderState)
 		}
 		w.WriteHeader(mockStatusCode)
-		_, _ = w.Write([]byte(`data: {"type":"response.completed"}` + "\n\n"))
+		body := mockBody
+		if body == "" {
+			body = `data: {"type":"response.completed"}` + "\n\n"
+		}
+		_, _ = w.Write([]byte(body))
 	})
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -341,5 +371,12 @@ func TestProber_ExecuteProbe(t *testing.T) {
 	_, err429 := prober.ExecuteProbe(context.Background(), "")
 	if err429 == nil {
 		t.Fatalf("expected error on 429 upstream")
+	}
+
+	mockStatusCode = http.StatusBadRequest
+	mockBody = `{"error":{"type":"usage_limit_reached","code":"rate_limit_exceeded","message":"Rate limit reached"}}`
+	_, err400 := prober.ExecuteProbe(context.Background(), "")
+	if err400 == nil || !strings.Contains(err400.Error(), "HTTP 400") || !strings.Contains(err400.Error(), "rate_limit_exceeded") {
+		t.Fatalf("expected specific HTTP 400 body, got %v", err400)
 	}
 }

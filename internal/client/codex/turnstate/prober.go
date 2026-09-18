@@ -3,18 +3,24 @@ package turnstate
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxytrace"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -25,7 +31,7 @@ const (
 )
 
 // AuthSupplierFunc is a callback that returns active Codex auth credentials for probing.
-type AuthSupplierFunc func() (apiKey, authID, accountID string, err error)
+type AuthSupplierFunc func(requestedID string) (apiKey, authID, accountID string, err error)
 
 // Prober manages the probe track that hunts for high-compute turn-state tickets via the proxy pool.
 type Prober struct {
@@ -41,6 +47,7 @@ type Prober struct {
 	totalProbed  atomic.Uint64
 	totalSuccess atomic.Uint64
 	totalFailed  atomic.Uint64
+	events       eventLog
 }
 
 // NewProber creates a new Prober instance.
@@ -64,7 +71,7 @@ func (p *Prober) SetAuthSupplier(supplier AuthSupplierFunc) {
 func (p *Prober) UpdateConfig(cfg *config.Config) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.cfg = cfg
+	p.cfg = cfg.CloneForRuntime()
 }
 
 // Start launches the background probing loop.
@@ -78,14 +85,15 @@ func (p *Prober) Start(ctx context.Context) {
 	probeCtx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 	p.active.Store(true)
+	cfg := p.cfg
+	p.wg.Add(1)
 	p.mu.Unlock()
 
-	p.wg.Add(1)
 	go p.probeLoop(probeCtx)
 	log.Infof("codex turn-state prober started (min_spare=%d, max_pool=%d, interval=%v)",
-		p.cfg.Codex.TurnState.Probe.MinSpare,
-		p.cfg.Codex.TurnState.Probe.MaxPoolSize,
-		p.cfg.Codex.TurnState.Probe.Interval,
+		cfg.Codex.TurnState.Probe.MinSpare,
+		cfg.Codex.TurnState.Probe.MaxPoolSize,
+		cfg.Codex.TurnState.Probe.Interval,
 	)
 }
 
@@ -114,7 +122,9 @@ func (p *Prober) IsActive() bool {
 func (p *Prober) probeLoop(ctx context.Context) {
 	defer p.wg.Done()
 
+	p.mu.Lock()
 	interval := p.cfg.Codex.TurnState.Probe.Interval
+	p.mu.Unlock()
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
@@ -143,19 +153,22 @@ func (p *Prober) probeLoop(ctx context.Context) {
 }
 
 func (p *Prober) checkAndProbe(ctx context.Context) {
-	if !p.cfg.Codex.TurnState.Enabled {
+	p.mu.Lock()
+	cfg := p.cfg
+	p.mu.Unlock()
+	if cfg == nil || !cfg.Codex.TurnState.Enabled {
 		return
 	}
 	p.pool.PruneExpired()
 
 	currentCount := p.pool.Len()
-	minSpare := p.cfg.Codex.TurnState.Probe.MinSpare
+	minSpare := cfg.Codex.TurnState.Probe.MinSpare
 	if currentCount >= minSpare {
 		return
 	}
 
 	needed := minSpare - currentCount
-	concurrency := p.cfg.Codex.TurnState.Probe.Concurrency
+	concurrency := cfg.Codex.TurnState.Probe.Concurrency
 	if concurrency <= 0 {
 		concurrency = 2
 	}
@@ -179,7 +192,28 @@ func (p *Prober) checkAndProbe(ctx context.Context) {
 }
 
 // ExecuteProbe sends a single lightweight ping request to OpenAI Codex and evaluates the resulting turn state.
-func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (*Ticket, error) {
+
+func formatProbeHTTPError(status int, body io.Reader) error {
+	raw, _ := io.ReadAll(io.LimitReader(body, 2048))
+	trimmed := bytes.TrimSpace(raw)
+	detail := strings.TrimSpace(string(trimmed))
+	if json.Valid(trimmed) {
+		var compact bytes.Buffer
+		if json.Compact(&compact, trimmed) == nil {
+			detail = compact.String()
+		}
+	}
+	detail = strings.Join(strings.Fields(detail), " ")
+	if len(detail) > 1500 {
+		detail = detail[:1500] + "…"
+	}
+	if detail == "" {
+		return fmt.Errorf("探测接口返回 HTTP %d", status)
+	}
+	return fmt.Errorf("探测接口返回 HTTP %d：%s", status, detail)
+}
+
+func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (result *Ticket, resultErr error) {
 	p.mu.Lock()
 	cfg := p.cfg
 	supplier := p.authSupplier
@@ -187,28 +221,73 @@ func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (*Ticket, er
 
 	var apiKey, authID, accountID string
 	var errAuth error
+	var gatewayTraceID, gatewayPool, gatewayProxy string
+	source := "account"
+	if cfg != nil {
+		source = cfg.Codex.TurnState.Probe.AuthSource
+		if source == "" {
+			source = "account"
+			if strings.TrimSpace(cfg.Codex.TurnState.Probe.AuthID) == "" && cfg.Codex.TurnState.Probe.APIKey != "" {
+				source = "external"
+			}
+		}
+	}
+	started := time.Now()
+	p.totalProbed.Add(1)
+	defer func() {
+		if route, ok := proxytrace.Take(gatewayTraceID); ok {
+			gatewayPool, gatewayProxy = route.Pool, route.Proxy
+			if result != nil {
+				result.GatewayPool, result.GatewayProxy = gatewayPool, gatewayProxy
+			}
+		}
+		event := Event{Kind: "probe", Source: source, AuthID: authID, LatencyMS: time.Since(started).Milliseconds(), Outcome: "success", GatewayPool: gatewayPool, GatewayProxy: gatewayProxy, Message: "探测成功，已获取符合配置长度的状态头"}
+		if cfg != nil {
+			event.Model = cfg.Codex.TurnState.Probe.Model
+			if source == "account" && event.AuthID == "" {
+				event.AuthID = cfg.Codex.TurnState.Probe.AuthID
+			}
+		}
+		if resultErr != nil {
+			event.Outcome, event.Message = "failed", resultErr.Error()
+		} else if result != nil {
+			event.Length = result.Length
+		}
+		p.events.add(event)
+	}()
 
-	if cfg != nil && cfg.Codex.TurnState.Probe.APIKey != "" {
-		apiKey = cfg.Codex.TurnState.Probe.APIKey
-		authID = cfg.Codex.TurnState.Probe.AuthID
-	} else if supplier != nil {
-		apiKey, authID, accountID, errAuth = supplier()
+	if source == "account" && cfg != nil && strings.TrimSpace(cfg.Codex.TurnState.Probe.AuthID) != "" {
+		if supplier == nil {
+			p.totalFailed.Add(1)
+			return nil, fmt.Errorf("账户管理服务不可用")
+		}
+		apiKey, authID, accountID, errAuth = supplier(strings.TrimSpace(cfg.Codex.TurnState.Probe.AuthID))
 		if errAuth != nil {
 			p.totalFailed.Add(1)
-			return nil, fmt.Errorf("failed to obtain auth for probe: %w", errAuth)
+			return nil, errAuth
 		}
+	} else if source == "external" && cfg != nil && cfg.Codex.TurnState.Probe.APIKey != "" {
+		apiKey = cfg.Codex.TurnState.Probe.APIKey
 	}
 
 	if strings.TrimSpace(apiKey) == "" {
 		p.totalFailed.Add(1)
-		return nil, fmt.Errorf("no codex credentials available for probe")
+		return nil, fmt.Errorf("请先选择用于探针的已登录账户，或配置独立探针接口密钥")
 	}
 
 	baseURL := defaultCodexBaseURL
-	if cfg != nil && strings.TrimSpace(cfg.Codex.TurnState.Probe.BaseURL) != "" {
+	if source == "external" && cfg != nil && strings.TrimSpace(cfg.Codex.TurnState.Probe.BaseURL) != "" {
 		baseURL = strings.TrimSpace(cfg.Codex.TurnState.Probe.BaseURL)
 	}
 	targetURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	if target, err := url.Parse(targetURL); err == nil {
+		ip := net.ParseIP(target.Hostname())
+		if source == "external" && (target.Hostname() == "localhost" || (ip != nil && ip.IsLoopback())) {
+			proxyURL = "direct"
+		}
+	}
+	transportProxyURL := proxyURL
+	transportProxyURL, gatewayTraceID = attachGatewayTrace(transportProxyURL, cfg)
 
 	model := "gpt-5.3-codex"
 	if cfg != nil && strings.TrimSpace(cfg.Codex.TurnState.Probe.Model) != "" {
@@ -221,8 +300,10 @@ func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (*Ticket, er
 	}
 
 	payloadMap := map[string]any{
-		"model":  model,
-		"stream": true,
+		"model":        model,
+		"stream":       true,
+		"store":        false,
+		"instructions": "",
 		"input": []map[string]any{
 			{
 				"type": "message",
@@ -257,16 +338,15 @@ func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (*Ticket, er
 	}
 
 	authForClient := &cliproxyauth.Auth{
-		ProxyURL: proxyURL,
+		ProxyURL: transportProxyURL,
 	}
 	client := helps.NewCodexFingerprintHTTPClient(probeCtx, cfg, authForClient, 30*time.Second)
 
-	p.totalProbed.Add(1)
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		p.totalFailed.Add(1)
-		log.Debugf("turn-state prober: probe failed via proxy %q: %v", proxyURL, err)
-		return nil, err
+		return nil, fmt.Errorf("探测连接失败，请检查所选来源和代理连通性")
 	}
 	defer func() {
 		_ = httpResp.Body.Close()
@@ -274,9 +354,7 @@ func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (*Ticket, er
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		p.totalFailed.Add(1)
-		bodySnippet, _ := io.ReadAll(io.LimitReader(httpResp.Body, 512))
-		log.Debugf("turn-state prober: upstream status %d via proxy %q: %s", httpResp.StatusCode, proxyURL, string(bodySnippet))
-		return nil, fmt.Errorf("upstream probe returned status %d: %s", httpResp.StatusCode, string(bodySnippet))
+		return nil, formatProbeHTTPError(httpResp.StatusCode, httpResp.Body)
 	}
 
 	turnState := strings.TrimSpace(httpResp.Header.Get(HeaderName))
@@ -292,30 +370,68 @@ func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (*Ticket, er
 
 	if len(turnState) < minLength {
 		p.totalFailed.Add(1)
-		log.Debugf("turn-state prober: turn-state too short (%d < %d), degraded compute state discarded via proxy %q", len(turnState), minLength, proxyURL)
-		return nil, fmt.Errorf("captured turn-state length %d below required minimum %d", len(turnState), minLength)
+		return nil, fmt.Errorf("状态头长度为 %d，未达到配置阈值 %d", len(turnState), minLength)
 	}
 
 	ttl := 15 * time.Minute
 	if cfg != nil && cfg.Codex.TurnState.Probe.TicketTTL > 0 {
 		ttl = cfg.Codex.TurnState.Probe.TicketTTL
 	}
+	if route, ok := proxytrace.Take(gatewayTraceID); ok {
+		gatewayPool, gatewayProxy = route.Pool, route.Proxy
+	}
+	gatewayTraceID = ""
 
 	now := time.Now()
 	ticket := &Ticket{
-		State:      turnState,
-		Length:     len(turnState),
-		AcquiredAt: now,
-		ExpiresAt:  now.Add(ttl),
-		Proxy:      proxyURL,
-		AuthID:     authID,
-		Model:      model,
+		State:        turnState,
+		Length:       len(turnState),
+		AcquiredAt:   now,
+		ExpiresAt:    now.Add(ttl),
+		Proxy:        proxyURL,
+		GatewayPool:  gatewayPool,
+		GatewayProxy: gatewayProxy,
+		AuthID:       authID,
+		Model:        model,
 	}
 
 	p.pool.Push(ticket)
 	p.totalSuccess.Add(1)
-	log.Infof("turn-state prober: successfully captured high-compute state (len=%d) via proxy %q", len(turnState), proxyURL)
 	return ticket, nil
+}
+
+func attachGatewayTrace(proxyURL string, cfg *config.Config) (string, string) {
+	if cfg == nil || !cfg.ProxyGateway.Enabled {
+		return proxyURL, ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(proxyURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return proxyURL, ""
+	}
+	port := parsed.Port()
+	if port == "" {
+		if parsed.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	gatewayPort := cfg.ProxyGateway.Port
+	if gatewayPort <= 0 {
+		gatewayPort = 8899
+	}
+	if port != fmt.Sprint(gatewayPort) {
+		return proxyURL, ""
+	}
+	traceBytes := make([]byte, 16)
+	if _, err = rand.Read(traceBytes); err != nil {
+		return proxyURL, ""
+	}
+	traceID := hex.EncodeToString(traceBytes)
+	query := parsed.Query()
+	query.Set(proxyutil.GatewayTraceQueryParameter, traceID)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), traceID
 }
 
 // Metrics returns atomic counters for total probed, succeeded, and failed requests.
