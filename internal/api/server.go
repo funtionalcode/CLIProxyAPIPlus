@@ -21,6 +21,7 @@ import (
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
+	codexturnstate "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/turnstate"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
@@ -217,6 +218,39 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	s.localPassword = optionState.localPassword
 
+	tsMgr := codexturnstate.GetManager()
+	tsMgr.UpdateConfig(cfg)
+	if authManager != nil {
+		tsMgr.SetAuthSupplier(func() (apiKey, authID, accountID string, err error) {
+			auths := authManager.List()
+			for _, a := range auths {
+				if a != nil && strings.EqualFold(a.Provider, "codex") && a.Status == auth.StatusActive {
+					if a.Attributes != nil && a.Attributes["api_key"] != "" {
+						return a.Attributes["api_key"], a.ID, "", nil
+					}
+					if a.Metadata != nil {
+						if v, ok := a.Metadata["access_token"].(string); ok && v != "" {
+							accID := ""
+							if acc, ok := a.Metadata["account_id"].(string); ok {
+								accID = acc
+							}
+							return v, a.ID, accID, nil
+						}
+					}
+				}
+			}
+			if cfg != nil {
+				for _, k := range cfg.CodexKey {
+					if k.APIKey != "" {
+						return k.APIKey, "config-codex-key", "", nil
+					}
+				}
+			}
+			return "", "", "", fmt.Errorf("no active codex credentials found")
+		})
+	}
+	tsMgr.Start(context.Background())
+
 	// Home heartbeat gate: when home is enabled, block all endpoints with 503 until the
 	// subscribe-config heartbeat connection is healthy.
 	engine.Use(s.homeHeartbeatMiddleware())
@@ -391,6 +425,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.codexLiveHandler != nil {
 		s.codexLiveHandler.Close()
 	}
+	codexturnstate.GetManager().Stop()
 	if errShutdown != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errShutdown)
 	}

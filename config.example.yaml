@@ -379,6 +379,48 @@ codex:
   # into standard user messages across Responses and non-Codex protocols when the request
   # header contains X-Openai-Subagent: collab_spawn.
   orphan-delegation-compatibility: false
+  # Dual-track high-compute turn-state mechanism to bypass OpenAI compute/thinking degradation:
+  # 1. Probe Track: uses a pool of cheap/dynamic IPv6/IPv4 proxies to send lightweight probe
+  #    requests to OpenAI gateway and capture high-compute X-Codex-Turn-State tickets (evaluating length >= min-length).
+  # 2. Business Track: injects the captured full-fat X-Codex-Turn-State ticket into normal business
+  #    traffic (residential IP), guiding OpenAI gateway directly to the high-compute ("满血") cluster.
+  turn-state:
+    enabled: false
+    # Inject high-compute turn-state tickets into outgoing business requests (default: true when enabled)
+    inject-business: true
+    # Force-inject ticket from pool even if client provided a turn-state (default: false = only inject if missing or degraded)
+    force-inject: false
+    # Minimum character length of X-Codex-Turn-State to qualify as high compute (default: 160)
+    min-length: 160
+    # Probe track configuration
+    probe:
+      # Enable background prober to maintain a pool of fresh high-compute tickets (default: true if proxies configured)
+      enabled: false
+      # Probing check interval (default: 10s)
+      interval: "10s"
+      # Target minimum number of valid unexpired tickets to keep in reserve (default: 5)
+      min-spare: 5
+      # Maximum ticket pool capacity (default: 50)
+      max-pool-size: 50
+      # Ticket validity duration in the pool before expiration (default: 15m)
+      ticket-ttl: "15m"
+      # Maximum concurrent probe workers (default: 2)
+      concurrency: 2
+      # Lightweight probe prompt (e.g. ping or logic question)
+      prompt: "ping"
+      # Model to probe with (default: gpt-5.3-codex)
+      model: "gpt-5.3-codex"
+      # List of cheap dynamic IPv6, IPv4, or SOCKS5 proxies for probing
+      proxies: []
+        # - "http://[2001:db8::1]:8080"
+        # - "http://username:password@[2001:db8::2]:8080"
+        # - "socks5://user:pass@127.0.0.1:1080"
+      # Optional HTTP endpoint to dynamically refresh proxy list (newline-separated URLs)
+      proxy-url-source: ""
+      # Optional explicit auth credential dedicated for probing (defaults to active Codex auth from server)
+      # api-key: ""
+      # auth-id: ""
+      # base-url: "https://chatgpt.com/backend-api/codex"
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
   live-media-relay:

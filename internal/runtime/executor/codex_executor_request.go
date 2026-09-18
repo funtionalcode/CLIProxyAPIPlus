@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/turnstate"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -367,6 +368,8 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	misc.EnsureHeader(r.Header, ginHeaders, "Thread-Id", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "Session-Id", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Openai-Internal-Codex-Responses-Lite", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-State", "")
+	turnstate.InjectRequestHeader(r.Header, cfg)
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") && codexSessionHeaderValue(r.Header) == "" {
 		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())

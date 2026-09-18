@@ -7,6 +7,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	codexturnstate "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/turnstate"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
@@ -188,6 +189,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 			log.WithError(errUpdate).Error("failed to update Codex Live media relay configuration")
 		}
 	}
+	codexturnstate.GetManager().UpdateConfig(cfg)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)

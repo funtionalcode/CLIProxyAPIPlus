@@ -3,6 +3,7 @@ package config
 import (
 	"sort"
 	"strings"
+	"time"
 
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
 )
@@ -51,6 +52,46 @@ func (cfg *Config) SanitizeCodexConfig() {
 	cfg.Codex.NormalizeEnvironment.Home = strings.TrimSpace(cfg.Codex.NormalizeEnvironment.Home)
 	cfg.Codex.NormalizeEnvironment.CWD = strings.TrimSpace(cfg.Codex.NormalizeEnvironment.CWD)
 	cfg.Codex.NormalizeEnvironment.User = strings.TrimSpace(cfg.Codex.NormalizeEnvironment.User)
+
+	if cfg.Codex.TurnState.MinLength <= 0 {
+		cfg.Codex.TurnState.MinLength = 160
+	}
+	probe := &cfg.Codex.TurnState.Probe
+	if probe.Interval <= 0 {
+		probe.Interval = 10 * time.Second
+	}
+	if probe.MinSpare <= 0 {
+		probe.MinSpare = 5
+	}
+	if probe.MaxPoolSize <= 0 {
+		probe.MaxPoolSize = 50
+	}
+	if probe.TicketTTL <= 0 {
+		probe.TicketTTL = 15 * time.Minute
+	}
+	if probe.Concurrency <= 0 {
+		probe.Concurrency = 2
+	}
+	probe.Prompt = strings.TrimSpace(probe.Prompt)
+	if probe.Prompt == "" {
+		probe.Prompt = "ping"
+	}
+	probe.Model = strings.TrimSpace(probe.Model)
+	if probe.Model == "" {
+		probe.Model = "gpt-5.3-codex"
+	}
+	probe.ProxyURLSource = strings.TrimSpace(probe.ProxyURLSource)
+	probe.AuthID = strings.TrimSpace(probe.AuthID)
+	probe.APIKey = strings.TrimSpace(probe.APIKey)
+	probe.BaseURL = strings.TrimSpace(probe.BaseURL)
+	var cleanedProxies []string
+	for _, p := range probe.Proxies {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			cleanedProxies = append(cleanedProxies, trimmed)
+		}
+	}
+	probe.Proxies = cleanedProxies
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the

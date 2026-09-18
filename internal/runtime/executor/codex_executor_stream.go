@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/turnstate"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/grokbuild"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -132,6 +133,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		err = newCodexStatusErr(httpResp.StatusCode, data)
 		return nil, err
 	}
+
+	turnstate.RecordResponseHeader(httpResp.Header, e.cfg, authID, baseModel)
 
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
 

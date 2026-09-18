@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
@@ -194,6 +195,53 @@ type CodexConfig struct {
 	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
+	// TurnState configures dual-track high-compute turn-state probing and business request injection.
+	TurnState CodexTurnStateConfig `yaml:"turn-state,omitempty" json:"turn-state,omitempty"`
+}
+
+// CodexTurnStateConfig configures the dual-track high-compute turn-state probe pool and business request injection.
+type CodexTurnStateConfig struct {
+	Enabled        bool                      `yaml:"enabled" json:"enabled"`
+	InjectBusiness *bool                     `yaml:"inject-business,omitempty" json:"inject-business,omitempty"`
+	ForceInject    bool                      `yaml:"force-inject" json:"force-inject"`
+	MinLength      int                       `yaml:"min-length,omitempty" json:"min-length,omitempty"`
+	Probe          CodexTurnStateProbeConfig `yaml:"probe,omitempty" json:"probe,omitempty"`
+}
+
+// IsInjectBusiness returns true if business track turn-state injection is enabled.
+func (c CodexTurnStateConfig) IsInjectBusiness() bool {
+	if !c.Enabled {
+		return false
+	}
+	if c.InjectBusiness == nil {
+		return true
+	}
+	return *c.InjectBusiness
+}
+
+// CodexTurnStateProbeConfig configures background probing for high-compute turn-state tickets via proxy pool.
+type CodexTurnStateProbeConfig struct {
+	Enabled        bool          `yaml:"enabled" json:"enabled"`
+	Interval       time.Duration `yaml:"interval,omitempty" json:"interval,omitempty"`
+	MinSpare       int           `yaml:"min-spare,omitempty" json:"min-spare,omitempty"`
+	MaxPoolSize    int           `yaml:"max-pool-size,omitempty" json:"max-pool-size,omitempty"`
+	TicketTTL      time.Duration `yaml:"ticket-ttl,omitempty" json:"ticket-ttl,omitempty"`
+	Proxies        []string      `yaml:"proxies,omitempty" json:"proxies,omitempty"`
+	ProxyURLSource string        `yaml:"proxy-url-source,omitempty" json:"proxy-url-source,omitempty"`
+	Prompt         string        `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+	Model          string        `yaml:"model,omitempty" json:"model,omitempty"`
+	Concurrency    int           `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+	AuthID         string        `yaml:"auth-id,omitempty" json:"auth-id,omitempty"`
+	APIKey         string        `yaml:"api-key,omitempty" json:"api-key,omitempty"`
+	BaseURL        string        `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+}
+
+// IsEnabled returns true if the background prober should run.
+func (p CodexTurnStateProbeConfig) IsEnabled(parentEnabled bool) bool {
+	if p.Enabled {
+		return true
+	}
+	return parentEnabled && (len(p.Proxies) > 0 || p.ProxyURLSource != "")
 }
 
 // CodexLiveMediaRelayConfig configures the in-process Codex Live WebRTC gateway.
