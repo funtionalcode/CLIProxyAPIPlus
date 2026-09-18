@@ -30,7 +30,12 @@ type PoolManager struct {
 // NewPoolManager creates a new PoolManager initialized with the given pool configs.
 func NewPoolManager(pools []config.ProxyPoolConfig) *PoolManager {
 	pm := &PoolManager{
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+			},
+			Timeout: 15 * time.Second,
+		},
 	}
 	pm.UpdatePools(pools)
 	return pm

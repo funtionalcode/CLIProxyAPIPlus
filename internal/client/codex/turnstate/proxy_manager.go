@@ -30,6 +30,9 @@ func NewProxyManager(proxies []string, sourceURL string) *ProxyManager {
 	pm := &ProxyManager{
 		sourceURL: strings.TrimSpace(sourceURL),
 		client: &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+			},
 			Timeout: 15 * time.Second,
 		},
 	}
