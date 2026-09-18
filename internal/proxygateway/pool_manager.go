@@ -1,9 +1,7 @@
 package proxygateway
 
 import (
-	"bufio"
 	"context"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -101,7 +99,7 @@ func (pm *PoolManager) Summaries() []PoolSummary {
 			Name:           p.config.Name,
 			Enabled:        p.config.Enabled,
 			Weight:         p.config.Weight,
-			Proxies:        p.proxies,
+			Proxies:        append([]string(nil), p.config.Proxies...),
 			ProxyURLSource: p.config.ProxyURLSource,
 			ProxyCount:     len(p.proxies),
 		}
@@ -123,43 +121,16 @@ func (pm *PoolManager) RefreshDynamicSources(ctx context.Context) {
 			continue
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
-		if err != nil {
-			log.Debugf("proxy gateway: failed to create request for source %s: %v", source, err)
+		fetched, errFetch := fetchProxySource(ctx, pm.httpClient, source)
+		if errFetch != nil {
+			log.Debugf("proxy gateway: failed to refresh pool %q: %v", ap.config.Name, errFetch)
 			continue
 		}
-		resp, err := pm.httpClient.Do(req)
-		if err != nil {
-			log.Debugf("proxy gateway: failed to fetch dynamic proxies from %s: %v", source, err)
-			continue
-		}
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			scanner := bufio.NewScanner(resp.Body)
-			var fetched []string
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-				norm := turnstate.NormalizeProxyURL(line)
-				if norm != "" {
-					fetched = append(fetched, norm)
-				}
-			}
-			_ = resp.Body.Close()
-
-			if len(fetched) > 0 {
-				pm.mu.Lock()
-				ap.proxies = fetched
-				updatedAny = true
-				pm.mu.Unlock()
-				log.Infof("proxy gateway: refreshed %d proxies for pool %q from %s", len(fetched), ap.config.Name, source)
-			}
-		} else {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-		}
+		pm.mu.Lock()
+		ap.proxies = fetched
+		updatedAny = true
+		pm.mu.Unlock()
+		log.Infof("proxy gateway: refreshed %d proxies for pool %q", len(fetched), ap.config.Name)
 	}
 
 	if updatedAny {

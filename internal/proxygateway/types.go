@@ -25,8 +25,11 @@ type PoolSummary struct {
 
 // TestResult represents the result of testing an upstream proxy's connectivity.
 type TestResult struct {
-	ProxyURL  string `json:"proxy_url"`
-	Success   bool   `json:"success"`
-	LatencyMs int64  `json:"latency_ms"`
-	Error     string `json:"error,omitempty"`
+	ProxyURL         string `json:"proxy_url"`
+	Success          bool   `json:"success"`
+	LatencyMs        int64  `json:"latency_ms"`
+	Error            string `json:"error,omitempty"`
+	Stage            string `json:"stage,omitempty"`
+	SourceProxyCount int    `json:"source_proxy_count,omitempty"`
+	SourceLatencyMs  int64  `json:"source_latency_ms,omitempty"`
 }

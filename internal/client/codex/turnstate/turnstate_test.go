@@ -62,6 +62,21 @@ func TestNormalizeProxyURL(t *testing.T) {
 			input:    "socks5://user:pass@2001:db8::1:1080",
 			expected: "socks5://user:pass@[2001:db8::1]:1080",
 		},
+		{
+			name:     "Webshare standard format IP:PORT:USER:PASS",
+			input:    "31.59.20.176:6754:jxpogrlk:suzliqoleexq",
+			expected: "http://jxpogrlk:suzliqoleexq@31.59.20.176:6754",
+		},
+		{
+			name:     "Alternative format USER:PASS:IP:PORT",
+			input:    "jxpogrlk:suzliqoleexq:31.59.20.176:6754",
+			expected: "http://jxpogrlk:suzliqoleexq@31.59.20.176:6754",
+		},
+		{
+			name:     "Bracketed IPv6 with port and USER:PASS",
+			input:    "[2001:db8::1]:8080:myuser:mypass",
+			expected: "http://myuser:mypass@[2001:db8::1]:8080",
+		},
 	}
 
 	for _, tc := range tests {

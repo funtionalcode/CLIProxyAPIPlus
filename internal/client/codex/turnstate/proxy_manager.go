@@ -3,9 +3,11 @@ package turnstate
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,7 +37,16 @@ func NewProxyManager(proxies []string, sourceURL string) *ProxyManager {
 	return pm
 }
 
-// NormalizeProxyURL cleans and normalizes proxy strings, ensuring correct IPv6 bracket formatting.
+func isNumericPort(s string) bool {
+	p, err := strconv.Atoi(s)
+	return err == nil && p > 0 && p <= 65535
+}
+
+// NormalizeProxyURL cleans and normalizes proxy strings, supporting:
+// - Standard URLs: http://user:pass@host:port, socks5://host:port
+// - Webshare / Scraper format: host:port:user:pass -> http://user:pass@host:port
+// - Reverse format: user:pass:host:port -> http://user:pass@host:port
+// - Bracketed and unbracketed IPv6 addresses
 func NormalizeProxyURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -49,31 +60,68 @@ func NormalizeProxyURL(raw string) string {
 		rest = raw[idx+3:]
 	}
 
-	userInfo := ""
-	hostPort := rest
-	if atIdx := strings.LastIndex(rest, "@"); atIdx != -1 {
-		userInfo = rest[:atIdx+1]
-		hostPort = rest[atIdx+1:]
+	rest = strings.TrimSuffix(rest, "/")
+
+	// Format check 1: Bracketed IPv6 with port and user:pass, e.g. [2001:db8::1]:8080:user:pass
+	if strings.HasPrefix(rest, "[") {
+		closeBracket := strings.Index(rest, "]")
+		if closeBracket != -1 && strings.HasPrefix(rest[closeBracket:], "]:") {
+			ipv6 := rest[:closeBracket+1]
+			remaining := rest[closeBracket+2:]
+			remParts := strings.Split(remaining, ":")
+			if len(remParts) == 3 && isNumericPort(remParts[0]) {
+				port, user, pass := remParts[0], remParts[1], remParts[2]
+				return fmt.Sprintf("%s%s:%s@%s:%s", scheme, user, pass, ipv6, port)
+			}
+		}
 	}
 
-	// Remove trailing slash if any
-	hostPort = strings.TrimSuffix(hostPort, "/")
-
-	// Check if hostPort already has bracketed IPv6
-	if strings.HasPrefix(hostPort, "[") && strings.Contains(hostPort, "]") {
+	// Format check 2: If contains @, standard user:pass@host:port format
+	if atIdx := strings.LastIndex(rest, "@"); atIdx != -1 {
+		userInfo := rest[:atIdx+1]
+		hostPort := rest[atIdx+1:]
+		if strings.HasPrefix(hostPort, "[") && strings.Contains(hostPort, "]") {
+			return scheme + userInfo + hostPort
+		}
+		colonCount := strings.Count(hostPort, ":")
+		if colonCount > 1 {
+			lastColon := strings.LastIndex(hostPort, ":")
+			ipPart := hostPort[:lastColon]
+			portPart := hostPort[lastColon+1:]
+			hostPort = "[" + ipPart + "]:" + portPart
+		}
 		return scheme + userInfo + hostPort
 	}
 
-	colonCount := strings.Count(hostPort, ":")
-	if colonCount > 1 {
-		// Unbracketed IPv6 with port (e.g., 2001:db8::1:8080)
-		lastColon := strings.LastIndex(hostPort, ":")
-		ipPart := hostPort[:lastColon]
-		portPart := hostPort[lastColon+1:]
-		hostPort = "[" + ipPart + "]:" + portPart
+	// Format check 3: IP:PORT:USER:PASS (e.g. Webshare format: 31.59.20.176:6754:jxpogrlk:suzliqoleexq)
+	parts := strings.Split(rest, ":")
+	if len(parts) == 4 {
+		if isNumericPort(parts[1]) {
+			ip, port, user, pass := parts[0], parts[1], parts[2], parts[3]
+			return fmt.Sprintf("%s%s:%s@%s:%s", scheme, user, pass, ip, port)
+		}
+		if isNumericPort(parts[3]) {
+			user, pass, ip, port := parts[0], parts[1], parts[2], parts[3]
+			return fmt.Sprintf("%s%s:%s@%s:%s", scheme, user, pass, ip, port)
+		}
 	}
 
-	return scheme + userInfo + hostPort
+	// Format check 4: Bracketed IPv6 e.g. [2001:db8::1]:8080
+	if strings.HasPrefix(rest, "[") && strings.Contains(rest, "]") {
+		return scheme + rest
+	}
+
+	// Format check 5: Unbracketed IPv6 with port (e.g. 2001:db8::1:8080)
+	colonCount := strings.Count(rest, ":")
+	if colonCount > 1 {
+		lastColon := strings.LastIndex(rest, ":")
+		ipPart := rest[:lastColon]
+		portPart := rest[lastColon+1:]
+		return fmt.Sprintf("%s[%s]:%s", scheme, ipPart, portPart)
+	}
+
+	// Format check 6: Standard host:port
+	return scheme + rest
 }
 
 // SetProxies replaces the current proxy list with the given items after normalization.

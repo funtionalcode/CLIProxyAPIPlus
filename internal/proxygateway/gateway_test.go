@@ -1,6 +1,7 @@
 package proxygateway
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,32 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func TestPoolManager_DynamicSourceWebshareFormat(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("31.59.20.176:6754:jxpogrlk:suzliqoleexq\n45.38.107.97:6014:jxpogrlk:suzliqoleexq\n"))
+	}))
+	defer ts.Close()
+
+	pools := []config.ProxyPoolConfig{
+		{
+			Name:           "WebsharePool",
+			Enabled:        true,
+			ProxyURLSource: ts.URL,
+		},
+	}
+	pm := NewPoolManager(pools)
+	pm.RefreshDynamicSources(context.Background())
+
+	if pm.TotalProxyCount() != 2 {
+		t.Fatalf("TotalProxyCount = %d, want 2", pm.TotalProxyCount())
+	}
+	first := pm.NextProxy()
+	if first != "http://jxpogrlk:suzliqoleexq@31.59.20.176:6754" {
+		t.Fatalf("unexpected normalized proxy: %q", first)
+	}
+}
 
 func TestPoolManager_RoundRobinAcrossPools(t *testing.T) {
 	pools := []config.ProxyPoolConfig{
