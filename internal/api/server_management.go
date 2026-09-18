@@ -151,6 +151,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codex/turn-state", s.mgmt.GetCodexTurnState)
 		mgmt.POST("/codex/turn-state/probe", s.mgmt.ProbeCodexTurnState)
 
+		mgmt.GET("/proxy-gateway", s.mgmt.GetProxyGateway)
+		mgmt.PUT("/proxy-gateway", s.mgmt.PutProxyGateway)
+		mgmt.POST("/proxy-gateway/test", s.mgmt.TestProxyGatewayProxy)
+
 		mgmt.GET("/xai-api-key", s.mgmt.GetXAIKeys)
 		mgmt.PUT("/xai-api-key", s.mgmt.PutXAIKeys)
 		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)

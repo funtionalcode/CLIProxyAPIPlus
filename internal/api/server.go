@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxygateway"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -251,6 +252,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	tsMgr.Start(context.Background())
 
+	_ = proxygateway.GetGateway().UpdateConfig(cfg.ProxyGateway)
+
 	// Home heartbeat gate: when home is enabled, block all endpoints with 503 until the
 	// subscribe-config heartbeat connection is healthy.
 	engine.Use(s.homeHeartbeatMiddleware())
@@ -426,6 +429,7 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.codexLiveHandler.Close()
 	}
 	codexturnstate.GetManager().Stop()
+	_ = proxygateway.GetGateway().Stop()
 	if errShutdown != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errShutdown)
 	}

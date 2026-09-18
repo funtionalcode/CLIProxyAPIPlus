@@ -341,6 +341,31 @@ claude:
 #   timeout: "600"
 #   stabilize-device-profile: false
 
+# Unified forward proxy gateway.
+# Provides a single unified forward proxy address (e.g. http://0.0.0.0:8899)
+# that distributes client HTTP and HTTPS CONNECT requests across multiple configured proxy pools in round-robin.
+proxy-gateway:
+  enabled: false
+  # Port on which the forward proxy listens (default: 8899)
+  port: 8899
+  # Interface/IP to bind on (default: 0.0.0.0)
+  bind: "0.0.0.0"
+  # Optional Basic Authentication for incoming proxy clients
+  # auth-user: "admin"
+  # auth-pass: "secret"
+  # Configured upstream proxy pools
+  pools:
+    - name: "IPv6 动态代理池"
+      enabled: true
+      proxies:
+        - "http://user:password@[2001:db8::1]:8080"
+        - "socks5://user:password@[2001:db8::2]:1080"
+      # proxy-url-source: "https://api.proxy-provider.com/get-proxies"
+    - name: "住宅代理池"
+      enabled: true
+      proxies:
+        - "http://user:password@residential.example.com:8080"
+
 # Codex provider behavior.
 codex:
   # When true, and routing.strategy is fill-first or routing.session-affinity is true,

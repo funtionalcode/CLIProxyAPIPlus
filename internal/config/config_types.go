@@ -982,3 +982,22 @@ func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapp
 func (m OpenAICompatibilityModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+// ProxyGatewayConfig configures the unified local forward proxy gateway that aggregates multiple proxy pools with round-robin.
+type ProxyGatewayConfig struct {
+	Enabled  bool              `yaml:"enabled" json:"enabled"`
+	Bind     string            `yaml:"bind,omitempty" json:"bind,omitempty"`       // default: "0.0.0.0"
+	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`       // default: 8899
+	AuthUser string            `yaml:"auth-user,omitempty" json:"auth-user,omitempty"`
+	AuthPass string            `yaml:"auth-pass,omitempty" json:"auth-pass,omitempty"`
+	Pools    []ProxyPoolConfig `yaml:"pools,omitempty" json:"pools,omitempty"`
+}
+
+// ProxyPoolConfig represents a single proxy pool within the gateway.
+type ProxyPoolConfig struct {
+	Name           string   `yaml:"name" json:"name"`
+	Enabled        bool     `yaml:"enabled" json:"enabled"`
+	Weight         int      `yaml:"weight,omitempty" json:"weight,omitempty"`
+	Proxies        []string `yaml:"proxies,omitempty" json:"proxies,omitempty"`
+	ProxyURLSource string   `yaml:"proxy-url-source,omitempty" json:"proxy-url-source,omitempty"`
+}

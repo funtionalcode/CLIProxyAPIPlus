@@ -149,6 +149,9 @@ type Config struct {
 	// management UI. This is primarily useful for Docker, reverse proxies, and LAN access.
 	CodexOAuth CodexOAuthConfig `yaml:"codex-oauth,omitempty" json:"codex-oauth,omitempty"`
 
+	// ProxyGateway configures the local multi-pool round-robin forward proxy gateway.
+	ProxyGateway ProxyGatewayConfig `yaml:"proxy-gateway,omitempty" json:"proxy-gateway,omitempty"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 

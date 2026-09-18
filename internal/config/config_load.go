@@ -173,6 +173,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex provider config.
 	cfg.SanitizeCodexConfig()
 
+	// Sanitize ProxyGateway config.
+	cfg.SanitizeProxyGatewayConfig()
+
 	// Sanitize Claude header defaults.
 	cfg.SanitizeClaudeHeaderDefaults()
 

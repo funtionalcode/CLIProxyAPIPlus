@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -535,4 +536,36 @@ func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]stri
 		return nil
 	}
 	return out
+}
+
+// SanitizeProxyGatewayConfig applies default settings and cleans up pools for the forward proxy gateway.
+func (cfg *Config) SanitizeProxyGatewayConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.ProxyGateway.Bind = strings.TrimSpace(cfg.ProxyGateway.Bind)
+	if cfg.ProxyGateway.Bind == "" {
+		cfg.ProxyGateway.Bind = "0.0.0.0"
+	}
+	if cfg.ProxyGateway.Port <= 0 {
+		cfg.ProxyGateway.Port = 8899
+	}
+	cfg.ProxyGateway.AuthUser = strings.TrimSpace(cfg.ProxyGateway.AuthUser)
+	cfg.ProxyGateway.AuthPass = strings.TrimSpace(cfg.ProxyGateway.AuthPass)
+	for i := range cfg.ProxyGateway.Pools {
+		pool := &cfg.ProxyGateway.Pools[i]
+		pool.Name = strings.TrimSpace(pool.Name)
+		if pool.Name == "" {
+			pool.Name = fmt.Sprintf("Pool-%d", i+1)
+		}
+		pool.ProxyURLSource = strings.TrimSpace(pool.ProxyURLSource)
+		var cleaned []string
+		for _, p := range pool.Proxies {
+			trimmed := strings.TrimSpace(p)
+			if trimmed != "" {
+				cleaned = append(cleaned, trimmed)
+			}
+		}
+		pool.Proxies = cleaned
+	}
 }
