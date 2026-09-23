@@ -46,7 +46,7 @@ func (m *Manager) UpdateConfig(cfg *config.Config) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.cfg = cfg
+	m.cfg = cfg.CloneForRuntime()
 	if cfg == nil {
 		return
 	}
@@ -122,16 +122,29 @@ func (m *Manager) InjectRequestHeader(headers http.Header, cfg *config.Config) {
 
 	// If force-inject is disabled, and existing state is already high-compute, keep it
 	if !cfg.Codex.TurnState.ForceInject && len(existing) >= minLength {
+		m.recordInjection(Event{Outcome: "skipped", Length: len(existing), Message: "已保留客户端携带的状态头"})
 		return
 	}
 
-	ticket, ok := m.pool.GetTicket()
-	if !ok || ticket == "" {
+	ticket, ok := m.pool.ticketForInjection()
+	if !ok || ticket.State == "" {
+		m.recordInjection(Event{Outcome: "skipped", Message: "状态池为空或已过期，未注入"})
 		return
 	}
 
-	headers.Set(HeaderName, ticket)
-	log.Debugf("turn-state: injected high-compute state (len=%d) into request", len(ticket))
+	headers.Set(HeaderName, ticket.State)
+	m.recordInjection(Event{
+		Outcome: "success", Length: ticket.Length, AuthID: ticket.AuthID, Model: ticket.Model,
+		GatewayPool: ticket.GatewayPool, GatewayProxy: ticket.GatewayProxy,
+		Message: "已向业务请求注入状态头",
+	})
+}
+
+func (m *Manager) recordInjection(event Event) {
+	if m.prober != nil {
+		event.Kind = "injection"
+		m.prober.events.add(event)
+	}
 }
 
 // RecordResponseHeader records high-compute turn-state received from OpenAI responses into the ticket pool.
@@ -174,11 +187,13 @@ func (m *Manager) Stats() Stats {
 	m.mu.RUnlock()
 
 	enabled := false
+	injectBusiness := false
 	minSpare := 5
 	maxPool := 50
 	minLength := 160
 	if cfg != nil {
 		enabled = cfg.Codex.TurnState.Enabled
+		injectBusiness = cfg.Codex.TurnState.IsInjectBusiness()
 		if cfg.Codex.TurnState.Probe.MinSpare > 0 {
 			minSpare = cfg.Codex.TurnState.Probe.MinSpare
 		}
@@ -192,21 +207,32 @@ func (m *Manager) Stats() Stats {
 
 	injected, collected, _ := m.pool.Metrics()
 	probed, success, failed := m.prober.Metrics()
+	events, skipped := m.prober.events.snapshot()
+	poolSize := m.pool.Len()
+	recentTickets := m.pool.RecentSummaries(10)
+	currentStateLength := 0
+	if len(recentTickets) > 0 {
+		currentStateLength = recentTickets[0].Length
+	}
 
 	return Stats{
-		Enabled:        enabled,
-		ProberActive:   m.prober.IsActive(),
-		PoolSize:       m.pool.Len(),
-		MinSpare:       minSpare,
-		MaxPoolSize:    maxPool,
-		MinLength:      minLength,
-		ProxyCount:     m.proxyManager.Count(),
-		TotalProbed:    probed,
-		TotalSuccess:   success,
-		TotalFailed:    failed,
-		TotalInjected:  injected,
-		TotalCollected: collected,
-		RecentTickets:  m.pool.RecentSummaries(10),
+		Enabled:            enabled,
+		InjectBusiness:     injectBusiness,
+		ProberActive:       m.prober.IsActive(),
+		PoolSize:           poolSize,
+		MinSpare:           minSpare,
+		MaxPoolSize:        maxPool,
+		MinLength:          minLength,
+		ProxyCount:         m.proxyManager.Count(),
+		TotalProbed:        probed,
+		TotalSuccess:       success,
+		TotalFailed:        failed,
+		TotalInjected:      injected,
+		TotalCollected:     collected,
+		CurrentStateLength: currentStateLength,
+		RecentTickets:      recentTickets,
+		RecentEvents:       events,
+		TotalSkipped:       skipped,
 	}
 }
 

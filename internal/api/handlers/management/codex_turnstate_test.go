@@ -72,6 +72,9 @@ func TestManagement_GetCodexTurnState(t *testing.T) {
 	if stats.PoolSize < 1 {
 		t.Fatalf("pool_size = %d, want >= 1", stats.PoolSize)
 	}
+	if stats.CurrentStateLength != 170 {
+		t.Fatalf("current_state_length = %d, want 170", stats.CurrentStateLength)
+	}
 	if len(stats.RecentTickets) < 1 {
 		t.Fatalf("expected at least 1 recent ticket summary")
 	}

@@ -120,19 +120,24 @@ func (p *Pool) Feed(state string, proxy string, authID string, model string) boo
 // GetTicket retrieves a valid, non-expired ticket for request injection.
 // It rotates amongst currently valid tickets so they can be reused across multiple requests.
 func (p *Pool) GetTicket() (string, bool) {
+	ticket, ok := p.ticketForInjection()
+	return ticket.State, ok
+}
+
+func (p *Pool) ticketForInjection() (Ticket, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.pruneLocked(time.Now())
 	n := len(p.tickets)
 	if n == 0 {
-		return "", false
+		return Ticket{}, false
 	}
 
 	idx := p.currentIndex.Add(1) - 1
 	ticket := p.tickets[idx%uint64(n)]
 	p.totalInjected.Add(1)
-	return ticket.State, true
+	return *ticket, true
 }
 
 // Pop extracts and removes the oldest valid ticket from the pool.
@@ -203,11 +208,12 @@ func (p *Pool) RecentSummaries(limit int) []TicketSummary {
 	for i := 0; i < limit; i++ {
 		t := p.tickets[n-1-i]
 		out[i] = TicketSummary{
-			Length:     t.Length,
-			AcquiredAt: t.AcquiredAt,
-			ExpiresAt:  t.ExpiresAt,
-			Proxy:      t.Proxy,
-			AuthID:     t.AuthID,
+			Length:       t.Length,
+			AcquiredAt:   t.AcquiredAt,
+			ExpiresAt:    t.ExpiresAt,
+			GatewayPool:  t.GatewayPool,
+			GatewayProxy: t.GatewayProxy,
+			AuthID:       t.AuthID,
 		}
 	}
 	return out

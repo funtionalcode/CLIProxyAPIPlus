@@ -31,6 +31,13 @@ const (
 	ModeInvalid
 )
 
+const (
+	// GatewayTraceQueryParameter carries an opaque correlation ID in a proxy URL.
+	GatewayTraceQueryParameter = "cliproxy_gateway_trace"
+	// GatewayTraceHeader forwards that correlation ID on the HTTP CONNECT request.
+	GatewayTraceHeader = "X-CLIProxy-Gateway-Trace"
+)
+
 // Setting is the normalized interpretation of a proxy configuration value.
 type Setting struct {
 	Raw  string
@@ -279,6 +286,9 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 	}).WithContext(ctx)
 	if d.proxyURL.User != nil {
 		req.Header.Set("Proxy-Authorization", proxyAuthorization(d.proxyURL.User))
+	}
+	if traceID := strings.TrimSpace(d.proxyURL.Query().Get(GatewayTraceQueryParameter)); traceID != "" {
+		req.Header.Set(GatewayTraceHeader, traceID)
 	}
 	if errWrite := req.Write(conn); errWrite != nil {
 		if errClose := conn.Close(); errClose != nil {

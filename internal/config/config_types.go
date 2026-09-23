@@ -281,6 +281,7 @@ type CodexTurnStateProbeConfig struct {
 	Prompt         string        `yaml:"prompt,omitempty" json:"prompt,omitempty"`
 	Model          string        `yaml:"model,omitempty" json:"model,omitempty"`
 	Concurrency    int           `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+	AuthSource     string        `yaml:"auth-source,omitempty" json:"auth-source,omitempty"`
 	AuthID         string        `yaml:"auth-id,omitempty" json:"auth-id,omitempty"`
 	APIKey         string        `yaml:"api-key,omitempty" json:"api-key,omitempty"`
 	BaseURL        string        `yaml:"base-url,omitempty" json:"base-url,omitempty"`

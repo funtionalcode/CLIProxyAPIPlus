@@ -157,6 +157,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
 
 		mgmt.GET("/codex/turn-state", s.mgmt.GetCodexTurnState)
+		mgmt.GET("/codex/turn-state/probe-config", s.mgmt.GetCodexProbeConfig)
+		mgmt.PUT("/codex/turn-state/probe-config", s.mgmt.PutCodexProbeConfig)
+		mgmt.GET("/codex/turn-state/external-account", s.mgmt.GetCodexProxyExternalAccount)
+		mgmt.POST("/codex/turn-state/external-login/start", s.mgmt.StartCodexProxyExternalLogin)
+		mgmt.POST("/codex/turn-state/external-login/complete", s.mgmt.CompleteCodexProxyExternalLogin)
+		mgmt.POST("/codex/turn-state/external-device-login/start", s.mgmt.StartCodexProxyExternalDeviceLogin)
+		mgmt.POST("/codex/turn-state/external-device-login/poll", s.mgmt.PollCodexProxyExternalDeviceLogin)
 		mgmt.POST("/codex/turn-state/probe", s.mgmt.ProbeCodexTurnState)
 
 		mgmt.GET("/proxy-gateway", s.mgmt.GetProxyGateway)

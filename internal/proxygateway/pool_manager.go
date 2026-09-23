@@ -18,11 +18,17 @@ type activePool struct {
 	proxies []string
 }
 
+// ProxySelection identifies the pool and proxy selected for one gateway request.
+type ProxySelection struct {
+	Pool  string
+	Proxy string
+}
+
 // PoolManager aggregates multiple proxy pools and delivers upstream proxies in round-robin fashion.
 type PoolManager struct {
 	mu           sync.RWMutex
 	pools        []*activePool
-	flatProxies  []string
+	flatProxies  []ProxySelection
 	currentIndex atomic.Uint64
 	httpClient   *http.Client
 }
@@ -47,7 +53,7 @@ func (pm *PoolManager) UpdatePools(pools []config.ProxyPoolConfig) {
 	defer pm.mu.Unlock()
 
 	var newPools []*activePool
-	var flat []string
+	var flat []ProxySelection
 
 	for _, p := range pools {
 		ap := &activePool{
@@ -64,7 +70,9 @@ func (pm *PoolManager) UpdatePools(pools []config.ProxyPoolConfig) {
 		newPools = append(newPools, ap)
 
 		if p.Enabled {
-			flat = append(flat, normalized...)
+			for _, proxyURL := range normalized {
+				flat = append(flat, ProxySelection{Pool: p.Name, Proxy: proxyURL})
+			}
 		}
 	}
 
@@ -75,12 +83,17 @@ func (pm *PoolManager) UpdatePools(pools []config.ProxyPoolConfig) {
 // NextProxy retrieves the next upstream proxy across all enabled pools via round-robin.
 // Returns empty string if no proxies are configured or available.
 func (pm *PoolManager) NextProxy() string {
+	return pm.NextSelection().Proxy
+}
+
+// NextSelection returns the next proxy together with its pool name.
+func (pm *PoolManager) NextSelection() ProxySelection {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
 	n := len(pm.flatProxies)
 	if n == 0 {
-		return ""
+		return ProxySelection{}
 	}
 	idx := pm.currentIndex.Add(1) - 1
 	return pm.flatProxies[idx%uint64(n)]
@@ -140,10 +153,12 @@ func (pm *PoolManager) RefreshDynamicSources(ctx context.Context) {
 
 	if updatedAny {
 		pm.mu.Lock()
-		var flat []string
+		var flat []ProxySelection
 		for _, ap := range pm.pools {
 			if ap.config.Enabled {
-				flat = append(flat, ap.proxies...)
+				for _, proxyURL := range ap.proxies {
+					flat = append(flat, ProxySelection{Pool: ap.config.Name, Proxy: proxyURL})
+				}
 			}
 		}
 		pm.flatProxies = flat

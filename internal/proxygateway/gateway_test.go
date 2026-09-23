@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxytrace"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 )
 
 func TestPoolManager_DynamicSourceWebshareFormat(t *testing.T) {
@@ -75,6 +77,46 @@ func TestPoolManager_RoundRobinAcrossPools(t *testing.T) {
 	}
 	if seen["http://1.1.1.1:8080"] != 2 || seen["http://1.1.1.2:8080"] != 2 || seen["socks5://3.3.3.3:1080"] != 2 {
 		t.Fatalf("expected round robin distribution of 2 each, got: %#v", seen)
+	}
+}
+
+func TestPoolManager_SelectionIncludesPoolName(t *testing.T) {
+	pm := NewPoolManager([]config.ProxyPoolConfig{{
+		Name: "probe-pool", Enabled: true, Proxies: []string{"socks5://user:pass@1.2.3.4:1080"},
+	}})
+	selection := pm.NextSelection()
+	if selection.Pool != "probe-pool" || selection.Proxy != "socks5://user:pass@1.2.3.4:1080" {
+		t.Fatalf("unexpected selection: %#v", selection)
+	}
+	if got := redactProxyEndpoint(selection.Proxy); got != "socks5://1.2.3.4:1080" {
+		t.Fatalf("redacted proxy = %q", got)
+	}
+}
+
+func TestServer_RecordsSelectedProxyForTrace(t *testing.T) {
+	traceID := "0123456789abcdef0123456789abcdef"
+	poolManager := NewPoolManager([]config.ProxyPoolConfig{{
+		Name: "probe-pool", Enabled: true, Proxies: []string{"http://user:pass@127.0.0.1:1"},
+	}})
+	server := httptest.NewServer(NewServer(poolManager, "", ""))
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodConnect, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = "chatgpt.com:443"
+	request.Header.Set(proxyutil.GatewayTraceHeader, traceID)
+	response, err := server.Client().Do(request)
+	if err == nil {
+		_ = response.Body.Close()
+	}
+	route, ok := proxytrace.Take(traceID)
+	if !ok {
+		t.Fatal("gateway routing decision was not recorded")
+	}
+	if route.Pool != "probe-pool" || route.Proxy != "http://127.0.0.1:1" || route.Target != "chatgpt.com:443" {
+		t.Fatalf("unexpected route: %#v", route)
 	}
 }
 

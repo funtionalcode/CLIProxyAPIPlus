@@ -745,31 +745,26 @@ func (h *Handler) lookupAuthFile(name string, authIndex string) (*coreauth.Auth,
 
 // GetAuthFileModels returns the models supported by a specific auth file
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
-	name := c.Query("name")
+	name := strings.TrimSpace(c.Query("name"))
 	if name == "" {
 		c.JSON(400, gin.H{"error": "name is required"})
 		return
 	}
 
-	// Try to find auth ID via authManager
 	var authID string
-	if h.authManager != nil {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
-				authID = auth.ID
-				break
-			}
-		}
+	auth, _ := h.lookupAuthFile(name, c.Query("auth_index"))
+	if auth != nil {
+		authID = auth.ID
 	}
-
 	if authID == "" {
-		authID = name // fallback to filename as ID
+		authID = name
 	}
 
-	// Get models from registry
 	reg := registry.GetGlobalRegistry()
 	models := reg.GetModelsForClient(authID)
+	if len(models) == 0 && auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		models = codexCapabilityModelsForAuthFile(auth)
+	}
 
 	result := make([]gin.H, 0, len(models))
 	for _, m := range models {
@@ -789,6 +784,90 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"models": result})
+}
+
+func codexCapabilityModelsForAuthFile(auth *coreauth.Auth) []*registry.ModelInfo {
+	plan := ""
+	for _, key := range []string{"group", "plan_type", "plan", "account_type"} {
+		if value := strings.TrimSpace(authAttribute(auth, key)); value != "" {
+			plan = value
+			break
+		}
+		if auth != nil && auth.Metadata != nil {
+			if value := strings.TrimSpace(fmt.Sprint(auth.Metadata[key])); value != "" && value != "<nil>" {
+				plan = value
+				break
+			}
+		}
+	}
+
+	var models []*registry.ModelInfo
+	switch normalizeAuthFilePlan(plan) {
+	case "free":
+		models = registry.GetCodexFreeModels()
+	case "plus":
+		models = registry.GetCodexPlusModels()
+	case "team", "business", "go":
+		models = registry.GetCodexTeamModels()
+	default:
+		models = registry.GetCodexProModels()
+	}
+
+	excluded := strings.Split(authAttribute(auth, "excluded_models"), ",")
+	if len(excluded) == 1 && strings.TrimSpace(excluded[0]) == "" {
+		return models
+	}
+	filtered := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil || authFileModelExcluded(model.ID, excluded) {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return filtered
+}
+
+func authFileModelExcluded(modelID string, patterns []string) bool {
+	value := strings.ToLower(strings.TrimSpace(modelID))
+	for _, rawPattern := range patterns {
+		pattern := strings.ToLower(strings.TrimSpace(rawPattern))
+		if pattern == "" {
+			continue
+		}
+		if !strings.Contains(pattern, "*") {
+			if pattern == value {
+				return true
+			}
+			continue
+		}
+		parts := strings.Split(pattern, "*")
+		remaining := value
+		matched := true
+		if prefix := parts[0]; prefix != "" {
+			matched = strings.HasPrefix(remaining, prefix)
+			if matched {
+				remaining = remaining[len(prefix):]
+			}
+		}
+		for _, part := range parts[1 : len(parts)-1] {
+			if !matched || part == "" {
+				continue
+			}
+			index := strings.Index(remaining, part)
+			if index < 0 {
+				matched = false
+				break
+			}
+			remaining = remaining[index+len(part):]
+		}
+		if matched {
+			suffix := parts[len(parts)-1]
+			if suffix == "" || strings.HasSuffix(remaining, suffix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // List auth files from disk when the auth manager is unavailable.

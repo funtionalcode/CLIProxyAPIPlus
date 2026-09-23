@@ -228,32 +228,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	tsMgr := codexturnstate.GetManager()
 	tsMgr.UpdateConfig(cfg)
 	if authManager != nil {
-		tsMgr.SetAuthSupplier(func() (apiKey, authID, accountID string, err error) {
-			auths := authManager.List()
-			for _, a := range auths {
-				if a != nil && strings.EqualFold(a.Provider, "codex") && a.Status == auth.StatusActive {
-					if a.Attributes != nil && a.Attributes["api_key"] != "" {
-						return a.Attributes["api_key"], a.ID, "", nil
-					}
-					if a.Metadata != nil {
-						if v, ok := a.Metadata["access_token"].(string); ok && v != "" {
-							accID := ""
-							if acc, ok := a.Metadata["account_id"].(string); ok {
-								accID = acc
-							}
-							return v, a.ID, accID, nil
-						}
-					}
-				}
-			}
-			if cfg != nil {
-				for _, k := range cfg.CodexKey {
-					if k.APIKey != "" {
-						return k.APIKey, "config-codex-key", "", nil
-					}
-				}
-			}
-			return "", "", "", fmt.Errorf("no active codex credentials found")
+		tsMgr.SetAuthSupplier(func(requestedID string) (apiKey, authID, accountID string, err error) {
+			return codexturnstate.ResolveProbeAccount(authManager, requestedID)
 		})
 	}
 	tsMgr.Start(context.Background())

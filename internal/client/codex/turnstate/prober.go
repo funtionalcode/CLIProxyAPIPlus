@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,11 @@ const (
 	defaultProbeUserAgent  = "codex-tui/0.146.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.146.0)"
 	defaultProbeOriginator = "codex-tui"
 	defaultCodexBaseURL    = "https://chatgpt.com/backend-api/codex"
+)
+
+var (
+	probeProxyCredentialPattern = regexp.MustCompile(`(?i)\b(https?|socks5h?)://[^\s/@]+(?::[^\s/@]*)?@`)
+	probeBearerPattern          = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
 )
 
 // AuthSupplierFunc is a callback that returns active Codex auth credentials for probing.
@@ -213,6 +219,22 @@ func formatProbeHTTPError(status int, body io.Reader) error {
 	return fmt.Errorf("探测接口返回 HTTP %d：%s", status, detail)
 }
 
+func formatProbeNetworkError(err error) error {
+	if err == nil {
+		return fmt.Errorf("探测连接失败")
+	}
+	detail := strings.Join(strings.Fields(err.Error()), " ")
+	detail = probeProxyCredentialPattern.ReplaceAllString(detail, "$1://<凭据已隐藏>@")
+	detail = probeBearerPattern.ReplaceAllString(detail, "Bearer <凭据已隐藏>")
+	if len(detail) > 1000 {
+		detail = detail[:1000] + "…"
+	}
+	if detail == "" {
+		return fmt.Errorf("探测连接失败")
+	}
+	return fmt.Errorf("探测连接失败：%s", detail)
+}
+
 func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (result *Ticket, resultErr error) {
 	p.mu.Lock()
 	cfg := p.cfg
@@ -346,7 +368,7 @@ func (p *Prober) ExecuteProbe(ctx context.Context, proxyURL string) (result *Tic
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		p.totalFailed.Add(1)
-		return nil, fmt.Errorf("探测连接失败，请检查所选来源和代理连通性")
+		return nil, formatProbeNetworkError(err)
 	}
 	defer func() {
 		_ = httpResp.Body.Close()

@@ -98,6 +98,7 @@ func testProxySource(ctx context.Context, client *http.Client, source string, pr
 	result.Stage = "proxy"
 	result.SourceProxyCount = len(proxies)
 	result.ProxyURL = proxies[0]
+	result.Proxies = proxies
 	latency, errProbe := probe(ctx, proxies[0])
 	result.LatencyMs = latency
 	result.Success = errProbe == nil

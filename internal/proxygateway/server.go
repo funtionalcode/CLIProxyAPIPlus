@@ -6,10 +6,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxytrace"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -98,7 +100,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
-	upstream := s.poolMgr.NextProxy()
+	selection := s.poolMgr.NextSelection()
+	upstream := selection.Proxy
+	traceID := strings.TrimSpace(r.Header.Get(proxyutil.GatewayTraceHeader))
+	if len(traceID) == 32 && isSafeGatewayTraceID(traceID) {
+		proxytrace.Record(traceID, proxytrace.Route{
+			Pool:   selection.Pool,
+			Proxy:  redactProxyEndpoint(upstream),
+			Target: r.Host,
+		})
+	}
 
 	dialer, _, err := proxyutil.BuildDialer(upstream)
 	if err != nil {
@@ -156,7 +167,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	upstream := s.poolMgr.NextProxy()
+	selection := s.poolMgr.NextSelection()
+	upstream := selection.Proxy
 
 	transport, _, err := proxyutil.BuildHTTPTransport(upstream)
 	if err != nil {
@@ -195,6 +207,29 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func isSafeGatewayTraceID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < 'a' || ch > 'f') && (ch < '0' || ch > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func redactProxyEndpoint(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return "direct"
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid proxy>"
+	}
+	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String()
 }
 
 // Metrics returns runtime statistics.

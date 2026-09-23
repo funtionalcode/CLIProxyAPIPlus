@@ -67,7 +67,7 @@ func TestSourceProbeUsesFetchedProxyAndReportsStages(t *testing.T) {
 			}
 			return 12, nil
 		})
-		if calls != 1 || result.Success == fail || result.Stage != "proxy" || result.SourceProxyCount != 2 || result.LatencyMs != 12 {
+		if calls != 1 || result.Success == fail || result.Stage != "proxy" || result.SourceProxyCount != 2 || len(result.Proxies) != 2 || result.LatencyMs != 12 {
 			t.Fatalf("unexpected result: %+v calls=%d", result, calls)
 		}
 	}

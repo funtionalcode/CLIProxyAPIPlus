@@ -3,6 +3,7 @@ package turnstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -131,6 +132,27 @@ func TestProbeDoesNotAutomaticallyChooseAccount(t *testing.T) {
 	probed, success, failed := p.Metrics()
 	if len(events) != 1 || events[0].Outcome != "failed" || probed != 1 || success != 0 || failed != 1 {
 		t.Fatal("missing failed probe record")
+	}
+}
+
+func TestProbeNetworkErrorIncludesCauseAndRedactsCredentials(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{TurnState: config.CodexTurnStateConfig{Probe: config.CodexTurnStateProbeConfig{
+		AuthSource: "external", APIKey: "external-secret", BaseURL: "https://chatgpt.com/backend-api/codex", Model: "test-model",
+	}}}}
+	p := NewProber(NewPool(5, 160, time.Minute), nil, cfg, nil)
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", mockRoundTripper(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("proxyconnect tcp: dial via http://user:proxy-password@192.0.2.10:8080: connection refused")
+	}))
+	_, err := p.ExecuteProbe(ctx, "")
+	if err == nil || !strings.Contains(err.Error(), "connection refused") || !strings.Contains(err.Error(), "192.0.2.10:8080") {
+		t.Fatalf("expected detailed network error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "proxy-password") || strings.Contains(err.Error(), "user:") {
+		t.Fatalf("network error leaked proxy credentials: %v", err)
+	}
+	events, _ := p.events.snapshot()
+	if len(events) != 1 || events[0].Message != err.Error() {
+		t.Fatalf("detailed network error was not recorded: %+v", events)
 	}
 }
 
