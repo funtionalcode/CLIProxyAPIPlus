@@ -33,7 +33,7 @@ func TestCodexExecutor_TurnState_InjectionAndFeedback(t *testing.T) {
 		Codex: config.CodexConfig{
 			TurnState: config.CodexTurnStateConfig{
 				Enabled:        true,
-				InjectBusiness: boolPtr(true),
+				InjectBusiness: turnStateBoolPtr(true),
 				ForceInject:    true,
 				MinLength:      160,
 			},
@@ -41,6 +41,7 @@ func TestCodexExecutor_TurnState_InjectionAndFeedback(t *testing.T) {
 	}
 
 	mgr := turnstate.GetManager()
+	t.Cleanup(func() { mgr.UpdateConfig(&config.Config{}) })
 	mgr.UpdateConfig(cfg)
 	mgr.Pool().Push(&turnstate.Ticket{
 		State:      highComputeTicket,
@@ -87,6 +88,6 @@ func TestCodexExecutor_TurnState_InjectionAndFeedback(t *testing.T) {
 	}
 }
 
-func boolPtr(b bool) *bool {
+func turnStateBoolPtr(b bool) *bool {
 	return &b
 }

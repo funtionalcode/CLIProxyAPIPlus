@@ -24,8 +24,10 @@ var oauthProviders = []oauthProvider{
 	{"Claude (Anthropic)", "anthropic-auth-url", "🟧", false},
 	{"Codex (OpenAI)", "codex-auth-url", "🟩", false},
 	{"Antigravity", "antigravity-auth-url", "🟪", false},
-	{"Kimi", "kimi-auth-url", "🟫", true},
+	{"Kimi (kimi.com)", "kimi-auth-url", "🟫", true},
+	{"Kimi (kimi.ai)", "kimi-ai-auth-url", "🟫", true},
 	{"xAI", "xai-auth-url", "⬛", true},
+	{"Meta", "meta-auth-url", "🔵", true},
 }
 
 // oauthTabModel handles OAuth login flows.
@@ -375,6 +377,10 @@ func oauthCallbackProviderKey(apiPath string) string {
 		return "codex"
 	case "antigravity-auth-url":
 		return "antigravity"
+	case "kimi-ai-auth-url":
+		return "kimi-ai"
+	case "meta-auth-url":
+		return "meta"
 	case "kimi-auth-url":
 		return "kimi"
 	case "xai-auth-url":

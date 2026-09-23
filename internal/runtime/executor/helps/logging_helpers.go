@@ -47,6 +47,7 @@ type UpstreamRequestLog struct {
 type upstreamAttempt struct {
 	index                int
 	request              string
+	requestRecorded      bool
 	response             *strings.Builder
 	responseSource       *logging.FileBodySource
 	responseIntroWritten bool
@@ -115,10 +116,11 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	}
 
 	attempt := &upstreamAttempt{
-		index:          index,
-		request:        requestText,
-		response:       &strings.Builder{},
-		responseSource: apiResponseSourceOrNil(ginCtx),
+		index:           index,
+		request:         requestText,
+		requestRecorded: true,
+		response:        &strings.Builder{},
+		responseSource:  apiResponseSourceOrNil(ginCtx),
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
@@ -179,7 +181,10 @@ func shouldRecordHTTPAttempt(ginCtx *gin.Context) bool {
 	if last == nil {
 		return true
 	}
-	if strings.TrimSpace(last.request) == "" {
+	if !last.requestRecorded && strings.TrimSpace(last.request) == "" {
+		return true
+	}
+	if last.responseIntroWritten {
 		return true
 	}
 	if last.response == nil {

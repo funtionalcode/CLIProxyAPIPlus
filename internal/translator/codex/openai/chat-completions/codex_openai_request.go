@@ -10,9 +10,9 @@ import (
 	"strconv"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"strings"
 )
 
 // ConvertOpenAIRequestToCodex converts an OpenAI Chat Completions request JSON
@@ -78,33 +78,23 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	functionToolNames := map[string]struct{}{}
 	{
 		if tools.IsArray() && len(toolResults) > 0 {
-			var names []string
-			seenNames := map[string]struct{}{}
 			for _, tool := range toolResults {
-				var name string
 				switch tool.Get("type").String() {
 				case "function":
-					name = tool.Get("function.name").String()
-					functionToolNames[name] = struct{}{}
+					functionToolNames[tool.Get("function.name").String()] = struct{}{}
 				case "custom":
-					name = tool.Get("name").String()
-					customToolNames[name] = struct{}{}
+					customToolNames[tool.Get("name").String()] = struct{}{}
 				}
-				if name != "" {
-					if _, seen := seenNames[name]; !seen {
-						names = append(names, name)
-						seenNames[name] = struct{}{}
-					}
-				}
-			}
-			if len(names) > 0 {
-				originalToolNameMap = ir.BuildOriginalToShortNameMap(names)
 			}
 			// A normalized function envelope cannot disambiguate declarations that share a name.
 			// Preserve function behavior for such ambiguous names.
 			for name := range functionToolNames {
 				delete(customToolNames, name)
 			}
+		}
+		allNames := collectRequestToolNames(rawJSON)
+		if len(allNames) > 0 {
+			originalToolNameMap = buildShortNameMap(allNames)
 		}
 	}
 
@@ -467,6 +457,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					}
 					if v := fn.Get("strict"); v.Exists() {
 						item, _ = sjson.SetBytes(item, "strict", v.Value())
+					} else {
+						// Chat Completions defaults strict to false while the Responses API
+						// defaults it to true, so an omitted value must be forwarded explicitly.
+						item, _ = sjson.SetBytes(item, "strict", false)
 					}
 				}
 				toolItems = append(toolItems, item)
@@ -631,6 +625,151 @@ func toolOutputFallbackPart(item gjson.Result) []byte {
 	return part
 }
 
+// sanitizeToolName normalizes a tool name by replacing any character outside
+// [a-zA-Z0-9_-] with an underscore so it conforms to Codex upstream requirements.
+func sanitizeToolName(name string) string {
+	if name == "" {
+		return ""
+	}
+	var sb strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteByte('_')
+		}
+	}
+	return sb.String()
+}
+
+// shortenNameIfNeeded normalizes invalid characters and applies the shortening rule for a single name.
+// If the name length exceeds 64, it will try to preserve the "mcp__" prefix and last segment.
+// Otherwise it truncates to 64 characters.
 func shortenNameIfNeeded(name string) string {
-	return ir.ShortenToolNameOnly(name)
+	const limit = 64
+	sanitized := sanitizeToolName(name)
+	if len(sanitized) <= limit {
+		return sanitized
+	}
+	if strings.HasPrefix(sanitized, "mcp__") {
+		// Keep prefix and last segment after '__'
+		idx := strings.LastIndex(sanitized, "__")
+		if idx > 0 {
+			candidate := "mcp__" + sanitized[idx+2:]
+			if len(candidate) > limit {
+				return candidate[:limit]
+			}
+			return candidate
+		}
+	}
+	return sanitized[:limit]
+}
+
+// collectRequestToolNames extracts unique tool names across tools declarations,
+// tool_choice, and historical assistant tool_calls in a deterministic order.
+func collectRequestToolNames(rawJSON []byte) []string {
+	var names []string
+	seen := map[string]struct{}{}
+	addName := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; !ok {
+			names = append(names, name)
+			seen[name] = struct{}{}
+		}
+	}
+
+	// 1. tools declarations
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if tools.IsArray() {
+		for _, tool := range tools.Array() {
+			switch tool.Get("type").String() {
+			case "function":
+				addName(tool.Get("function.name").String())
+			case "custom":
+				addName(tool.Get("name").String())
+			}
+		}
+	}
+
+	// 2. tool_choice
+	tc := gjson.GetBytes(rawJSON, "tool_choice")
+	if tc.IsObject() {
+		switch tc.Get("type").String() {
+		case "function":
+			fnName := tc.Get("function.name").String()
+			if fnName == "" {
+				fnName = tc.Get("name").String()
+			}
+			addName(fnName)
+		case "custom":
+			addName(tc.Get("name").String())
+		}
+	}
+
+	// 3. assistant tool_calls in messages
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if messages.IsArray() {
+		for _, msg := range messages.Array() {
+			if msg.Get("role").String() == "assistant" {
+				toolCalls := msg.Get("tool_calls")
+				if toolCalls.IsArray() {
+					for _, tc := range toolCalls.Array() {
+						fnName := tc.Get("function.name").String()
+						if fnName != "" {
+							addName(fnName)
+						} else {
+							addName(tc.Get("custom.name").String())
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return names
+}
+
+// buildShortNameMap generates unique short names (<=64) for the given list of names.
+// It preserves the "mcp__" prefix with the last segment when possible and ensures uniqueness
+// by appending suffixes like "_1", "_2" if needed.
+func buildShortNameMap(names []string) map[string]string {
+	const limit = 64
+	used := map[string]struct{}{}
+	m := map[string]string{}
+
+	baseCandidate := func(n string) string {
+		return shortenNameIfNeeded(n)
+	}
+
+	makeUnique := func(cand string) string {
+		if _, ok := used[cand]; !ok {
+			return cand
+		}
+		base := cand
+		for i := 1; ; i++ {
+			suffix := "_" + strconv.Itoa(i)
+			allowed := limit - len(suffix)
+			if allowed < 0 {
+				allowed = 0
+			}
+			tmp := base
+			if len(tmp) > allowed {
+				tmp = tmp[:allowed]
+			}
+			tmp = tmp + suffix
+			if _, ok := used[tmp]; !ok {
+				return tmp
+			}
+		}
+	}
+
+	for _, n := range names {
+		cand := baseCandidate(n)
+		uniq := makeUnique(cand)
+		used[uniq] = struct{}{}
+		m[n] = uniq
+	}
+	return m
 }

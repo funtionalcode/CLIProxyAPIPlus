@@ -36,6 +36,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kilo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
@@ -483,7 +484,8 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return true
 	}
-	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL)
+	metadata := queryValuesToMetadata(c.Request.URL.Query())
+	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL, metadata)
 	if !handled {
 		return false
 	}
@@ -515,6 +517,14 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 // ListAuthFiles returns auth metadata. page/page_size enable bounded responses;
 // include_balances=true explicitly opts into synchronous remote balance lookups.
 func (h *Handler) ListAuthFiles(c *gin.Context) {
+	observedAt := time.Now().UTC()
+	h.mu.Lock()
+	host := h.pluginHost
+	h.mu.Unlock()
+	var quotaSupported map[string]struct{}
+	if host != nil {
+		quotaSupported = host.QuotaSupportedProvidersSet(c.Request.Context())
+	}
 	if h == nil {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
 		return
@@ -536,7 +546,11 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		bounds := calculateAuthFilePageBounds(len(auths), options)
 		files := make([]gin.H, 0, bounds.end-bounds.start)
 		for _, auth := range auths[bounds.start:bounds.end] {
-			if entry := h.buildAuthFileEntry(auth, options.includeBalances); entry != nil {
+			if entry := h.buildAuthFileEntry(auth, options.includeBalances, quotaSupported); entry != nil {
+				entry["cooldowns"] = nil
+				if !h.authManager.HomeEnabled() {
+					entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
+				}
 				files = append(files, entry)
 			}
 		}
@@ -545,14 +559,18 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	}
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
-		if entry := h.buildAuthFileEntry(auth, options.includeBalances); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, options.includeBalances, quotaSupported); entry != nil {
+			entry["cooldowns"] = nil
+			if !h.authManager.HomeEnabled() {
+				entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
+			}
 			files = append(files, entry)
 		}
 	}
 	sort.SliceStable(files, func(i, j int) bool {
 		return compareAuthFileEntries(files[i], files[j]) < 0
 	})
-	c.JSON(200, gin.H{"files": files})
+	c.JSON(200, gin.H{"observed_at": observedAt, "files": files})
 }
 
 func parseAuthFileListOptions(c *gin.Context) (authFileListOptions, error) {
@@ -656,6 +674,8 @@ func writeAuthFilesResponse(c *gin.Context, files []gin.H, total int, bounds aut
 		"page_size":   options.pageSize,
 		"total":       total,
 		"total_pages": bounds.totalPages,
+		"has_more":    bounds.end < total,
+		"observed_at": time.Now().UTC(),
 	})
 }
 
@@ -773,6 +793,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 // List auth files from disk when the auth manager is unavailable.
 func (h *Handler) listAuthFilesFromDisk(c *gin.Context, options authFileListOptions) {
+	observedAt := time.Now().UTC()
 	nameFilter := strings.TrimSpace(c.Query("name"))
 	authIndexFilter := strings.TrimSpace(c.Query("auth_index"))
 	entries, err := os.ReadDir(h.cfg.AuthDir)
@@ -787,7 +808,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, options authFileListOpti
 			writeAuthFilesResponse(c, []gin.H{}, 0, bounds, options)
 			return
 		}
-		c.JSON(200, gin.H{"files": []gin.H{}})
+		c.JSON(200, gin.H{"files": []gin.H{}, "observed_at": observedAt})
 		return
 	}
 	for _, entry := range entries {
@@ -822,7 +843,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, options authFileListOpti
 			continue
 		}
 		if info, errInfo := e.Info(); errInfo == nil {
-			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
+			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime(), "cooldowns": nil}
 
 			// Read file to get type field
 			full := filepath.Join(h.cfg.AuthDir, name)
@@ -908,7 +929,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, options authFileListOpti
 		writeAuthFilesResponse(c, files, len(jsonEntries), bounds, options)
 		return
 	}
-	c.JSON(200, gin.H{"files": files})
+	c.JSON(200, gin.H{"files": files, "observed_at": observedAt})
 }
 
 func normalizeAuthFilePlan(value string) string {
@@ -975,13 +996,13 @@ func compareAuthFileEntries(left gin.H, right gin.H) int {
 	return strings.Compare(strings.ToLower(nameI), strings.ToLower(nameJ))
 }
 
-func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, includeBalances bool) gin.H {
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, includeBalances bool, quotaSupported ...map[string]struct{}) gin.H {
 	authFileEntryMu.Lock()
 	defer authFileEntryMu.Unlock()
-	return h.buildAuthFileEntryLocked(auth, includeBalances)
+	return h.buildAuthFileEntryLocked(auth, includeBalances, quotaSupported...)
 }
 
-func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances bool) gin.H {
+func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances bool, quotaSupported ...map[string]struct{}) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -998,6 +1019,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances 
 	if name == "" {
 		name = auth.ID
 	}
+	unavailable, status, statusMessage, nextRetryAfter := reconcileAuthFileCooldownState(auth, time.Now().UTC())
 	entry := gin.H{
 		"id":             auth.ID,
 		"auth_index":     auth.Index,
@@ -1005,10 +1027,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances 
 		"type":           strings.TrimSpace(auth.Provider),
 		"provider":       strings.TrimSpace(auth.Provider),
 		"label":          auth.Label,
-		"status":         auth.Status,
-		"status_message": auth.StatusMessage,
+		"status":         status,
+		"status_message": statusMessage,
 		"disabled":       auth.Disabled,
-		"unavailable":    auth.Unavailable,
+		"unavailable":    unavailable,
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
@@ -1026,6 +1048,30 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances 
 	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
+	}
+	var quotaSupportedMap map[string]struct{}
+	if len(quotaSupported) > 0 {
+		quotaSupportedMap = quotaSupported[0]
+	}
+	if quotaSupportedMap != nil {
+		if _, ok := quotaSupportedMap[strings.ToLower(strings.TrimSpace(auth.Provider))]; ok {
+			entry["supports_quota"] = true
+			entry["quota_provider"] = auth.Provider
+		}
+	} else {
+		h.mu.Lock()
+		host := h.pluginHost
+		h.mu.Unlock()
+		if host != nil && host.HasQuotaProvider(auth.Provider) {
+			entry["supports_quota"] = true
+			entry["quota_provider"] = auth.Provider
+		}
+	}
+	if auth.Metadata != nil {
+		if probe, okProbe := auth.Metadata["quota_probe"]; okProbe && probe != nil {
+			entry["supports_quota"] = true
+			entry["quota_probe"] = probe
+		}
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
@@ -1051,8 +1097,8 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, includeBalances 
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
 	}
-	if !auth.NextRetryAfter.IsZero() {
-		entry["next_retry_after"] = auth.NextRetryAfter
+	if !nextRetryAfter.IsZero() {
+		entry["next_retry_after"] = nextRetryAfter
 	}
 	if path != "" {
 		entry["path"] = path
@@ -2440,6 +2486,11 @@ func (h *Handler) writeAuthFileWithGuard(ctx context.Context, name string, data 
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
 		return err
 	}
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, auth); errHook != nil {
+			return fmt.Errorf("post-auth persist hook failed: %w", errHook)
+		}
+	}
 	return nil
 }
 
@@ -3067,6 +3118,14 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
+	h.authStatusMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			h.authStatusMu.Unlock()
+		}
+	}()
+
 	ctx := c.Request.Context()
 
 	targetAuth, _ := h.lookupAuthFile(name, authIndex)
@@ -3081,12 +3140,20 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
 			return
 		}
-		if errPatch := h.patchPluginVirtualSourceStatus(ctx, targetAuth, *req.Disabled); errPatch != nil {
+		hookAuths, errPatch := h.patchPluginVirtualSourceStatus(ctx, targetAuth, *req.Disabled)
+		if errPatch != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(errPatch, errAuthFileNotFound) || os.IsNotExist(errPatch) {
 				status = http.StatusNotFound
 			}
 			c.JSON(status, gin.H{"error": errPatch.Error()})
+			return
+		}
+		locked = false
+		h.authStatusMu.Unlock()
+		if errHook := h.invokePostAuthPersistHooks(ctx, hookAuths); errHook != nil {
+			log.Errorf("post-auth persist hook failed for plugin virtual source status update on %s: %v", targetAuth.ID, errHook)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to synchronize plugin virtual auth: %v", errHook)})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
@@ -3125,8 +3192,20 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	applyAuthDisabledState(targetAuth, *req.Disabled)
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	hookAuth := updatedAuth
+	if hookAuth == nil {
+		hookAuth = targetAuth
+	}
+	locked = false
+	h.authStatusMu.Unlock()
+	if errHook := h.invokePostAuthPersistHooks(ctx, []*coreauth.Auth{hookAuth}); errHook != nil {
+		log.Errorf("post-auth persist hook failed for status update on %s: %v", targetAuth.ID, errHook)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to synchronize auth runtime: %v", errHook)})
 		return
 	}
 
@@ -3135,24 +3214,25 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 // patchPluginVirtualSourceStatus toggles disabled on a plugin multi-auth source file and all
 // runtime auths expanded from it. Virtual project children cannot be toggled independently.
-func (h *Handler) patchPluginVirtualSourceStatus(ctx context.Context, targetAuth *coreauth.Auth, disabled bool) error {
+func (h *Handler) patchPluginVirtualSourceStatus(ctx context.Context, targetAuth *coreauth.Auth, disabled bool) ([]*coreauth.Auth, error) {
 	if h == nil || h.authManager == nil || targetAuth == nil {
-		return fmt.Errorf("core auth manager unavailable")
+		return nil, fmt.Errorf("core auth manager unavailable")
 	}
 	sourcePath := strings.TrimSpace(authAttribute(targetAuth, coreauth.AttributeVirtualSource))
 	if sourcePath == "" {
 		sourcePath = strings.TrimSpace(authAttribute(targetAuth, "path"))
 	}
 	if sourcePath == "" {
-		return errPluginVirtualAuth
+		return nil, errPluginVirtualAuth
 	}
 	if errWrite := setSourceAuthFileDisabled(sourcePath, disabled); errWrite != nil {
 		if os.IsNotExist(errWrite) {
-			return errAuthFileNotFound
+			return nil, errAuthFileNotFound
 		}
-		return fmt.Errorf("failed to update source auth file: %w", errWrite)
+		return nil, fmt.Errorf("failed to update source auth file: %w", errWrite)
 	}
 	now := time.Now()
+	hookAuths := make([]*coreauth.Auth, 0)
 	for _, auth := range h.authManager.List() {
 		if auth == nil {
 			continue
@@ -3163,11 +3243,17 @@ func (h *Handler) patchPluginVirtualSourceStatus(ctx context.Context, targetAuth
 		}
 		applyAuthDisabledState(auth, disabled)
 		auth.UpdatedAt = now
-		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
-			return fmt.Errorf("failed to update auth %s: %w", auth.ID, errUpdate)
+		updated, errUpdate := h.authManager.Update(ctx, auth)
+		if errUpdate != nil {
+			return nil, fmt.Errorf("failed to update auth %s: %w", auth.ID, errUpdate)
 		}
+		hookAuth := updated
+		if hookAuth == nil {
+			hookAuth = auth
+		}
+		hookAuths = append(hookAuths, hookAuth)
 	}
-	return nil
+	return hookAuths, nil
 }
 
 func setSourceAuthFileDisabled(path string, disabled bool) error {
@@ -3354,9 +3440,20 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	updatedAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, updatedAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, updatedAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
+	}
+	if h.postAuthPersistHook != nil {
+		hookAuth := updatedAuth
+		if hookAuth == nil {
+			hookAuth = targetAuth
+		}
+		if errHook := h.postAuthPersistHook(ctx, hookAuth); errHook != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("post-auth persist hook failed: %v", errHook)})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -3595,6 +3692,11 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	}
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
+	}
+	if _, ok := touchedRoots["plan_type"]; ok {
+		syncAuthFilePlanTypeAttribute(auth)
+	} else if _, ok := touchedRoots["id_token"]; ok {
+		syncAuthFilePlanTypeAttribute(auth)
 	}
 }
 
@@ -3877,14 +3979,33 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
+	legacyClaudeCredential, errLegacy := claude.FindMatchingLegacyCredential(ctx, store, record)
+	if errLegacy != nil {
+		return "", errLegacy
+	}
+	if legacyClaudeCredential != nil {
+		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
+	}
 	if h.postAuthHook != nil {
 		if err := h.postAuthHook(ctx, record); err != nil {
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
-	savedPath, errSave := store.Save(ctx, record)
+	savedPath, errSave := store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if errSave != nil {
 		return savedPath, errSave
+	}
+	if legacyClaudeCredential != nil {
+		if strings.TrimSpace(savedPath) == "" {
+			return "", fmt.Errorf("canonical Claude credential was not persisted; legacy credential retained")
+		}
+		legacyID := strings.TrimSpace(legacyClaudeCredential.ID)
+		if legacyID == "" {
+			legacyID = strings.TrimSpace(legacyClaudeCredential.FileName)
+		}
+		if errDelete := store.Delete(ctx, legacyID); errDelete != nil {
+			return savedPath, fmt.Errorf("canonical Claude credential saved but legacy credential cleanup failed: %w", errDelete)
+		}
 	}
 	if h.postAuthPersistHook != nil {
 		persistedRecord := record
@@ -4209,10 +4330,11 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if len(tokenStorage.DeviceIDs) > 0 {
 			metadata[claude.ClaudeDeviceIDsMetadataKey] = append([]string(nil), tokenStorage.DeviceIDs...)
 		}
+		fileName := claude.CredentialFileName(tokenStorage.Email, tokenStorage.OrganizationUUID, tokenStorage.AccountUUID)
 		record := &coreauth.Auth{
-			ID:       fmt.Sprintf("claude-%s.json", tokenStorage.Email),
+			ID:       fileName,
 			Provider: "claude",
-			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
+			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: metadata,
 			ProxyURL: loginProxy,
@@ -5243,105 +5365,13 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestKimiToken(c *gin.Context) {
-	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
-
-	loginProxy, okProxy := resolveLoginProxyURL(c)
-	if !okProxy {
-		return
+	domain := kimi.KimiDefaultDomain
+	if qDomain := strings.TrimSpace(c.Query("domain")); qDomain != "" {
+		domain = qDomain
+	} else if qChan := strings.TrimSpace(c.Query("channel")); qChan != "" {
+		domain = qChan
 	}
-
-	fmt.Println("Initializing Kimi authentication...")
-
-	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
-	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuth(withLoginProxy(h.cfg, loginProxy))
-
-	// Generate authorization URL
-	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
-	if errStartDeviceFlow != nil {
-		log.Errorf("Failed to generate authorization URL: %v", errStartDeviceFlow)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return
-	}
-	authURL := deviceFlow.VerificationURIComplete
-	if authURL == "" {
-		authURL = deviceFlow.VerificationURI
-	}
-
-	RegisterOAuthSession(state, "kimi")
-
-	go func() {
-		pollCtx, cancelPoll := context.WithCancel(ctx)
-		defer cancelPoll()
-		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "kimi")
-
-		fmt.Println("Waiting for authentication...")
-		authBundle, errWaitForAuthorization := kimiAuth.WaitForAuthorization(pollCtx, deviceFlow)
-		if errWaitForAuthorization != nil {
-			if !IsOAuthSessionPending(state, "kimi") {
-				return
-			}
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
-			fmt.Printf("Authentication failed: %v\n", errWaitForAuthorization)
-			return
-		}
-		if !IsOAuthSessionPending(state, "kimi") {
-			return
-		}
-
-		// Create token storage
-		tokenStorage := kimiAuth.CreateTokenStorage(authBundle)
-
-		metadata := map[string]any{
-			"type":          "kimi",
-			"access_token":  authBundle.TokenData.AccessToken,
-			"refresh_token": authBundle.TokenData.RefreshToken,
-			"token_type":    authBundle.TokenData.TokenType,
-			"scope":         authBundle.TokenData.Scope,
-			"timestamp":     time.Now().UnixMilli(),
-		}
-		if authBundle.TokenData.ExpiresAt > 0 {
-			expired := time.Unix(authBundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
-			metadata["expired"] = expired
-		}
-		if strings.TrimSpace(authBundle.DeviceID) != "" {
-			metadata["device_id"] = strings.TrimSpace(authBundle.DeviceID)
-		}
-
-		fileName := fmt.Sprintf("kimi-%d.json", time.Now().UnixMilli())
-		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "kimi",
-			FileName: fileName,
-			Label:    "Kimi User",
-			Storage:  tokenStorage,
-			Metadata: metadata,
-			ProxyURL: loginProxy,
-		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "kimi"); errGuard != nil {
-			return
-		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
-		if errSave != nil {
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
-			return
-		}
-
-		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		fmt.Println("You can now use Kimi services through this CLI")
-		CompleteOAuthSession(state)
-	}()
-
-	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
-	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
-		response["user_code"] = userCode
-	}
-	if deviceFlow.ExpiresIn > 0 {
-		response["expires_in"] = deviceFlow.ExpiresIn
-	}
-	c.JSON(200, response)
+	h.requestKimiTokenWithDomain(c, domain)
 }
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
@@ -6878,4 +6908,474 @@ func codexRefreshPreservedMetadata(fileData []byte) map[string]any {
 		return nil
 	}
 	return metadata
+}
+
+func (h *Handler) invokePostAuthPersistHooks(ctx context.Context, auths []*coreauth.Auth) error {
+	if h == nil || h.postAuthPersistHook == nil {
+		return nil
+	}
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if errHook := h.postAuthPersistHook(ctx, auth); errHook != nil {
+			return errHook
+		}
+	}
+	return nil
+}
+
+func syncAuthFilePlanTypeAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	newPlanType := ""
+	if auth.Metadata != nil {
+		if ptRaw, ok := auth.Metadata["plan_type"].(string); ok && strings.TrimSpace(ptRaw) != "" {
+			newPlanType = strings.TrimSpace(ptRaw)
+		} else if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
+			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
+				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
+					newPlanType = pt
+				}
+			}
+		}
+	}
+	if newPlanType != "" {
+		auth.Attributes["plan_type"] = newPlanType
+	} else {
+		delete(auth.Attributes, "plan_type")
+	}
+}
+
+func queryValuesToMetadata(values url.Values) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	metadata := make(map[string]any, len(values))
+	for k, v := range values {
+		if len(v) == 1 {
+			metadata[k] = v[0]
+		} else if len(v) > 1 {
+			metadata[k] = append([]string(nil), v...)
+		}
+	}
+	return metadata
+}
+
+func (h *Handler) RequestMetaToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Meta authentication...")
+
+	state := fmt.Sprintf("meta-%d", time.Now().UnixNano())
+	authSvc := metaauth.NewMetaAuth(h.cfg)
+
+	deviceFlow, errStartDeviceFlow := authSvc.StartDeviceFlow(ctx)
+	if errStartDeviceFlow != nil {
+		log.Errorf("Failed to start Meta device flow: %v", errStartDeviceFlow)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
+		return
+	}
+	authURL := strings.TrimSpace(deviceFlow.VerificationURIComplete)
+	if authURL == "" {
+		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
+	}
+
+	RegisterOAuthSession(state, "meta")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "meta")
+
+		fmt.Println("Waiting for Meta authentication...")
+		bundle, errWaitForAuthorization := authSvc.WaitForAuthorization(pollCtx, deviceFlow)
+		if errWaitForAuthorization != nil {
+			if !IsOAuthSessionPending(state, "meta") {
+				return
+			}
+			log.Errorf("Meta authentication failed: %v", errWaitForAuthorization)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
+			return
+		}
+		if !IsOAuthSessionPending(state, "meta") {
+			return
+		}
+
+		tokenStorage := authSvc.CreateTokenStorage(bundle)
+		if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
+			log.Error("Meta token exchange returned empty access token")
+			SetOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+
+		fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
+		label := strings.TrimSpace(tokenStorage.Email)
+		if label == "" {
+			label = "Meta"
+		}
+
+		metadata := map[string]any{
+			"type":         "meta",
+			"access_token": tokenStorage.AccessToken,
+			"token_type":   tokenStorage.TokenType,
+			"expires_in":   tokenStorage.ExpiresIn,
+			"expired":      tokenStorage.Expired,
+			"last_refresh": tokenStorage.LastRefresh,
+			"base_url":     tokenStorage.BaseURL,
+			"auth_kind":    "oauth",
+		}
+		if tokenStorage.DCAExpired != "" {
+			metadata["dca_expired"] = tokenStorage.DCAExpired
+		}
+		if tokenStorage.DCAExpiresAt > 0 {
+			metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
+		}
+		if tokenStorage.APIKey != "" {
+			metadata["api_key"] = tokenStorage.APIKey
+		}
+		if tokenStorage.DCAToken != "" {
+			metadata["dca_token"] = tokenStorage.DCAToken
+		}
+		if tokenStorage.Email != "" {
+			metadata["email"] = tokenStorage.Email
+		}
+		if tokenStorage.Name != "" {
+			metadata["name"] = tokenStorage.Name
+		}
+
+		attrs := map[string]string{
+			"auth_kind": "oauth",
+			"base_url":  tokenStorage.BaseURL,
+		}
+		if tokenStorage.APIKey != "" {
+			attrs["api_key"] = tokenStorage.APIKey
+		}
+		if tokenStorage.DCAToken != "" {
+			attrs["dca_token"] = tokenStorage.DCAToken
+		}
+		if tokenStorage.Email != "" {
+			attrs["email"] = tokenStorage.Email
+		}
+
+		record := &coreauth.Auth{
+			ID:         fileName,
+			Provider:   "meta",
+			FileName:   fileName,
+			Label:      label,
+			Storage:    tokenStorage,
+			Metadata:   metadata,
+			Attributes: attrs,
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "meta"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Meta token to file: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token to file")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Meta services through this CLI")
+	}()
+
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
+	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
+		response["user_code"] = userCode
+	}
+	if deviceFlow.ExpiresIn > 0 {
+		response["expires_in"] = deviceFlow.ExpiresIn
+	} else {
+		response["expires_in"] = int(metaauth.MaxPollDuration / time.Second)
+	}
+	c.JSON(200, response)
+}
+
+func (h *Handler) RequestKimiAIToken(c *gin.Context) {
+	h.requestKimiTokenWithDomain(c, kimi.KimiAIDomain)
+}
+
+func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
+	loginProxy, okProxy := resolveLoginProxyURL(c)
+	if !okProxy {
+		return
+	}
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	isAI := kimi.IsKimiAIDomain(domain)
+	displayName := "Kimi"
+	providerName := "kimi"
+	filePrefix := "kimi"
+	statePrefix := "kmi"
+	baseURL := kimi.KimiAPIBaseURL
+	if isAI {
+		displayName = "Kimi.ai"
+		providerName = "kimi-ai"
+		filePrefix = "kimi-ai"
+		statePrefix = "kmi-ai"
+		baseURL = kimi.KimiAIAPIBaseURL
+	}
+
+	fmt.Printf("Initializing %s authentication...\n", displayName)
+
+	state := fmt.Sprintf("%s-%d", statePrefix, time.Now().UnixNano())
+	// Initialize Kimi auth service
+	kimiAuth := kimi.NewKimiAuthWithDomain(withLoginProxy(h.cfg, loginProxy), domain)
+
+	// Generate authorization URL
+	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
+	if errStartDeviceFlow != nil {
+		log.Errorf("Failed to generate authorization URL: %v", errStartDeviceFlow)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+	authURL := deviceFlow.VerificationURIComplete
+	if authURL == "" {
+		authURL = deviceFlow.VerificationURI
+	}
+
+	RegisterOAuthSession(state, providerName)
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, providerName)
+
+		fmt.Printf("Waiting for %s authentication...\n", displayName)
+		authBundle, errWaitForAuthorization := kimiAuth.WaitForAuthorization(pollCtx, deviceFlow)
+		if errWaitForAuthorization != nil {
+			if !IsOAuthSessionPending(state, providerName) {
+				return
+			}
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
+			fmt.Printf("%s authentication failed: %v\n", displayName, errWaitForAuthorization)
+			return
+		}
+		if !IsOAuthSessionPending(state, providerName) {
+			return
+		}
+
+		// Create token storage
+		tokenStorage := kimiAuth.CreateTokenStorage(authBundle)
+		if isAI {
+			tokenStorage.Type = providerName
+		}
+
+		metadata := map[string]any{
+			"type":          providerName,
+			"access_token":  authBundle.TokenData.AccessToken,
+			"refresh_token": authBundle.TokenData.RefreshToken,
+			"token_type":    authBundle.TokenData.TokenType,
+			"scope":         authBundle.TokenData.Scope,
+			"timestamp":     time.Now().UnixMilli(),
+			"domain":        domain,
+			"base_url":      baseURL,
+		}
+		if authBundle.TokenData.ExpiresAt > 0 {
+			expired := time.Unix(authBundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
+			metadata["expired"] = expired
+		}
+		if strings.TrimSpace(authBundle.DeviceID) != "" {
+			metadata["device_id"] = strings.TrimSpace(authBundle.DeviceID)
+		}
+
+		fileName := fmt.Sprintf("%s-%d.json", filePrefix, time.Now().UnixMilli())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: providerName,
+			ProxyURL: loginProxy,
+			FileName: fileName,
+			Label:    fmt.Sprintf("%s User", displayName),
+			Storage:  tokenStorage,
+			Metadata: metadata,
+			Attributes: map[string]string{
+				"base_url": baseURL,
+				"domain":   domain,
+			},
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, providerName); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Printf("You can now use %s services through this CLI\n", displayName)
+		CompleteOAuthSession(state)
+	}()
+
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
+	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
+		response["user_code"] = userCode
+	}
+	if deviceFlow.ExpiresIn > 0 {
+		response["expires_in"] = deviceFlow.ExpiresIn
+	}
+	c.JSON(200, response)
+}
+
+func isPersistentAuthFailure(auth *coreauth.Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	// Terminal unauthorized failure with no refresh scheduled.
+	if coreauth.HasUnauthorizedAuthFailure(auth) {
+		return true
+	}
+	// An OAuth credential whose access token is expired cannot be used to serve requests.
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		return true
+	}
+	// An explicit token expiration status.
+	if strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "token expired") {
+		return true
+	}
+	return false
+}
+
+func isModelStateBlocked(state *coreauth.ModelState, now time.Time) bool {
+	if state == nil {
+		return false
+	}
+	if state.Status == coreauth.StatusDisabled {
+		return true
+	}
+	if !state.Unavailable && !state.Quota.Exceeded {
+		return false
+	}
+	hasRecoveryTime := !state.NextRetryAfter.IsZero() || (!state.Quota.NextRecoverAt.IsZero() && state.Quota.Exceeded)
+	if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
+		return true
+	}
+	if state.Quota.Exceeded && !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	if hasRecoveryTime {
+		return false
+	}
+	return true
+}
+
+func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavailable bool, status coreauth.Status, statusMessage string, nextRetry time.Time) {
+	if auth == nil {
+		return false, coreauth.StatusActive, "", time.Time{}
+	}
+	unavailable = auth.Unavailable
+	status = auth.Status
+	statusMessage = auth.StatusMessage
+	if !auth.NextRetryAfter.IsZero() {
+		nextRetry = auth.NextRetryAfter
+	}
+
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return unavailable, coreauth.StatusDisabled, statusMessage, nextRetry
+	}
+
+	// Never reconcile an active authentication or token failure to active.
+	if isPersistentAuthFailure(auth, now) {
+		if !nextRetry.IsZero() && !nextRetry.After(now) {
+			nextRetry = time.Time{}
+		}
+		return true, coreauth.StatusError, statusMessage, nextRetry
+	}
+
+	// Check if there is an active credential-level cooldown.
+	// Matching selector.availabilityBlock: if neither Unavailable nor Quota.Exceeded is true,
+	// an inactive timestamp does not block the credential.
+	hasActiveCredCooldown := false
+	if auth.Unavailable || auth.Quota.Exceeded {
+		if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+			hasActiveCredCooldown = true
+		}
+		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+			hasActiveCredCooldown = true
+			if nextRetry.IsZero() || auth.Quota.NextRecoverAt.After(nextRetry) {
+				nextRetry = auth.Quota.NextRecoverAt
+			}
+		}
+	}
+
+	// Check per-model states.
+	hasSchedulableModels := false
+	allSchedulableBlocked := true
+	hasActiveModelCooldown := false
+	hadAnyModelCooldown := false
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if state.Status == coreauth.StatusDisabled {
+			continue
+		}
+		hasSchedulableModels = true
+		if !state.NextRetryAfter.IsZero() || (state.Quota.Exceeded && !state.Quota.NextRecoverAt.IsZero()) {
+			hadAnyModelCooldown = true
+		}
+		if (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now)) ||
+			(state.Quota.Exceeded && !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now)) {
+			hasActiveModelCooldown = true
+		}
+		if !isModelStateBlocked(state, now) {
+			allSchedulableBlocked = false
+		}
+	}
+
+	hadCooldown := !auth.NextRetryAfter.IsZero() ||
+		(auth.Quota.Exceeded && !auth.Quota.NextRecoverAt.IsZero()) ||
+		hadAnyModelCooldown
+
+	// If there is an active credential cooldown, keep unavailable/error.
+	// If all recorded models are blocked and the credential itself was marked unavailable, keep unavailable/error.
+	if hasActiveCredCooldown || (hasSchedulableModels && allSchedulableBlocked && auth.Unavailable) {
+		if !nextRetry.IsZero() && !nextRetry.After(now) {
+			nextRetry = time.Time{}
+		}
+		return true, coreauth.StatusError, statusMessage, nextRetry
+	}
+
+	// If the credential was not marked unavailable and has no active credential cooldown, keep unavailable=false.
+	if !auth.Unavailable && !hasActiveCredCooldown {
+		if status == coreauth.StatusError && hasSchedulableModels && !allSchedulableBlocked {
+			status = coreauth.StatusActive
+			statusMessage = ""
+		}
+		return false, status, statusMessage, time.Time{}
+	}
+
+	// If a cooldown was recorded but has expired (and no active model cooldown blocks all models):
+	if hadCooldown && !hasActiveCredCooldown && !hasActiveModelCooldown {
+		return false, coreauth.StatusActive, "", time.Time{}
+	}
+
+	// If partial models are still cooling, the credential as a whole remains available for other models.
+	if hadCooldown && hasSchedulableModels && !allSchedulableBlocked {
+		if status == coreauth.StatusError && !hasActiveCredCooldown {
+			status = coreauth.StatusActive
+			statusMessage = ""
+		}
+		return false, status, statusMessage, time.Time{}
+	}
+
+	// If nextRetry is in the past, do not expose a past retry deadline.
+	if !nextRetry.IsZero() && !nextRetry.After(now) {
+		nextRetry = time.Time{}
+	}
+
+	return unavailable, status, statusMessage, nextRetry
 }

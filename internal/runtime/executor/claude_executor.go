@@ -165,6 +165,10 @@ func (e *ClaudeExecutor) persistClaudeDeviceHighWater(auth *cliproxyauth.Auth, a
 	}
 }
 
+func (e *ClaudeExecutor) modelLevelCooling() bool {
+	return e != nil && e.cfg != nil && e.cfg.Claude.ModelLevelCooling
+}
+
 func (e *ClaudeExecutor) upstreamRequestLogProvider() string {
 	if provider := strings.TrimSpace(e.requestLogProvider); provider != "" {
 		return provider
