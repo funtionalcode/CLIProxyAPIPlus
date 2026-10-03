@@ -201,6 +201,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				return false
 			}
 			payload = buildCodexWebsocketRequestBody(prepared.upstreamBody)
+			if len(payload) >= cliproxyexecutor.CodexWebsocketHTTPThreshold {
+				// Never move connection-scoped history to HTTP or replay a partially emitted turn.
+				// A new full-context request can select HTTP before opening an upstream socket.
+				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
+				return false
+			}
 			metadataMu.Lock()
 			if len(pending) >= 16 {
 				metadataMu.Unlock()

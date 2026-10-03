@@ -6,11 +6,33 @@ import (
 )
 
 type downstreamWebsocketContextKey struct{}
+type codexHTTPUpstreamContextKey struct{}
 type requireUpstreamWebsocketContextKey struct{}
 type upstreamAttemptTrackerContextKey struct{}
 
 type upstreamAttemptTracker struct {
 	attempted atomic.Bool
+}
+
+// CodexWebsocketHTTPThreshold is a conservative transport cutoff, not a context limit.
+// Large compaction requests can exceed the upstream websocket message limit.
+const CodexWebsocketHTTPThreshold = 16 << 20
+
+// WithCodexHTTPUpstream keeps downstream websocket semantics while selecting HTTP upstream.
+func WithCodexHTTPUpstream(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, codexHTTPUpstreamContextKey{}, true)
+}
+
+// CodexHTTPUpstream reports whether the handler is retaining HTTP continuation state.
+func CodexHTTPUpstream(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, _ := ctx.Value(codexHTTPUpstreamContextKey{}).(bool)
+	return enabled
 }
 
 // WithDownstreamWebsocket marks the current request as coming from a downstream websocket connection.

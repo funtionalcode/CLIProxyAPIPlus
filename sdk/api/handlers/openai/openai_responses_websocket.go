@@ -353,6 +353,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	passthroughModelName := ""
 	upstreamMode := responsesWebsocketUpstreamModeUnknown
 	upstreamWebsocketAuthID := ""
+	// Keep canonical history for subsequent small continuations after a large turn.
+	codexHTTPUpstream := false
 	sessionAuthByIDWithSource := func(authID string) (*coreauth.Auth, bool, bool) {
 		if h == nil || h.AuthManager == nil {
 			return nil, false, false
@@ -483,12 +485,25 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			}
 		}
+		providerSet, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(requestModelName))
+		_, codexModel := providerSet["codex"]
+		codexModel = codexModel && len(providerSet) == 1 && !routeOverridesModelResolution
+		if provider, _ := handlers.PreparedStreamProviderRoute(executionParent); provider == "codex" && !isPluginExecutorRoute {
+			codexModel = true
+		}
+		if codexModel && len(payload) >= cliproxyexecutor.CodexWebsocketHTTPThreshold && !codexHTTPUpstream {
+			codexHTTPUpstream = true
+			log.Infof("responses websocket: selecting HTTP for large codex request id=%s bytes=%d", passthroughSessionID, len(payload))
+		}
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth) {
 				provider := strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
 				useUpstreamWebsocketPassthrough = provider == "codex" || provider == "xai"
 			}
+		}
+		if codexModel && codexHTTPUpstream {
+			useUpstreamWebsocketPassthrough = false
 		}
 		nativeWebsocketPassthrough := !routeOverridesModelResolution && responsesWebsocketNativePassthroughAllowed(
 			upstreamMode,
@@ -689,7 +704,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		pinnedAuthAttempted := false
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
-		if duplexInput != nil {
+		if codexModel && codexHTTPUpstream {
+			cliCtx = cliproxyexecutor.WithCodexHTTPUpstream(cliCtx)
+		}
+		if duplexInput != nil && !(codexModel && codexHTTPUpstream) {
 			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
 			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
 				current, ok := sessionAuthByID(authID)
@@ -715,6 +733,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				return
 			}
 			attemptedUpstreamMode = upstreamModeForAuth(selectedAuth)
+			if cliproxyexecutor.CodexHTTPUpstream(cliCtx) && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex") {
+				attemptedUpstreamMode = responsesWebsocketUpstreamModeHTTP
+			}
 			codexDuplexStream.Store(duplexInput != nil && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 			preserveNativeOutput.Store(nativeRequest && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 		})
