@@ -7,6 +7,35 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertGeminiRequestToClaude_ParameterlessToolSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields, properties string
+	}{
+		{"omitted", "", `{}`},
+		{"null", `,"parameters":null`, `{}`},
+		{"empty", `,"parameters":{}`, `{}`},
+		{"empty properties", `,"parameters":{"properties":{}}`, `{}`},
+		{"missing root type", `,"parameters":{"properties":{"query":{"type":"STRING"}},"required":["query"]}`, `{"query":{"type":"string"}}`},
+		{"json schema", `,"parametersJsonSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`, `{"query":{"type":"string"}}`},
+		{"null with json schema", `,"parameters":null,"parametersJsonSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`, `{"query":{"type":"string"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`{"contents":[{"role":"user","parts":[{"text":"List jobs"}]}],"tools":[{"functionDeclarations":[{"name":"CronList","description":"List jobs"%s}]}]}`, tc.fields))
+			out := ConvertGeminiRequestToClaude("claude-opus-5-5", body, false)
+			tool := gjson.GetBytes(out, "tools.0")
+			if tool.Get("name").String() != "CronList" || tool.Get("input_schema.type").String() != "object" {
+				t.Fatalf("missing tool name or object schema: %s", tool.Raw)
+			}
+			if got := tool.Get("input_schema.properties").Raw; got != tc.properties {
+				t.Fatalf("properties = %s, want %s", got, tc.properties)
+			}
+			if tc.properties != `{}` && tool.Get("input_schema.required.0").String() != "query" {
+				t.Fatalf("required fields lost: %s", tool.Raw)
+			}
+		})
+	}
+}
+
 func TestConvertGeminiRequestToClaude_PreservesCustomToolIDs(t *testing.T) {
 	tests := []struct {
 		name          string

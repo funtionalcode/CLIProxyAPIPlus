@@ -348,13 +348,11 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					if desc := funcDecl.Get("description"); desc.Exists() {
 						anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", desc.String())
 					}
-					if params := funcDecl.Get("parameters"); params.Exists() {
-						cleaned := normalizeClaudeToolSchema(params)
-						anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", cleaned)
-					} else if params = funcDecl.Get("parametersJsonSchema"); params.Exists() {
-						cleaned := normalizeClaudeToolSchema(params)
-						anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", cleaned)
+					params := funcDecl.Get("parameters")
+					if !params.Exists() || params.Type == gjson.Null {
+						params = funcDecl.Get("parametersJsonSchema")
 					}
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", normalizeClaudeToolSchema(params))
 
 					anthropicTool = lowercaseClaudeToolSchemaTypes(anthropicTool)
 					anthropicTools = append(anthropicTools, gjson.ParseBytes(anthropicTool).Value())
@@ -384,6 +382,16 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 func normalizeClaudeToolSchema(parameters gjson.Result) []byte {
 	cleaned := []byte(parameters.Raw)
+	// Gemini may omit parameters for a zero-argument function. Claude still
+	// requires an object input_schema, including when a gateway sends null.
+	if !parameters.Exists() || parameters.Type == gjson.Null {
+		cleaned = []byte(`{"type":"object","properties":{}}`)
+	} else if parameters.IsObject() && !parameters.Get("type").Exists() {
+		cleaned, _ = sjson.SetBytes(cleaned, "type", "object")
+	}
+	if gjson.GetBytes(cleaned, "type").String() == "object" && !gjson.GetBytes(cleaned, "properties").Exists() {
+		cleaned, _ = sjson.SetRawBytes(cleaned, "properties", []byte(`{}`))
+	}
 	if parameters.Get("additionalProperties").Type != gjson.False {
 		cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
 	}
