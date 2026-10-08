@@ -2,10 +2,12 @@ package helps
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -30,6 +32,37 @@ func resetHTTPClientCacheForTest(t *testing.T) {
 		httpClientCache = previous
 		httpClientCacheMutex.Unlock()
 	})
+}
+
+func TestNewProxyAwareHTTPClientIsolatesRequestTimeouts(t *testing.T) {
+	for _, proxyURL := range []string{"", "http://timeout-cache.example:8080", "socks5://timeout-cache.example:1080"} {
+		for _, requestLog := range []bool{false, true} {
+			t.Run(fmt.Sprintf("proxy=%s/log=%t", proxyURL, requestLog), func(t *testing.T) {
+				resetHTTPClientCacheForTest(t)
+				cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: proxyURL, RequestLog: requestLog}}
+				lookup := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 10*time.Second)
+				relay := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+				if lookup.Timeout != 10*time.Second || relay.Timeout != 0 {
+					t.Fatalf("lookup timeout=%s, relay timeout=%s; want 10s and no timeout", lookup.Timeout, relay.Timeout)
+				}
+				laterLookup := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 30*time.Second)
+				if lookup.Timeout != 10*time.Second || laterLookup.Timeout != 30*time.Second || relay.Timeout != 0 {
+					t.Fatal("a later timeout changed an existing request client")
+				}
+				relay.Transport = proxyHelperRoundTripper(func(req *http.Request) (*http.Response, error) {
+					if _, ok := req.Context().Deadline(); ok {
+						t.Fatal("relay inherited the metadata lookup deadline")
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("image")), Request: req}, nil
+				})
+				response, errGet := relay.Get("https://upstream.example/images/generations")
+				if errGet != nil {
+					t.Fatal(errGet)
+				}
+				_ = response.Body.Close()
+			})
+		}
+	}
 }
 
 func TestNewProxyAwareHTTPClientRequestProxyOverridesAuthAndGlobal(t *testing.T) {

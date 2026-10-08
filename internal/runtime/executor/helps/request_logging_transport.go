@@ -30,7 +30,7 @@ func withAPIRequestLoggingHTTPClient(ctx context.Context, cfg *config.Config, au
 		client = &http.Client{}
 	}
 	if cfg == nil || !cfg.RequestLog {
-		if timeout <= 0 {
+		if client.Timeout == timeout {
 			return client
 		}
 		clone := *client
@@ -38,9 +38,7 @@ func withAPIRequestLoggingHTTPClient(ctx context.Context, cfg *config.Config, au
 		return &clone
 	}
 	clone := *client
-	if timeout > 0 {
-		clone.Timeout = timeout
-	}
+	clone.Timeout = timeout
 	base := clone.Transport
 	if base == nil {
 		base = http.DefaultTransport

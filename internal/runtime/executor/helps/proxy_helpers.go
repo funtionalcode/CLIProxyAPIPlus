@@ -59,11 +59,9 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 	httpClientCacheMutex.RUnlock()
 
-	// Create new client
+	// Cache only a timeout-free base client. Lookup and credential timeouts
+	// belong to individual calls and must not cancel later relay requests.
 	httpClient := &http.Client{}
-	if timeout > 0 {
-		httpClient.Timeout = timeout
-	}
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
