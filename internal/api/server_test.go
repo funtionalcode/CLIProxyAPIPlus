@@ -1,22 +1,19 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	runtimehelps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	log "github.com/sirupsen/logrus"
-	logtest "github.com/sirupsen/logrus/hooks/test"
-	"gopkg.in/yaml.v3"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,20 +21,28 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
-	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
-	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
-	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/google/uuid"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
+	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	runtimehelps "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
+	"gopkg.in/yaml.v3"
 )
 
 type codexSearchCaptureExecutor struct {
@@ -847,9 +852,12 @@ func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 		t.Fatalf("response Content-Type = %q", got)
 	}
 	traceID := rr.Header().Get(internallogging.CPATraceIDHeader)
-	parts := strings.Split(traceID, "-")
-	if len(parts) != 3 || parts[1] != credential.Index || len(parts[2]) != 8 {
+	parts := strings.SplitN(traceID, "-", 3)
+	if len(parts) != 3 || parts[1] != credential.Index || parts[2] == "" {
 		t.Fatalf("trace ID = %q, want timestamp-%s-requestID", traceID, credential.Index)
+	}
+	if _, errParseUUID := uuid.Parse(parts[2]); errParseUUID != nil {
+		t.Fatalf("trace requestID = %q: %v", parts[2], errParseUUID)
 	}
 	if _, errParse := time.Parse("20060102150405", parts[0]); errParse != nil {
 		t.Fatalf("trace timestamp = %q: %v", parts[0], errParse)
@@ -2951,7 +2959,10 @@ func TestModelsWithClientVersionReturnsCodexCatalogUpstream(t *testing.T) {
 		modelRegistry.UnregisterClient(clientID)
 	})
 
-	server := newTestServer(t)
+	cfg := &proxyconfig.Config{SDKConfig: sdkconfig.SDKConfig{APIKeys: []string{"test-key"}}}
+	cfg.Client.Codex.EnableApplyPatch = true
+	server := newTestServerWithConfig(t, cfg)
+	server.handlers.AuthManager.RegisterExecutor(executor.NewCodexAutoExecutor(&proxyconfig.Config{}))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -2991,6 +3002,9 @@ func TestModelsWithClientVersionReturnsCodexCatalogUpstream(t *testing.T) {
 	}
 	if gpt55 == nil {
 		t.Fatal("expected gpt-5.5 codex catalog entry")
+	}
+	if got := gpt55["apply_patch_tool_type"]; got != "freeform" {
+		t.Fatalf("gpt-5.5 apply_patch_tool_type = %#v, want freeform", got)
 	}
 	if _, ok := gpt55["minimal_client_version"]; !ok {
 		t.Fatal("expected minimal_client_version in codex catalog")
@@ -3039,7 +3053,9 @@ func TestModelsWithClientVersionReturnsCodexCatalogUpstream(t *testing.T) {
 	if !ok || len(customServiceTiers) != 0 {
 		t.Fatalf("expected custom model service_tiers = [], got %#v", custom["service_tiers"])
 	}
-	assertCodexNullableCatalogField(t, custom, "apply_patch_tool_type")
+	if value, present := custom["apply_patch_tool_type"]; !present || value != "freeform" {
+		t.Fatalf("custom apply_patch_tool_type = %#v (present %v), want freeform", value, present)
+	}
 	assertCodexNullableCatalogField(t, custom, "upgrade")
 	assertCodexNullableCatalogField(t, custom, "availability_nux")
 
@@ -3200,6 +3216,332 @@ func assertCodexNullableCatalogField(t *testing.T, model map[string]any, key str
 	}
 	if value != nil {
 		t.Fatalf("%s = %#v, want null", key, value)
+	}
+}
+
+func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectoryUpstream(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+
+	originalWD, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		t.Fatalf("failed to get current working directory: %v", errGetwd)
+	}
+
+	tmpDir := t.TempDir()
+	if errChdir := os.Chdir(tmpDir); errChdir != nil {
+		t.Fatalf("failed to switch working directory: %v", errChdir)
+	}
+	defer func() {
+		if errChdirBack := os.Chdir(originalWD); errChdirBack != nil {
+			t.Fatalf("failed to restore working directory: %v", errChdirBack)
+		}
+	}()
+
+	// Force ResolveLogDirectory to fallback to auth-dir/logs by making ./logs not a writable directory.
+	if errWriteFile := os.WriteFile(filepath.Join(tmpDir, "logs"), []byte("not-a-directory"), 0o644); errWriteFile != nil {
+		t.Fatalf("failed to create blocking logs file: %v", errWriteFile)
+	}
+
+	configDir := filepath.Join(tmpDir, "config")
+	if errMkdirConfig := os.MkdirAll(configDir, 0o755); errMkdirConfig != nil {
+		t.Fatalf("failed to create config dir: %v", errMkdirConfig)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+
+	authDir := filepath.Join(tmpDir, "auth")
+	if errMkdirAuth := os.MkdirAll(authDir, 0o700); errMkdirAuth != nil {
+		t.Fatalf("failed to create auth dir: %v", errMkdirAuth)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: proxyconfig.SDKConfig{
+			RequestLog: false,
+		},
+		AuthDir:           authDir,
+		ErrorLogsMaxFiles: 10,
+	}
+
+	logger := defaultRequestLoggerFactory(cfg, configPath)
+	fileLogger, ok := logger.(*internallogging.FileRequestLogger)
+	if !ok {
+		t.Fatalf("expected *FileRequestLogger, got %T", logger)
+	}
+
+	errLog := fileLogger.LogRequestWithOptions(
+		"/v1/chat/completions",
+		http.MethodPost,
+		map[string][]string{"Content-Type": []string{"application/json"}},
+		[]byte(`{"input":"hello"}`),
+		http.StatusBadGateway,
+		map[string][]string{"Content-Type": []string{"application/json"}},
+		[]byte(`{"error":"upstream failure"}`),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		true,
+		"issue-1711",
+		time.Now(),
+		time.Now(),
+	)
+	if errLog != nil {
+		t.Fatalf("failed to write forced error request log: %v", errLog)
+	}
+
+	authLogsDir := filepath.Join(authDir, "logs")
+	authEntries, errReadAuthDir := os.ReadDir(authLogsDir)
+	if errReadAuthDir != nil {
+		t.Fatalf("failed to read auth logs dir %s: %v", authLogsDir, errReadAuthDir)
+	}
+	foundErrorLogInAuthDir := false
+	for _, entry := range authEntries {
+		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+			foundErrorLogInAuthDir = true
+			break
+		}
+	}
+	if !foundErrorLogInAuthDir {
+		t.Fatalf("expected forced error log in auth fallback dir %s, got entries: %+v", authLogsDir, authEntries)
+	}
+
+	configLogsDir := filepath.Join(configDir, "logs")
+	configEntries, errReadConfigDir := os.ReadDir(configLogsDir)
+	if errReadConfigDir != nil && !os.IsNotExist(errReadConfigDir) {
+		t.Fatalf("failed to inspect config logs dir %s: %v", configLogsDir, errReadConfigDir)
+	}
+	for _, entry := range configEntries {
+		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
+		}
+	}
+}
+
+func TestFormatHomeClaudeModelIncludesAnthropicSchemaFieldsUpstream(t *testing.T) {
+	withMetadata := formatHomeClaudeModel(homeModelEntry{
+		id:                  "claude-sonnet-4-6",
+		created:             1771372800,
+		ownedBy:             "anthropic",
+		displayName:         "Claude 4.6 Sonnet",
+		contextLength:       200000,
+		maxCompletionTokens: 64000,
+	})
+	if got := withMetadata["created_at"]; got != "2026-02-18T00:00:00Z" {
+		t.Fatalf("created_at = %v, want RFC3339 timestamp", got)
+	}
+	if got := withMetadata["type"]; got != "model" {
+		t.Fatalf("type = %v, want model", got)
+	}
+	if got := withMetadata["display_name"]; got != "Claude 4.6 Sonnet" {
+		t.Fatalf("display_name = %v, want Claude 4.6 Sonnet", got)
+	}
+	if got := withMetadata["max_input_tokens"]; got != 200000 {
+		t.Fatalf("max_input_tokens = %v, want 200000", got)
+	}
+	if got := withMetadata["max_tokens"]; got != 64000 {
+		t.Fatalf("max_tokens = %v, want 64000", got)
+	}
+
+	withDefaults := formatHomeClaudeModel(homeModelEntry{id: "claude-no-limits"})
+	if got := withDefaults["display_name"]; got != "claude-no-limits" {
+		t.Fatalf("display_name fallback = %v, want claude-no-limits", got)
+	}
+
+	customModel := formatHomeClaudeModel(homeModelEntry{id: "gpt-4o", displayName: "GPT-4o"})
+	if got := customModel["id"]; got != "gpt-4o" {
+		t.Fatalf("id = %v, want gpt-4o", got)
+	}
+	if got := customModel["display_name"]; got != "GPT-4o" {
+		t.Fatalf("display_name = %v, want GPT-4o", got)
+	}
+	if got := withDefaults["max_input_tokens"]; got != registry.DefaultClaudeMaxInputTokens {
+		t.Fatalf("max_input_tokens fallback = %v, want %d", got, registry.DefaultClaudeMaxInputTokens)
+	}
+	if got := withDefaults["max_tokens"]; got != registry.DefaultClaudeMaxOutputTokens {
+		t.Fatalf("max_tokens fallback = %v, want %d", got, registry.DefaultClaudeMaxOutputTokens)
+	}
+	if _, ok := withDefaults["created_at"]; ok {
+		t.Fatalf("created_at should be omitted when source created is missing, got %v", withDefaults)
+	}
+}
+
+func TestDecodeHomeModelsKeepsTokenMetadataUpstream(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"claude": [
+			{
+				"id": "claude-sonnet-4-6",
+				"created": 1771372800,
+				"owned_by": "anthropic",
+				"context_length": 200000,
+				"max_completion_tokens": 64000
+			}
+		],
+		"gemini": [
+			{
+				"name": "models/gemini-3-pro",
+				"inputTokenLimit": 1048576,
+				"outputTokenLimit": 65536,
+				"thinking": {
+					"min": 128,
+					"max": 65535,
+					"dynamic_allowed": true,
+					"levels": ["low", "medium", "high"]
+				}
+			}
+		]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels returned error: %v", errDecode)
+	}
+
+	byID := make(map[string]homeModelEntry, len(entries))
+	for _, entry := range entries {
+		byID[entry.id] = entry
+	}
+	claudeEntry, ok := byID["claude-sonnet-4-6"]
+	if !ok {
+		t.Fatalf("expected claude-sonnet-4-6 entry, got %v", byID)
+	}
+	if claudeEntry.contextLength != 200000 || claudeEntry.maxCompletionTokens != 64000 {
+		t.Fatalf("claude token metadata = %d/%d, want 200000/64000", claudeEntry.contextLength, claudeEntry.maxCompletionTokens)
+	}
+	geminiEntry, ok := byID["gemini-3-pro"]
+	if !ok {
+		t.Fatalf("expected gemini-3-pro entry, got %v", byID)
+	}
+	if geminiEntry.contextLength != 1048576 || geminiEntry.maxCompletionTokens != 65536 {
+		t.Fatalf("gemini token metadata = %d/%d, want 1048576/65536", geminiEntry.contextLength, geminiEntry.maxCompletionTokens)
+	}
+	if geminiEntry.thinking == nil || !reflect.DeepEqual(geminiEntry.thinking.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("gemini thinking metadata = %#v, want low/medium/high", geminiEntry.thinking)
+	}
+
+	formatted := formatHomeCodexModel(geminiEntry)
+	if got := homeModelInt64Value(formatted, "context_length"); got != 1048576 {
+		t.Fatalf("formatted Gemini context_length = %d, want 1048576", got)
+	}
+	if got, ok := formatted["thinking"].(*registry.ThinkingSupport); !ok || !reflect.DeepEqual(got.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("formatted Gemini thinking metadata = %#v, want low/medium/high", formatted["thinking"])
+	}
+}
+
+func TestHomeCodexModels_MaxContextLength(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex": [
+			{"id": "gpt-6-sol", "context_length": 272000, "max_context_length": 524288}
+		]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels error = %v", errDecode)
+	}
+	if len(entries) != 1 || entries[0].maxContextLength != 524288 {
+		t.Fatalf("unexpected decoded entry: %+v", entries)
+	}
+
+	formatted := formatHomeCodexModel(entries[0])
+	if got := formatted["max_context_length"]; got != 524288 {
+		t.Fatalf("formatHomeCodexModel max_context_length = %v, want 524288", got)
+	}
+}
+
+func TestHomeCodexModels_OAuthSettingsChannelIsolation(t *testing.T) {
+	cfg := &proxyconfig.Config{
+		OAuthSettings: map[string][]proxyconfig.OAuthModelSetting{
+			"codex": {
+				{Name: "shared-model", MaxContextLength: 524288},
+			},
+			"claude": {
+				{Name: "shared-model", MaxContextLength: 200000},
+			},
+		},
+	}
+
+	// 1. Entry from codex only -> receives codex setting (524288)
+	codexEntry := homeModelEntry{
+		id:        "shared-model",
+		providers: []string{"codex"},
+	}
+	mCodex := formatHomeCodexModelWithSettings(codexEntry, cfg)
+	if got := mCodex["max_context_length"]; got != 524288 {
+		t.Errorf("mCodex max_context_length = %v, want 524288", got)
+	}
+
+	// 2. Entry from claude only -> receives claude setting (200000), NOT codex setting
+	claudeEntry := homeModelEntry{
+		id:        "shared-model",
+		providers: []string{"claude"},
+	}
+	mClaude := formatHomeCodexModelWithSettings(claudeEntry, cfg)
+	if got := mClaude["max_context_length"]; got != 200000 {
+		t.Errorf("mClaude max_context_length = %v, want 200000", got)
+	}
+
+	// 3. Entry from other provider -> does not receive either setting
+	otherEntry := homeModelEntry{
+		id:        "shared-model",
+		providers: []string{"vertex"},
+	}
+	mOther := formatHomeCodexModelWithSettings(otherEntry, cfg)
+	if got := mOther["max_context_length"]; got != nil {
+		t.Errorf("mOther max_context_length = %v, want nil", got)
+	}
+
+	// 4. Entry from multiple providers (claude, codex) -> deterministic codex precedence
+	multiEntry := homeModelEntry{
+		id:        "shared-model",
+		providers: []string{"claude", "codex"},
+	}
+	mMulti := formatHomeCodexModelWithSettings(multiEntry, cfg)
+	if got := mMulti["max_context_length"]; got != 524288 {
+		t.Errorf("mMulti max_context_length = %v, want 524288", got)
+	}
+}
+
+func TestHomeModelsAuthStatusUpstream(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		wantStatus  int
+		wantHandled bool
+	}{
+		{"no credentials", `{"error":{"type":"no_credentials","message":"Missing API key"}}`, http.StatusUnauthorized, true},
+		{"invalid credential", `{"error":{"type":"invalid_credential","message":"Invalid API key"}}`, http.StatusUnauthorized, true},
+		{"internal error maps to bad gateway", `{"error":{"type":"internal_error","message":"boom"}}`, http.StatusBadGateway, true},
+		{"models payload not an error", `{"openai":[{"id":"gpt-5.5"}]}`, 0, false},
+		{"empty payload not an error", `{}`, 0, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, handled := homeModelsAuthStatus([]byte(tc.raw))
+			if handled != tc.wantHandled {
+				t.Fatalf("handled = %v, want %v (status=%d)", handled, tc.wantHandled, status)
+			}
+			if handled && status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestHomeModelsErrorMessageUpstream(t *testing.T) {
+	if msg := homeModelsErrorMessage([]byte(`{"error":{"type":"invalid_credential","message":"Invalid API key"}}`)); msg != "Invalid API key" {
+		t.Fatalf("message = %q, want %q", msg, "Invalid API key")
+	}
+	if msg := homeModelsErrorMessage([]byte(`{"openai":[]}`)); msg != "home models request failed" {
+		t.Fatalf("default message = %q, want fallback", msg)
+	}
+}
+
+func TestInteractionsRouteRegisteredUpstream(t *testing.T) {
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader(`{"model":"gemini-3.5-flash","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code == http.StatusNotFound {
+		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -3635,5 +3977,273 @@ func assertSerializedCPAWebSearch(t *testing.T, model map[string]any, want bool)
 	}
 	if got, ok := capabilities["web_search"].(bool); !ok || got != want {
 		t.Fatalf("model %v web_search = %#v, want %v", model["slug"], capabilities["web_search"], want)
+	}
+}
+
+// modelCatalogUnknownExecutor implements only the mandatory provider contract.
+type modelCatalogUnknownExecutor struct{ auth.ProviderExecutor }
+
+type modelCatalogUnsupportedExecutor struct{ auth.ProviderExecutor }
+
+func (modelCatalogUnsupportedExecutor) SupportsApplyPatch() bool { return false }
+
+func TestHomeApplyPatchCapabilityForModel(t *testing.T) {
+	entries, errDecodeHomeModels := decodeHomeModels([]byte(`{
+		"codex":[{"id":"home-patch-native"},{"id":"home-patch-mixed"},{"id":"home-patch-partial"},{"id":"home-patch-blank"}],
+		"home-custom":[{"id":"home-patch-synthetic"},{"id":"home-patch-mixed"}],
+		"remote":[{"id":"home-patch-remote"},{"id":"home-patch-partial"}],
+		"plugin":[{"id":"home-patch-plugin"}],
+		"disabled":[{"id":"home-patch-disabled"}],
+		"":[{"id":"home-patch-blank"}]
+	}`))
+	if errDecodeHomeModels != nil {
+		t.Fatalf("decode Home models: %v", errDecodeHomeModels)
+	}
+	entries = append(entries, homeModelEntry{id: "home-patch-no-routes"})
+	manager := auth.NewManager(nil, nil, nil)
+	cfg := &proxyconfig.Config{}
+	manager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))
+	manager.RegisterExecutor(executor.NewOpenAICompatExecutor("home-custom", cfg))
+	manager.RegisterExecutor(modelCatalogUnknownExecutor{executor.NewOpenAICompatExecutor("remote", cfg)})
+	manager.RegisterExecutor(modelCatalogUnknownExecutor{executor.NewOpenAICompatExecutor("plugin", cfg)})
+	manager.RegisterExecutor(modelCatalogUnsupportedExecutor{executor.NewOpenAICompatExecutor("disabled", cfg)})
+	lookup := homeApplyPatchCapabilityForModel(entries, manager)
+	for _, tc := range []struct {
+		id   string
+		want bool
+	}{
+		{"home-patch-native", true}, {" home-patch-synthetic ", true}, {"home-patch-mixed", true},
+		{"home-patch-remote", false}, {"home-patch-plugin", false}, {"home-patch-partial", false},
+		{"home-patch-disabled", false}, {"home-patch-no-routes", false}, {"home-patch-blank", false},
+		{"team/home-patch-native", false}, {"home-patch-native(high)", false}, {"missing", false},
+	} {
+		if got := lookup(tc.id); got != tc.want {
+			t.Errorf("%q capability = %v, want %v", tc.id, got, tc.want)
+		}
+		if homeApplyPatchCapabilityForModel(entries, nil)(tc.id) {
+			t.Errorf("%q supported without a manager", tc.id)
+		}
+	}
+	// Multiple entries must never overwrite an unknown routing candidate.
+	duplicateLookup := homeApplyPatchCapabilityForModel([]homeModelEntry{
+		{id: "duplicate", providers: []string{"remote"}},
+		{id: "duplicate", providers: []string{"codex"}},
+	}, manager)
+	if duplicateLookup("duplicate") || homeApplyPatchCapabilityForModel(nil, manager)("home-patch-native") {
+		t.Fatal("unknown or absent route was advertised")
+	}
+}
+
+// newHomeCatalogClient serves the existing Home models protocol without new metadata.
+func newHomeCatalogClient(t *testing.T, payload string) *home.Client {
+	t.Helper()
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	done := make(chan struct{})
+	var connections sync.WaitGroup
+	go func() {
+		defer close(done)
+		for {
+			conn, errAccept := listener.Accept()
+			if errAccept != nil {
+				return
+			}
+			connections.Add(1)
+			go func() {
+				defer connections.Done()
+				defer func() {
+					if errClose := conn.Close(); errClose != nil {
+						t.Errorf("close Home test connection: %v", errClose)
+					}
+				}()
+				reader := bufio.NewReader(conn)
+				for {
+					args, errReadRESPArrayOfBulkStrings := readRESPArrayOfBulkStrings(reader)
+					if errReadRESPArrayOfBulkStrings != nil || len(args) == 0 {
+						return
+					}
+					response := "+OK\r\n"
+					switch strings.ToUpper(string(args[0])) {
+					case "HELLO":
+						response = "-ERR unknown command 'hello'\r\n"
+					case "GET":
+						var request struct {
+							Type string `json:"type"`
+						}
+						if len(args) != 2 {
+							t.Error("invalid Home GET request")
+							return
+						}
+						if errUnmarshal := json.Unmarshal(args[1], &request); errUnmarshal != nil || request.Type != "models" {
+							t.Errorf("unexpected Home request %q: %v", args[1], errUnmarshal)
+							return
+						}
+						response = fmt.Sprintf("$%d\r\n%s\r\n", len(payload), payload)
+					}
+					if _, errWriteString := io.WriteString(conn, response); errWriteString != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	host, portText, errSplitHostPort := net.SplitHostPort(listener.Addr().String())
+	if errSplitHostPort != nil {
+		t.Fatalf("split Home test address: %v", errSplitHostPort)
+	}
+	port, errAtoi := strconv.Atoi(portText)
+	if errAtoi != nil {
+		t.Fatalf("parse Home test port: %v", errAtoi)
+	}
+	client := home.New(proxyconfig.HomeConfig{Enabled: true, Host: host, Port: port, DisableClusterDiscovery: true})
+	t.Cleanup(func() {
+		client.Close()
+		if errClose := listener.Close(); errClose != nil {
+			t.Errorf("close Home test listener: %v", errClose)
+		}
+		<-done
+		connections.Wait()
+	})
+	return client
+}
+
+func TestModelsWithClientVersionHomeApplyPatchRouting(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+	server.cfg.Client.Codex.EnableApplyPatch = true
+	// Exercise the production models router without unrelated heartbeat readiness.
+	engine := gin.New()
+	engine.GET("/v1/models", server.unifiedModelsHandler(nil, nil))
+	manager := server.handlers.AuthManager
+	cfg := &proxyconfig.Config{}
+	manager.RegisterExecutor(executor.NewCodexAutoExecutor(cfg))
+	manager.RegisterExecutor(executor.NewOpenAICompatExecutor("home-custom", cfg))
+	manager.RegisterExecutor(modelCatalogUnknownExecutor{executor.NewOpenAICompatExecutor("remote", cfg)})
+	modelRegistry := registry.GetGlobalRegistry()
+	// These local routes intentionally disagree with the Home routing evidence.
+	modelRegistry.RegisterClient("home-patch-local-native", "codex", []*registry.ModelInfo{{ID: "home-patch-local-only"}})
+	modelRegistry.RegisterClient("home-patch-local-remote", "remote", []*registry.ModelInfo{{ID: "home-patch-supported"}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("home-patch-local-native")
+		modelRegistry.UnregisterClient("home-patch-local-remote")
+	})
+	client := newHomeCatalogClient(t, `{
+		"codex":[{"id":"gpt-5.5"},{"id":"gpt-reserve"},{"id":"gpt-image-2"},{"id":"home-patch-mixed"},{"id":"home-patch-partial"}],
+		"home-custom":[{"id":"home-patch-supported"},{"id":"home-patch-mixed"},{"id":"team/gpt-5.5"}],
+		"remote":[{"id":"home-patch-local-only"},{"id":"home-patch-partial"}]
+	}`)
+	previousHome := home.Current()
+	home.SetCurrent(client)
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+
+	for _, version := range []string{"", "0.137.0", "0.153.4", "cpa"} {
+		t.Run(version, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version="+version, nil)
+			req.Header.Set("Authorization", "Bearer test-key")
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+			}
+			if strings.Contains(recorder.Body.String(), "\n") {
+				t.Fatal("Home catalog is not compact JSON")
+			}
+			var response struct {
+				Models []map[string]any `json:"models"`
+			}
+			if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+				t.Fatalf("decode Home catalog: %v", errUnmarshal)
+			}
+			entries := make(map[string]map[string]any)
+			for _, entry := range response.Models {
+				entries[entry["slug"].(string)] = entry
+			}
+			for _, id := range []string{"gpt-5.5", "gpt-reserve", "home-patch-supported", "home-patch-mixed", "team/gpt-5.5"} {
+				if value, present := entries[id]["apply_patch_tool_type"]; !present || value != "freeform" {
+					t.Errorf("%s apply_patch_tool_type = %#v (present %v), want freeform", id, value, present)
+				}
+			}
+			for _, id := range []string{"gpt-image-2", "home-patch-local-only", "home-patch-partial"} {
+				assertCodexNullableCatalogField(t, entries[id], "apply_patch_tool_type")
+			}
+			// Home retains its existing template and synthesized protocol restrictions.
+			if search, _ := entries["gpt-5.5"]["supports_search_tool"].(bool); !search {
+				t.Error("legacy Home template search support changed")
+			}
+			for _, id := range []string{"home-patch-supported", "home-patch-mixed"} {
+				entry := entries[id]
+				if entry["supports_search_tool"] != false || entry["prefer_websockets"] != false || len(entry["service_tiers"].([]any)) != 0 {
+					t.Errorf("%s unrelated protocol capabilities widened", id)
+				}
+				assertCodexNullableCatalogField(t, entry, "upgrade")
+				assertCodexNullableCatalogField(t, entry, "availability_nux")
+			}
+		})
+	}
+	t.Run("missing-manager", func(t *testing.T) {
+		server.handlers.AuthManager = nil
+		defer func() { server.handlers.AuthManager = manager }()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+		engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Models []map[string]any `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+			t.Fatalf("decode Home catalog: %v", errUnmarshal)
+		}
+		for _, entry := range response.Models {
+			assertCodexNullableCatalogField(t, entry, "apply_patch_tool_type")
+		}
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"object":"list"`) || strings.Contains(recorder.Body.String(), "apply_patch_tool_type") {
+		t.Fatalf("ordinary Home catalog changed: %s", recorder.Body.String())
+	}
+}
+
+func TestModelsWithClientVersionApplyPatchRequiresExecutor(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "http-patch-missing-executor"
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{{ID: "gpt-5.5"}, {ID: "http-patch-synthetic"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+	server := newTestServer(t)
+	updatedCfg := *server.cfg
+	updatedCfg.Client.Codex.EnableApplyPatch = true
+	server.UpdateClients(&updatedCfg)
+	for _, version := range []string{"", "0.137.0", "0.153.4", "cpa"} {
+		request := httptest.NewRequest(http.MethodGet, "/v1/models?client_version="+version, nil)
+		request.Header.Set("Authorization", "Bearer test-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+		var response struct {
+			Models []map[string]any `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+			t.Fatalf("decode catalog: %v", errUnmarshal)
+		}
+		for _, entry := range response.Models {
+			assertCodexNullableCatalogField(t, entry, "apply_patch_tool_type")
+		}
+	}
+	server.handlers.AuthManager.RegisterExecutor(executor.NewCodexAutoExecutor(&proxyconfig.Config{}))
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"object":"list"`) || strings.Contains(recorder.Body.String(), "apply_patch_tool_type") {
+		t.Fatalf("ordinary local catalog changed: %s", recorder.Body.String())
 	}
 }

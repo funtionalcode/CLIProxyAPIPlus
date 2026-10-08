@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/proxytrace"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxytrace"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
 func TestPoolManager_DynamicSourceWebshareFormat(t *testing.T) {

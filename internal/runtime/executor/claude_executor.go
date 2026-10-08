@@ -8,17 +8,18 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
+// ClaudeExecutor handles Anthropic Claude over the messages API and keeps bounded
+// in-memory thread alias state for OAuth continuations.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
 	cfg                     *config.Config
@@ -26,6 +27,9 @@ type ClaudeExecutor struct {
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
 	oauthProfileFetcher     claudeOAuthProfileFetcher
+	// oauthToolAliases is shared by every ForAPIKey copy of this executor;
+	// constructors allocate it so copies made per request reuse one store.
+	oauthToolAliases *claudeOAuthToolAliasStore
 }
 
 type claudeOAuthCancellationError struct {
@@ -137,7 +141,9 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
 
-func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
+func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
+	return &ClaudeExecutor{cfg: cfg, oauthToolAliases: &claudeOAuthToolAliasStore{}}
+}
 
 func NewClaudeExecutorWithManager(cfg *config.Config, manager *cliproxyauth.Manager) *ClaudeExecutor {
 	return &ClaudeExecutor{cfg: cfg, authManager: manager}
@@ -278,3 +284,6 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *ClaudeExecutor) SupportsApplyPatch() bool { return e != nil }

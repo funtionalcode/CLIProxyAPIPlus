@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/ir"
 )
 
 // ParseFunc parses raw JSON into an IR request.

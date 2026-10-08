@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -118,6 +118,7 @@ func TestOpenAICompatExecutorAutoContinuesLengthLimitedResponsesStream(t *testin
 	var initialStore atomic.Bool
 	var continuationPreviousResponseID atomic.Value
 	var continuationInput atomic.Value
+	var continuationConfiguredInput atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestNumber := requests.Add(1)
 		body, _ := io.ReadAll(r.Body)
@@ -134,12 +135,17 @@ func TestOpenAICompatExecutorAutoContinuesLengthLimitedResponsesStream(t *testin
 		}
 		continuationPreviousResponseID.Store(gjson.GetBytes(body, "previous_response_id").String())
 		continuationInput.Store(gjson.GetBytes(body, "input").String())
+		continuationConfiguredInput.Store(gjson.GetBytes(body, "metadata.configured_input").String())
 		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_2\",\"delta\":\"part2\"}\n\n")
 		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":3},\"output_tokens\":200,\"output_tokens_details\":{\"reasoning_tokens\":75},\"total_tokens\":220}}}\n\n")
 	}))
 	defer server.Close()
 
 	executor := NewOpenAICompatExecutor("openai-compatible-volcengine", &config.Config{
+		Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+			Models: []config.PayloadModelRule{{Name: "glm-5.3-flash", Match: []map[string]any{{"previous_response_id": "resp_1"}}}},
+			Params: map[string]any{"input": "continue under operator policy", "metadata.configured_input": "applied"},
+		}}},
 		OpenAICompatibility: []config.OpenAICompatibility{{
 			Name:    "volcengine",
 			BaseURL: server.URL + "/api/plan/v3",
@@ -179,8 +185,11 @@ func TestOpenAICompatExecutorAutoContinuesLengthLimitedResponsesStream(t *testin
 	if got, _ := continuationPreviousResponseID.Load().(string); got != "resp_1" {
 		t.Fatalf("previous_response_id = %q, want resp_1", got)
 	}
-	if got, _ := continuationInput.Load().(string); got != openAICompatResponsesContinuePrompt {
-		t.Fatalf("continuation input = %q, want configured continuation prompt", got)
+	if got, _ := continuationInput.Load().(string); got != "continue under operator policy" {
+		t.Fatalf("continuation input = %q, want operator override", got)
+	}
+	if got, _ := continuationConfiguredInput.Load().(string); got != "applied" {
+		t.Fatalf("continuation payload rule was not applied: %q", got)
 	}
 	if !bytes.Contains(responseBody.Bytes(), []byte(`"content":"part1"`)) || !bytes.Contains(responseBody.Bytes(), []byte(`"content":"part2"`)) {
 		t.Fatalf("continued stream missing content: %s", responseBody.Bytes())

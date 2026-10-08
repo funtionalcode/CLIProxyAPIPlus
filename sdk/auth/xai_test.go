@@ -3,7 +3,7 @@ package auth
 import (
 	"testing"
 
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 )
 
 func TestXAIAuthenticatorProviderAndRefreshLead(t *testing.T) {

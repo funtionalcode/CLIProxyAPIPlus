@@ -3,7 +3,7 @@ package translator
 import (
 	"context"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/ir"
 )
 
 // IRRequestMiddleware operates on parsed IR requests, allowing structured

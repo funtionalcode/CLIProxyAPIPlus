@@ -6,6 +6,14 @@ package config
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
+	// Client configures client-facing compatibility behavior.
+	Client ClientConfig `yaml:"client" json:"client"`
+
+	// OAuthOnlyFields records v8 provider settings that must wait for credential
+	// selection and must not affect API-key credentials. Config YAML snapshots
+	// preserve the corresponding v8 paths instead of serializing this metadata.
+	OAuthOnlyFields map[string]bool `yaml:"-" json:"-"`
+
 	// CodexResponseSteering mirrors the provider-wide runtime setting for API handlers.
 	CodexResponseSteering bool `yaml:"-" json:"-"`
 
@@ -91,6 +99,22 @@ type ServerTimeoutConfig struct {
 	ReadHeaderTimeout int `yaml:"read-header-timeout,omitempty" json:"read-header-timeout,omitempty"`
 	WriteTimeout      int `yaml:"write-timeout,omitempty" json:"write-timeout,omitempty"`
 	IdleTimeout       int `yaml:"idle-timeout,omitempty" json:"idle-timeout,omitempty"`
+}
+
+// ClientConfig configures client-facing compatibility behavior.
+type ClientConfig struct {
+	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+}
+
+// CodexClientConfig configures Codex client compatibility and the model catalog.
+type CodexClientConfig struct {
+	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests across providers.
+	// Default false leaves the client's multi-agent behavior unchanged.
+	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+
+	// EnableApplyPatch advertises freeform apply_patch only for supported models.
+	// Default false clears the capability regardless of template metadata.
+	EnableApplyPatch bool `yaml:"enable-apply-patch" json:"enable-apply-patch"`
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.

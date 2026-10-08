@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/turnstate"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/turnstate"
 )
 
 const codexProxyAuthTimeout = 15 * time.Second

@@ -3,9 +3,9 @@ package translator_test
 import (
 	"testing"
 
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	registry "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/translator"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	registry "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/translator"
 )
 
 func TestGeminiCLITranslationsRemainRegistered(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/ir"
 )
 
 func TestThinkingPreservation_ClaudeToOpenAI_PreservesBudgetTokens(t *testing.T) {

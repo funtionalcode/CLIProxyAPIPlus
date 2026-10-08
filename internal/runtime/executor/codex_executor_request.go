@@ -10,16 +10,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/turnstate"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/turnstate"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -34,20 +34,28 @@ const (
 var dataTag = []byte("data:")
 
 func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte) {
+	original, body, _, _ := translateCodexRequestPairWithUpdateIntent(from, to, model, originalPayload, payload, stream, preserveEmptyThinkingBlocks...)
+	return original, body
+}
+
+func translateCodexRequestPairWithUpdateIntent(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte, bool, error) {
 	isCompat := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
-	translate := func(raw []byte) []byte {
+	ctx := context.Background()
+	translate := func(raw []byte) ([]byte, bool, error) {
 		if isCompat && from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
-			return helps.TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, nil, from, to, model, raw, stream, true)
+			body, err := helps.TranslateRequestReturningError(ctx, nil, nil, from, to, model, raw, stream, true)
+			return body, false, err
 		}
-		return sdktranslator.TranslateRequest(from, to, model, raw, stream)
+		translated := sdktranslator.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: raw})
+		return translated.Body, translated.ConfigurationUpdatesChanged, translated.Err
 	}
 	if bytes.Equal(originalPayload, payload) {
-		body := translate(payload)
-		return body, body
+		body, changed, err := translate(payload)
+		return body, body, changed, err
 	}
-	originalTranslated := translate(originalPayload)
-	body := translate(payload)
-	return originalTranslated, body
+	originalTranslated, _, _ := translate(originalPayload)
+	body, changed, err := translate(payload)
+	return originalTranslated, body, changed, err
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.
@@ -98,7 +106,12 @@ type codexIdentityReplacement struct {
 	confused string
 }
 
-func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, userPayload []byte, rawJSON []byte, headerSets ...http.Header) (*http.Request, []byte, codexIdentityConfuseState, error) {
+func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte, headerSets ...http.Header) (*http.Request, []byte, error) {
+	httpReq, body, _, err := e.cacheHelperWithIdentity(ctx, from, url, nil, req, req.Payload, rawJSON, headerSets...)
+	return httpReq, body, err
+}
+
+func (e *CodexExecutor) cacheHelperWithIdentity(ctx context.Context, from sdktranslator.Format, url string, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, userPayload []byte, rawJSON []byte, headerSets ...http.Header) (*http.Request, []byte, codexIdentityConfuseState, error) {
 	var headers http.Header
 	if len(headerSets) > 0 {
 		headers = headerSets[0]
@@ -142,11 +155,11 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 	}
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
-	var identityState codexIdentityConfuseState
-	rawJSON, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, rawJSON)
+	rawJSON, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, rawJSON)
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
+	rawJSON = helps.FinalizePayload(ctx, rawJSON)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
@@ -556,6 +569,9 @@ func codexImageGenerationToolModel(body []byte) string {
 }
 
 func isCodexCloakingDisabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		cfg = cfg.ForAPIKey()
+	}
 	if auth != nil && len(auth.Attributes) > 0 {
 		if val, ok := auth.Attributes[cliproxyauth.AttributeCodexDisableCloaking]; ok {
 			if parsed, errParse := strconv.ParseBool(strings.TrimSpace(val)); errParse == nil {
@@ -570,4 +586,36 @@ func isCodexCloakingDisabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
 		return true
 	}
 	return false
+}
+
+const codexRoutingHintHeader = "X-Codex-Routing-Hint"
+
+func applyCodexRoutingHint(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, baseModel string, upstreamBody []byte, clientHeaders http.Header) {
+	if codexAuthUsesAPIKey(auth) {
+		return
+	}
+	deleteHeaderCaseInsensitive(headers, codexRoutingHintHeader)
+	if operatorHint := codexOperatorHeaderValue(ctx, auth, clientHeaders, codexRoutingHintHeader); operatorHint != "" {
+		headers.Set(codexRoutingHintHeader, operatorHint)
+		return
+	}
+	model := strings.TrimSpace(baseModel)
+	if model == "" {
+		return
+	}
+	hint := "model=" + model
+	if tier := gjson.GetBytes(upstreamBody, "service_tier"); tier.Type == gjson.String {
+		if value := strings.TrimSpace(tier.String()); value != "" {
+			hint += ";tier=" + value
+		}
+	}
+	headers.Set(codexRoutingHintHeader, hint)
+}
+func codexOperatorHeaderValue(ctx context.Context, auth *cliproxyauth.Auth, clientHeaders http.Header, name string) string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return ""
+	}
+	resolved := (&http.Request{Header: http.Header{}}).WithContext(ctx)
+	util.ApplyCustomHeadersFromAttrs(resolved, auth.Attributes, clientHeaders)
+	return strings.TrimSpace(resolved.Header.Get(name))
 }

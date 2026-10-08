@@ -25,31 +25,31 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
-	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
-	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
-	gitlabauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gitlab"
-	iflowauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kilo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
-	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cursor"
+	geminiAuth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/gemini"
+	gitlabauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/gitlab"
+	iflowauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/iflow"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kilo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
+	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
@@ -472,19 +472,25 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 	if host == nil {
 		return false
 	}
-	provider, ok := pluginAuthProviderFromPath(c.Request.URL.Path)
+	provider, ok := pluginAuthProviderFromURL(c.Request.URL)
 	if !ok || !host.HasAuthProvider(provider) {
 		return false
 	}
 
 	ctx := PopulateAuthContext(context.Background(), c)
-	baseURL, errBaseURL := h.managementCallbackURL("/v0/management/oauth-callback")
+	callbackPath := "/v0/management/oauth-callback"
+	query := c.Request.URL.Query()
+	if c.Request.URL.Path == "/v8/management/oauth/auth-url" {
+		callbackPath = "/v8/management/oauth/callback"
+		query.Del("provider")
+	}
+	baseURL, errBaseURL := h.managementCallbackURL(callbackPath)
 	if errBaseURL != nil {
 		log.WithError(errBaseURL).Error("failed to compute plugin auth callback URL")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return true
 	}
-	metadata := queryValuesToMetadata(c.Request.URL.Query())
+	metadata := queryValuesToMetadata(query)
 	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL, metadata)
 	if !handled {
 		return false
@@ -3806,7 +3812,11 @@ func syncAuthFilePriorityAttribute(auth *coreauth.Auth) {
 	priority, ok := authFileIntValue(auth.Metadata["priority"])
 	if !ok {
 		delete(auth.Attributes, "priority")
+		delete(auth.Attributes, coreauth.AttributeFilePriority)
 		return
+	}
+	if auth.Attributes[coreauth.AttributeSourceBackend] == coreauth.AuthSourceFile {
+		auth.Attributes[coreauth.AttributeFilePriority] = "true"
 	}
 	if priority == 0 {
 		delete(auth.Attributes, "priority")
@@ -4838,17 +4848,26 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		// Extract additional info for filename generation
 		claims, _ := codex.ParseJWTToken(bundle.TokenData.IDToken)
 		planType := ""
+		if bundle != nil && strings.TrimSpace(bundle.TokenData.PlanType) != "" {
+			planType = strings.TrimSpace(bundle.TokenData.PlanType)
+		}
 		hashAccountID := ""
 		if claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
+				planType = pt
+			}
 			if accountID := claims.GetAccountID(); accountID != "" {
 				digest := sha256.Sum256([]byte(accountID))
 				hashAccountID = hex.EncodeToString(digest[:])[:8]
 			}
 		}
+		if planType == "" {
+			planType = codex.DefaultPlanType
+		}
 
 		// Create token storage and persist
 		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
+		tokenStorage.PlanType = planType
 		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 		record := &coreauth.Auth{
 			ID:       fileName,
@@ -4858,6 +4877,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
+				"plan_type":  planType,
+			},
+			Attributes: map[string]string{
+				"plan_type": planType,
 			},
 			ProxyURL: loginProxy,
 		}
@@ -7020,9 +7043,9 @@ func syncAuthFilePlanTypeAttribute(auth *coreauth.Auth) {
 			newPlanType = strings.TrimSpace(ptRaw)
 		} else if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
-				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
-					newPlanType = pt
-				}
+				newPlanType = claims.GetPlanType()
+			} else {
+				newPlanType = codex.DefaultPlanType
 			}
 		}
 	}
@@ -7096,64 +7119,7 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 			return
 		}
 
-		fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
-		label := strings.TrimSpace(tokenStorage.Email)
-		if label == "" {
-			label = "Meta"
-		}
-
-		metadata := map[string]any{
-			"type":         "meta",
-			"access_token": tokenStorage.AccessToken,
-			"token_type":   tokenStorage.TokenType,
-			"expires_in":   tokenStorage.ExpiresIn,
-			"expired":      tokenStorage.Expired,
-			"last_refresh": tokenStorage.LastRefresh,
-			"base_url":     tokenStorage.BaseURL,
-			"auth_kind":    "oauth",
-		}
-		if tokenStorage.DCAExpired != "" {
-			metadata["dca_expired"] = tokenStorage.DCAExpired
-		}
-		if tokenStorage.DCAExpiresAt > 0 {
-			metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
-		}
-		if tokenStorage.APIKey != "" {
-			metadata["api_key"] = tokenStorage.APIKey
-		}
-		if tokenStorage.DCAToken != "" {
-			metadata["dca_token"] = tokenStorage.DCAToken
-		}
-		if tokenStorage.Email != "" {
-			metadata["email"] = tokenStorage.Email
-		}
-		if tokenStorage.Name != "" {
-			metadata["name"] = tokenStorage.Name
-		}
-
-		attrs := map[string]string{
-			"auth_kind": "oauth",
-			"base_url":  tokenStorage.BaseURL,
-		}
-		if tokenStorage.APIKey != "" {
-			attrs["api_key"] = tokenStorage.APIKey
-		}
-		if tokenStorage.DCAToken != "" {
-			attrs["dca_token"] = tokenStorage.DCAToken
-		}
-		if tokenStorage.Email != "" {
-			attrs["email"] = tokenStorage.Email
-		}
-
-		record := &coreauth.Auth{
-			ID:         fileName,
-			Provider:   "meta",
-			FileName:   fileName,
-			Label:      label,
-			Storage:    tokenStorage,
-			Metadata:   metadata,
-			Attributes: attrs,
-		}
+		record := buildMetaAuthRecord(bundle, tokenStorage)
 		if errGuard := guardOAuthSessionPendingForSave(state, "meta"); errGuard != nil {
 			return
 		}
@@ -7457,4 +7423,87 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 	}
 
 	return unavailable, status, statusMessage, nextRetry
+}
+
+func pluginAuthProviderFromURL(requestURL *url.URL) (string, bool) {
+	path := strings.TrimSpace(requestURL.Path)
+	var provider string
+	if path == "/v8/management/oauth/auth-url" {
+		provider = requestURL.Query().Get("provider")
+	} else {
+		const prefix, suffix = "/v0/management/", "-auth-url"
+		if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+			return "", false
+		}
+		provider = strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	}
+	provider, errNormalize := NormalizePluginOAuthCallbackProvider(provider)
+	return provider, errNormalize == nil
+}
+
+func buildMetaAuthRecord(bundle *metaauth.MetaAuthBundle, tokenStorage *metaauth.MetaTokenStorage) *coreauth.Auth {
+	fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
+	label := strings.TrimSpace(tokenStorage.Email)
+	if label == "" {
+		label = "Meta"
+	}
+
+	metadata := map[string]any{
+		"type":         "meta",
+		"access_token": tokenStorage.AccessToken,
+		"token_type":   tokenStorage.TokenType,
+		"expires_in":   tokenStorage.ExpiresIn,
+		"expired":      tokenStorage.Expired,
+		"last_refresh": tokenStorage.LastRefresh,
+		"base_url":     tokenStorage.BaseURL,
+		"auth_kind":    "oauth",
+	}
+	if tokenStorage.DCAExpired != "" {
+		metadata["dca_expired"] = tokenStorage.DCAExpired
+	}
+	if tokenStorage.DCAExpiresAt > 0 {
+		metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
+	}
+	if tokenStorage.APIKey != "" {
+		metadata["api_key"] = tokenStorage.APIKey
+	}
+	if tokenStorage.DCAToken != "" {
+		metadata["dca_token"] = tokenStorage.DCAToken
+	}
+	if tokenStorage.Email != "" {
+		metadata["email"] = tokenStorage.Email
+	}
+	if tokenStorage.Name != "" {
+		metadata["name"] = tokenStorage.Name
+	}
+	if bundle != nil && bundle.MintedKey != nil {
+		metadata["subs_tier_name"] = bundle.MintedKey.SubsTierName
+		metadata["subs_tier_id"] = bundle.MintedKey.SubsTierID
+		metadata["is_subs_active"] = bundle.MintedKey.IsSubsActive
+		metadata["has_payment_method"] = bundle.MintedKey.HasPaymentMethod
+	}
+
+	attrs := map[string]string{
+		"auth_kind": "oauth",
+		"base_url":  tokenStorage.BaseURL,
+	}
+	if tokenStorage.APIKey != "" {
+		attrs["api_key"] = tokenStorage.APIKey
+	}
+	if tokenStorage.DCAToken != "" {
+		attrs["dca_token"] = tokenStorage.DCAToken
+	}
+	if tokenStorage.Email != "" {
+		attrs["email"] = tokenStorage.Email
+	}
+
+	return &coreauth.Auth{
+		ID:         fileName,
+		Provider:   "meta",
+		FileName:   fileName,
+		Label:      label,
+		Storage:    tokenStorage,
+		Metadata:   metadata,
+		Attributes: attrs,
+	}
 }

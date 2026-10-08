@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 )
 
 // TruncationInfo re-exports the common TruncationInfo for backward compatibility.

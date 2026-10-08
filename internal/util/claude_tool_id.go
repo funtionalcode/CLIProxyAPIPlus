@@ -14,8 +14,9 @@ import (
 const geminiClaudeToolUseIDPrefix = "cpa_gemini_"
 
 var (
-	claudeToolUseIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
-	claudeToolUseIDCounter   uint64
+	claudeToolUseIDSanitizer    = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	claudeFunctionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	claudeToolUseIDCounter      uint64
 )
 
 // SanitizeClaudeToolID ensures the given id conforms to Claude's
@@ -27,6 +28,23 @@ func SanitizeClaudeToolID(id string) string {
 		sanitized = fmt.Sprintf("toolu_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&claudeToolUseIDCounter, 1))
 	}
 	return sanitized
+}
+
+// SanitizeClaudeFunctionName ensures a function or tool name conforms to Claude's
+// requirements: ^[a-zA-Z0-9_-]{1,64}$. Non-conforming characters (including dots and colons
+// commonly emitted by MCP tools) are replaced with '_'.
+func SanitizeClaudeFunctionName(name string) string {
+	if name == "" {
+		return ""
+	}
+	s := claudeFunctionNameSanitizer.ReplaceAllString(name, "_")
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	if s == "" {
+		s = "_"
+	}
+	return s
 }
 
 // GeminiClaudeToolUseID returns a stable Claude-facing ID for a provider-native

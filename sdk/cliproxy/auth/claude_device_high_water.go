@@ -208,6 +208,11 @@ func (m *Manager) RaiseClaudeDeviceHighWater(ctx context.Context, authID string,
 	}
 
 	var snapshot *Auth
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, authID)
+	if errMutation != nil {
+		return nil, errMutation
+	}
+	defer releaseMutation()
 	m.mu.Lock()
 	auth, found := m.auths[authID]
 	if !found || auth == nil {
@@ -227,9 +232,12 @@ func (m *Manager) RaiseClaudeDeviceHighWater(ctx context.Context, authID string,
 	}
 	auth.Metadata[ClaudeDeviceHighWaterMetadataKey] = claudeDeviceHighWaterToMetadataMap(highWater)
 	auth.UpdatedAt = now
-	errPersist := m.persist(ctx, auth)
+	auth.Generation++
+	m.notifyAuthChangeLocked(authID)
 	snapshot = auth.Clone()
 	m.mu.Unlock()
+	errPersist := m.persist(ctx, snapshot)
+	releaseMutation()
 
 	if snapshot != nil && m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot)

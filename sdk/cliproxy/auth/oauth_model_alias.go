@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 const oauthModelAliasesAttributeKey = "model_aliases"

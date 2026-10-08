@@ -12,9 +12,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/claude"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/ir"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -128,9 +128,9 @@ type KiroToolUse struct {
 // This is the main entry point for request translation.
 // Note: The actual payload building happens in the executor, this just passes through
 // the OpenAI format which will be converted by BuildKiroPayloadFromOpenAI.
-func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	// Pass through the OpenAI format - actual conversion happens in BuildKiroPayloadFromOpenAI
-	return inputRawJSON
+	return inputRawJSON, nil
 }
 
 // BuildKiroPayloadFromOpenAI constructs the Kiro API request payload from OpenAI format.

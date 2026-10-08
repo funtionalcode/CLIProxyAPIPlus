@@ -3,7 +3,7 @@ package translator
 import (
 	"context"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 // RequestEnvelope represents a request in the translation pipeline.
@@ -14,6 +14,10 @@ type RequestEnvelope struct {
 	Body      []byte
 	ModelInfo *registry.ModelInfo
 	Metadata  map[string]any
+	// ConfigurationUpdatesChanged reports that a plugin normalizer modified Responses updates.
+	ConfigurationUpdatesChanged bool
+	// Err is a request-scoped translation failure. Callers must not send Body upstream when it is set.
+	Err error
 }
 
 // ResponseEnvelope represents a response in the translation pipeline.
@@ -69,7 +73,8 @@ func (p *Pipeline) UseResponse(mw ResponseMiddleware) {
 // TranslateRequest applies middleware and registry transformations.
 func (p *Pipeline) TranslateRequest(ctx context.Context, from, to Format, req RequestEnvelope) (RequestEnvelope, error) {
 	terminal := func(ctx context.Context, input RequestEnvelope) (RequestEnvelope, error) {
-		return p.registry.TranslateRequestEnvelope(ctx, from, to, input), nil
+		translated := p.registry.TranslateRequestEnvelope(ctx, from, to, input)
+		return translated, translated.Err
 	}
 
 	handler := terminal

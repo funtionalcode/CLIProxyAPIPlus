@@ -11,9 +11,9 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
@@ -277,7 +277,7 @@ func TestGetRequestDetails_ImageModelAllowedForImageEndpoint(t *testing.T) {
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 
-	providers, model, errMsg := handler.getRequestDetailsWithOptions("gpt-image-2", true)
+	providers, model, errMsg := handler.getRequestDetailsWithOptions("gpt-image-2", true, false)
 	if errMsg != nil {
 		t.Fatalf("getRequestDetailsWithOptions() error = %v", errMsg.Error)
 	}

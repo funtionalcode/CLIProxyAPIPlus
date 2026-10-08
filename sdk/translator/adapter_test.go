@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/ir"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/ir"
 )
 
 func TestWrapIRRequestMiddleware_ParsesAndSerializes(t *testing.T) {

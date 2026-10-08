@@ -17,13 +17,13 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func TestRuntimeAuthSyncHook_SynchronousModelAndSchedulerRestoration(t *testing.T) {
@@ -752,9 +752,27 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		t.Fatal("second auth registration in batch did not start")
 	}
 
+	// Workers may enter the hook in either order. Wait on the credential that
+	// completed registration while the other worker remains deliberately blocked.
+	completedUpdate := updateA
+	waitA := service.authRegistrationWaitCh(authAID)
+	waitB := service.authRegistrationWaitCh(authBID)
+	if waitA != nil {
+		if waitB == nil {
+			completedUpdate = updateB
+		} else {
+			select {
+			case <-waitA:
+			case <-waitB:
+				completedUpdate = updateB
+			case <-time.After(2 * time.Second):
+				t.Fatal("unblocked credential registration did not complete")
+			}
+		}
+	}
 	doneA := make(chan struct{})
 	go func() {
-		service.handleAuthUpdate(context.Background(), updateA)
+		service.handleAuthUpdate(context.Background(), completedUpdate)
 		close(doneA)
 	}()
 	select {

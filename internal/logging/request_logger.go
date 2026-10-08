@@ -27,10 +27,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 var requestLogID atomic.Uint64
@@ -497,7 +497,11 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 //
 // Returns:
 //   - *FileRequestLogger: A new file-based request logger instance
-func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int, successLogsMaxFiles int) *FileRequestLogger {
+func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int, successLogLimits ...int) *FileRequestLogger {
+	successLogsMaxFiles := 0
+	if len(successLogLimits) > 0 {
+		successLogsMaxFiles = successLogLimits[0]
+	}
 	// Resolve logsDir relative to the configuration file directory when it's not absolute.
 	if !filepath.IsAbs(logsDir) {
 		// If configDir is provided, resolve logsDir relative to it.
@@ -687,7 +691,7 @@ func (l *FileRequestLogger) logRequestWithHostAndSources(url, host, method strin
 		responseToWrite = response
 	}
 
-	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, filePath, errOpen := createUniqueLogFile(l.logsDir, filepath.Base(filePath))
 	if errOpen != nil {
 		return fmt.Errorf("failed to create log file: %w", errOpen)
 	}
@@ -908,6 +912,9 @@ func (l *FileRequestLogger) generateFilename(url string, body []byte, requestID 
 	var idPart string
 	if len(requestID) > 0 && requestID[0] != "" {
 		idPart = l.sanitizeForFilename(requestID[0])
+		if len(idPart) == 36 && idPart[8] == '-' && idPart[13] == '-' && idPart[18] == '-' && idPart[23] == '-' {
+			idPart = ShortRequestID(idPart)
+		}
 	} else {
 		id := requestLogID.Add(1)
 		idPart = fmt.Sprintf("%d", id)
@@ -2068,7 +2075,8 @@ func (w *FileStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, logFilePath, errOpen := createUniqueLogFile(w.logsDir, filepath.Base(w.logFilePath))
+	w.logFilePath = logFilePath
 	if errOpen != nil {
 		w.cleanupTempFiles()
 		return fmt.Errorf("failed to create log file: %w", errOpen)
@@ -2428,4 +2436,42 @@ func (w *homeStreamingLogWriter) Close() error {
 		return errMarshal
 	}
 	return client.RPushRequestLog(context.Background(), raw)
+}
+
+func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline []byte, websocketTimelineSource *FileBodySource, apiRequest []byte, apiRequestSource *FileBodySource, apiResponse []byte, apiResponseSource *FileBodySource, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *FileBodySource, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	return l.logRequestWithHostAndSources(url, requestDomainFromURL(url), method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline, websocketTimelineSource, apiRequest, apiRequestSource, apiResponse, apiResponseSource, apiWebsocketTimeline, apiWebsocketTimelineSource, apiResponseErrors, force, requestID, requestTimestamp, apiResponseTimestamp)
+}
+
+func createUniqueLogFile(dir, filename string) (*os.File, string, error) {
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+	idx := strings.LastIndex(base, "-")
+	prefix := base
+	idPart := ""
+	if idx > 0 {
+		prefix = base[:idx]
+		idPart = base[idx+1:]
+	}
+
+	target := filepath.Join(dir, filename)
+	logFile, errOpen := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if errOpen == nil {
+		return logFile, target, nil
+	}
+	if !os.IsExist(errOpen) {
+		return nil, "", errOpen
+	}
+
+	for seq := 1; seq <= 1000; seq++ {
+		candidateName := fmt.Sprintf("%s_%d-%s%s", prefix, seq, idPart, ext)
+		candidatePath := filepath.Join(dir, candidateName)
+		logCandidate, errCandidate := os.OpenFile(candidatePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if errCandidate == nil {
+			return logCandidate, candidatePath, nil
+		}
+		if !os.IsExist(errCandidate) {
+			return nil, "", errCandidate
+		}
+	}
+	return nil, "", fmt.Errorf("too many conflicting log files for %s", filename)
 }
