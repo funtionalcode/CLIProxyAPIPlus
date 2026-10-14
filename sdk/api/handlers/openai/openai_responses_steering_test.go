@@ -46,6 +46,7 @@ func TestResponsesInterruptInFlightAndReuseWebSocket(t *testing.T) {
 		{"payload_filter_is_final", true, true},
 		{"control_code_only", false, false},
 		{"control_target_only", false, false},
+		{"cancel_control", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			interrupt := []byte(fmt.Sprintf(`{"type":"response.interrupt","event_id":"ctrl-ok","response_id":"r1","discard_partial_items":%t,"future_option":{"keep":true}}`, tc.discard))
@@ -62,6 +63,15 @@ func TestResponsesInterruptInFlightAndReuseWebSocket(t *testing.T) {
 			if tc.name == "control_target_only" {
 				wrong = []byte(`{"type":"response.interrupt","response_id":"missing"}`)
 				rejection = []byte(`{"type":"error","response_id":"missing","status":400,"error":{"type":"invalid_request_error","message":"unknown response"}}`)
+			}
+			if tc.name == "cancel_control" {
+				wrong = []byte(`{"type":"response.cancel","event_id":"ctrl-wrong","response_id":"missing"}`)
+				interrupt = []byte(`{"type":"response.cancel","event_id":"ctrl-ok","response_id":"r1"}`)
+				expected = interrupt
+			}
+			terminalType := "response.completed"
+			if tc.name == "cancel_control" {
+				terminalType = "response.cancelled"
 			}
 			frames := make(chan []byte, 3)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +98,7 @@ func TestResponsesInterruptInFlightAndReuseWebSocket(t *testing.T) {
 					return
 				}
 				frames <- frame
-				_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","output":[],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}`))
+				_ = conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":%q,"response":{"id":"r1","output":[],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}`, terminalType)))
 				_, frame, err = conn.ReadMessage()
 				if err != nil {
 					return
@@ -156,7 +166,7 @@ func TestResponsesInterruptInFlightAndReuseWebSocket(t *testing.T) {
 			if err = client.WriteMessage(websocket.TextMessage, interrupt); err != nil {
 				t.Fatal(err)
 			}
-			readEvent("response.completed")
+			readEvent(terminalType)
 			if frame := <-frames; !bytes.Equal(frame, expected) {
 				t.Fatalf("interrupt changed: got %s, want %s", frame, expected)
 			}

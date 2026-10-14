@@ -285,16 +285,17 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					continue
 				}
 				switch gjson.GetBytes(payload, "type").String() {
-				case "response.interrupt":
-					// Interrupt is an opaque control frame, not a new generation or steering input.
+				case "response.interrupt", "response.cancel":
+					// Interrupt and cancel are opaque controls, not new generations or steering input.
+					controlType := gjson.GetBytes(payload, "type").String()
 					controlReq := req
 					controlReq.Payload = payload
 					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, controlReq, opts)(payload)
-					payload, _ = sjson.SetBytes(payload, "type", "response.interrupt")
+					payload, _ = sjson.SetBytes(payload, "type", controlType)
 					metadataMu.Lock()
 					if len(pendingInterrupts) >= 16 {
 						metadataMu.Unlock()
-						if !reject("too many outstanding response.interrupt requests") {
+						if !reject("too many outstanding response control requests") {
 							return
 						}
 						continue
@@ -315,7 +316,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 						fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 						return
 					}
-					log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=response.interrupt", sess.sessionID, auth.ID, initial.wsURL)
+					log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=%s", sess.sessionID, auth.ID, initial.wsURL, controlType)
 					continue
 
 				case "response.steer":
@@ -644,7 +645,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			if eventType == "response.output_item.done" {
 				collectCodexOutputItemDone(payload, outputItems, &outputFallback)
 			}
-			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
+			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.cancelled" || eventType == "response.canceled" {
 				responseActive = false
 				metadataMu.Lock()
 				automaticActive = false
