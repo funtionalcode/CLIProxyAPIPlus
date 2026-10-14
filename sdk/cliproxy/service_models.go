@@ -102,6 +102,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case constant.GeminiCLI:
 		models = registry.GetGeminiCLIModels()
 		models = applyExcludedModels(models, excluded)
+	case "gemini-web":
+		models = registry.GetGeminiWebModels()
+		models = applyExcludedModels(models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()

@@ -299,6 +299,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(cfg))
 	case constant.GeminiCLI:
 		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(cfg))
+	case "gemini-web":
+		s.coreManager.RegisterExecutor(executor.NewGeminiWebExecutor(cfg))
 	case "aistudio":
 		if s.wsGateway != nil {
 			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(cfg, a.ID, s.wsGateway))

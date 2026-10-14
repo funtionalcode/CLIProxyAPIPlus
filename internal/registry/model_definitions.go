@@ -612,6 +612,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetGeminiVertexModels()
 	case "gemini-cli":
 		return GetGeminiCLIModels()
+	case "gemini-web":
+		return GetGeminiWebModels()
 	case "aistudio":
 		return GetAIStudioModels()
 	case "codex":
