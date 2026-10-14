@@ -417,6 +417,13 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existing == nil || incoming == nil {
 		return false
 	}
+	if strings.EqualFold(existing.Provider, "gemini-web") && strings.EqualFold(incoming.Provider, "gemini-web") {
+		for _, key := range []string{"secure_1psid", "secure_1psidts"} {
+			if authMetadataString(existing, key) != authMetadataString(incoming, key) {
+				return true
+			}
+		}
+	}
 	if authAccessToken(existing) != authAccessToken(incoming) {
 		return true
 	}

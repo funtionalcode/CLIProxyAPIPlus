@@ -350,12 +350,18 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 // Remove deletes an auth from runtime state without persisting.
 // Disk and token-store deletion must be handled by the caller.
 func (m *Manager) Remove(ctx context.Context, id string) {
+	_ = m.RemoveWithAction(ctx, id, nil)
+}
+
+// RemoveWithAction serializes a file mutation with credential refresh/persistence.
+// The action must not call Manager methods. Failed actions leave the runtime intact.
+func (m *Manager) RemoveWithAction(ctx context.Context, id string, action func(*Auth) error) error {
 	if m == nil {
-		return
+		return nil
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return
+		return nil
 	}
 	_ = ctx
 	releaseMutation := m.lockAuthMutation(id)
@@ -365,7 +371,18 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	existing := m.auths[id]
 	if existing == nil {
 		m.mu.Unlock()
-		return
+		if action != nil {
+			return fmt.Errorf("credential no longer exists")
+		}
+		return nil
+	}
+	if action != nil {
+		snapshot := existing.Clone()
+		m.mu.Unlock()
+		if err := action(snapshot); err != nil {
+			return err
+		}
+		m.mu.Lock()
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
@@ -411,6 +428,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		}
 	}
 	m.persistCooldownStates(context.Background())
+	return nil
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {

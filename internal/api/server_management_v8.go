@@ -42,6 +42,7 @@ func (s *Server) registerManagementV8Routes() {
 
 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
 	v8.POST("/credentials", s.mgmt.UploadAuthFile)
+	v8.POST("/credentials/rename", s.mgmt.RenameAuthFileV8)
 	v8.DELETE("/credentials", s.mgmt.DeleteAuthFile)
 	v8.GET("/credentials/models", s.mgmt.GetAuthFileModels)
 	v8.GET("/credentials/download", s.mgmt.DownloadAuthFile)
