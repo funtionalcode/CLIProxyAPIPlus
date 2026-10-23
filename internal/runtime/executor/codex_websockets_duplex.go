@@ -115,6 +115,40 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		}
 		return true
 	}
+	writeControl := func(payload []byte) error {
+		if errCtx := streamCtx.Err(); errCtx != nil {
+			return errCtx
+		}
+		if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
+			return fmt.Errorf("websocket credential is no longer enabled")
+		}
+		controlType := gjson.GetBytes(payload, "type").String()
+		controlReq := req
+		controlReq.Payload = payload
+		payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, controlReq, opts)(payload)
+		payload, _ = sjson.SetBytes(payload, "type", controlType)
+		metadataMu.Lock()
+		if len(pendingInterrupts) >= 16 {
+			metadataMu.Unlock()
+			return statusErr{code: http.StatusBadRequest, msg: "too many outstanding response control requests"}
+		}
+		pendingInterrupts = append(pendingInterrupts, interruptSubmission{
+			eventID:    gjson.GetBytes(payload, "event_id").String(),
+			responseID: gjson.GetBytes(payload, "response_id").String(),
+		})
+		metadataMu.Unlock()
+		helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
+			URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
+		})
+		if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+			return mapCodexWebsocketWriteError(sess, conn, errWrite)
+		}
+		log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=%s", sess.sessionID, auth.ID, initial.wsURL, controlType)
+		return nil
+	}
+	// Immediate interrupt forwarding shares the duplex correlation state so an
+	// upstream control rejection cannot terminate the active generation.
+	sess.setInterruptHandler(conn, readCh, writeControl)
 	go func() {
 		defer close(writerDone)
 		fail := func(err error) {
@@ -138,7 +172,40 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				return false
 			}
 		}
+		authorizePayload := func(payload []byte, forceBoundModel bool) (allowed bool, keepOpen bool) {
+			authPayload := payload
+			boundModel := ""
+			if initial != nil {
+				boundModel = strings.TrimSpace(gjson.GetBytes(initial.originalPayload, "model").String())
+			}
+			if boundModel == "" {
+				boundModel = req.Model
+			}
+			explicitModel := strings.TrimSpace(gjson.GetBytes(authPayload, "model").String())
+			if boundModel != "" && json.Valid(authPayload) && (forceBoundModel || explicitModel == "" || explicitModel == req.Model) {
+				if withModel, errSet := sjson.SetBytes(bytes.Clone(authPayload), "model", boundModel); errSet == nil {
+					authPayload = withModel
+				}
+			}
+			errPayload, errAuth := cliproxyexecutor.AuthorizeWebsocketTurn(streamCtx, authPayload)
+			if errAuth != nil {
+				fail(errAuth)
+				return false, false
+			}
+			if len(errPayload) > 0 {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: errPayload}:
+					return false, true
+				case <-streamCtx.Done():
+					return false, false
+				}
+			}
+			return true, true
+		}
 		processCreatePayload := func(payload []byte) bool {
+			if allowed, keepOpen := authorizePayload(payload, false); !allowed {
+				return keepOpen
+			}
 			metadataMu.Lock()
 			isAppend := gjson.GetBytes(payload, "type").String() == "response.append"
 			prevID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
@@ -287,42 +354,31 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.interrupt", "response.cancel":
 					// Interrupt and cancel are opaque controls, not new generations or steering input.
-					controlType := gjson.GetBytes(payload, "type").String()
-					controlReq := req
-					controlReq.Payload = payload
-					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, controlReq, opts)(payload)
-					payload, _ = sjson.SetBytes(payload, "type", controlType)
-					metadataMu.Lock()
-					if len(pendingInterrupts) >= 16 {
-						metadataMu.Unlock()
-						if !reject("too many outstanding response control requests") {
+					if errControl := writeControl(payload); errControl != nil {
+						if localErr, ok := errControl.(statusErr); ok && localErr.code == http.StatusBadRequest {
+							if !reject(localErr.msg) {
+								return
+							}
+							continue
+						}
+						fail(errControl)
+						return
+					}
+					continue
+
+				case "response.steer":
+					if allowed, keepOpen := authorizePayload(payload, true); !allowed {
+						if !keepOpen {
 							return
 						}
 						continue
 					}
-					pendingInterrupts = append(pendingInterrupts, interruptSubmission{
-						eventID:    gjson.GetBytes(payload, "event_id").String(),
-						responseID: gjson.GetBytes(payload, "response_id").String(),
-					})
-					metadataMu.Unlock()
-					if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
-						fail(fmt.Errorf("websocket credential is no longer enabled"))
-						return
-					}
-					helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
-						URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
-					})
-					if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
-						fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
-						return
-					}
-					log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=%s", sess.sessionID, auth.ID, initial.wsURL, controlType)
-					continue
-
-				case "response.steer":
 					// Steering carries business input but must not inherit response.create defaults.
 					steerReq := req
 					steerReq.Payload = payload
+					if codexUseSIWCForRequest(ctx, auth, opts.Headers) {
+						payload = thinking.StripConfigurationUpdates(payload)
+					}
 					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, opts)(payload)
 					payload, _ = sjson.SetBytes(payload, "type", "response.steer")
 					parent := gjson.GetBytes(payload, "previous_response_id").String()
@@ -344,7 +400,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					}
 					metadataMu.Unlock()
 					// Control frames bypass response.create translations and built-in defaults.
-					// Unknown fields and unsupported input are left to upstream validation.
+					// Except for SIWC configuration_update stripping, unknown fields and unsupported
+					// input are left to upstream validation.
 					if !cliproxyexecutor.WebsocketAuthEnabled(streamCtx, auth.ID) {
 						fail(fmt.Errorf("websocket credential is no longer enabled"))
 						return
@@ -468,6 +525,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				if inst := gjson.GetBytes(current.clientBody, "instructions"); inst.Exists() {
 					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "instructions", []byte(inst.Raw))
+				}
+				if serviceTier := gjson.GetBytes(current.clientBody, "service_tier"); serviceTier.Exists() {
+					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "service_tier", []byte(serviceTier.Raw))
 				}
 				responseSettings[responseID] = &snapshot
 				responseOrder = append(responseOrder, responseID)

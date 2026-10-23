@@ -29,6 +29,9 @@ server:
   # Server port
   port: 8317
 
+  # Maximum incoming request body size in bytes. Zero disables the limit.
+  max-request-body-bytes: 0
+
   # Global token for GitHub requests (for example, release and asset downloads).
   # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
   # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.
@@ -388,6 +391,14 @@ upstream:
     # When true, scope quota cooldowns to the requested model rather than cooling down
     # the entire credential across all sibling models. Default is false.
     model-level-cooling: false
+
+    # Enable Codex tool_search on Claude Responses routes. Official Anthropic endpoints
+    # and keys with native-tool-search use native deferred tools; other keys use translation.
+    tool-search: false
+
+    # Retain the cloaked currentDate per session for this many days. The default is 7;
+    # an explicit 0 uses the existing one-hour continuity lifetime.
+    session-date-pin-days: 7
 
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
     # system prompt replacement), so the original system prompt is passed through to Claude as-is.

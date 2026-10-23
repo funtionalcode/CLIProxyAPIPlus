@@ -6,6 +6,9 @@ host: ''
 # Server port
 port: 8317
 
+# Maximum incoming request body size in bytes. Zero disables the limit.
+max-request-body-bytes: 0
+
 # IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
 # An empty list (the default) does not trust forwarded headers. Restart after changing this setting.
 trusted-proxies: []
@@ -331,17 +334,36 @@ routing:
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind
   # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
-  # maximizing Prompt/KV Cache reuse and minimizing TTFT.
+  # for the same model, maximizing Prompt/KV Cache reuse and minimizing TTFT.
+  # Guardian reviews (X-Openai-Subagent: guardian) may inherit across models from the
+  # parent's most recent selection on the same real provider, if that credential is eligible.
+  # This includes mixed-provider pools; result-driven TTL refreshes do not reorder selections.
+  # Existing child bindings take precedence. Parent lookups do not extend the parent's TTL.
   # When false, subagents are distributed across the credential pool via the fallback selector
   # for maximum parallel concurrency.
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
+  # Controls which credential failures rebind an established session to the failover credential:
+  #   - "any" (default): any credential-attributed failure unbinds and rebinds on failover.
+  #   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
+  #     request only while keeping the session bound to its original credential; quota and auth
+  #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+  # Ignored when routing.session-affinity is false.
+  session-affinity-rebind-on: "any"
 
 # Claude provider identity controls. All switches default to false; enable them
 # first on test accounts and verify CPA outbound traffic before wider rollout.
 claude:
   # Scope quota cooldowns to the requested model instead of the entire credential.
   model-level-cooling: false
+
+  # Enable Codex tool_search on Claude Responses routes. Official Anthropic endpoints
+  # and keys with native-tool-search use native deferred tools; other keys use translation.
+  tool-search: false
+
+  # Retain the cloaked currentDate per session for this many days. The default is 7;
+  # an explicit 0 uses the existing one-hour continuity lifetime.
+  session-date-pin-days: 7
   synthetic-device-id:
     enabled: false
     # Secret random salt used for: sha256(salt + stable upstream account key).

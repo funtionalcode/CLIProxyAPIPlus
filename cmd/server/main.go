@@ -156,6 +156,7 @@ func main() {
 	var discoverExclude []string
 	var vertexImport string
 	var vertexImportPrefix string
+	var siwcBind string
 	var configPath string
 	var password string
 	var homeJWT string
@@ -210,6 +211,7 @@ func main() {
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&loginProxyURL, "proxy-url", "", "Proxy URL applied to the OAuth login handshake; persisted on the resulting auth file (e.g. socks5://host:1080, http://host:8080, direct). Empty inherits the global proxy-url.")
+	flag.StringVar(&siwcBind, "siwc-bind", "", "Bind Sign in with ChatGPT (SIWC) credentials to a Codex credential file")
 	flag.StringVar(&password, "password", "", "")
 	flag.StringVar(&homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
 	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
@@ -667,7 +669,7 @@ func main() {
 				log.Errorf("failed to bootstrap git-backed config: %v", errCopy)
 				return
 			}
-			if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {
+			if errCommit := persistSeededConfig(context.Background(), configFilePath, gitStoreInst.PersistConfig); errCommit != nil {
 				log.Errorf("failed to commit initial git-backed config: %v", errCommit)
 				return
 			}
@@ -779,7 +781,7 @@ func main() {
 		ProxyURL:     loginProxyURL,
 	}
 
-	commandMode := vertexImport != "" || login || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin || cursorLogin || kiroLogin || kiroGoogleLogin || kiroAWSLogin || kiroAWSAuthCode || kiroImport || kiroIDCLogin || githubCopilotLogin || codeBuddyLogin
+	commandMode := vertexImport != "" || siwcBind != "" || login || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin || cursorLogin || kiroLogin || kiroGoogleLogin || kiroAWSLogin || kiroAWSAuthCode || kiroImport || kiroIDCLogin || githubCopilotLogin || codeBuddyLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -840,6 +842,9 @@ func main() {
 	} else if login {
 		// Handle Google/Gemini login
 		cmd.DoLogin(cfg, projectID, options)
+	} else if siwcBind != "" {
+		// Handle Sign in with ChatGPT (SIWC) credential binding
+		cmd.DoSIWCBind(cfg, siwcBind, options)
 	} else if antigravityLogin {
 		// Handle Antigravity login
 		cmd.DoAntigravityLogin(cfg, options)
@@ -1030,6 +1035,20 @@ func resolveManagementBaseURL(flagURL string, cfg *config.Config) string {
 		port = cfg.Port
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+// persistSeededConfig persists a config file freshly copied from the template. The file
+// is first rewritten as the startup load would, so a plaintext management secret never
+// reaches the remote store. When that fails, the copy is removed and an error returned,
+// so every start refuses the template instead of running from an unpersisted config.
+func persistSeededConfig(ctx context.Context, configFilePath string, persist func(context.Context) error) error {
+	if errPrepare := config.PrepareConfigFileForUpload(configFilePath); errPrepare != nil {
+		if errRemove := os.Remove(configFilePath); errRemove != nil {
+			log.WithError(errRemove).Warn("failed to remove the config copied from the template")
+		}
+		return fmt.Errorf("prepare config for upload: %w", errPrepare)
+	}
+	return persist(ctx)
 }
 
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {
