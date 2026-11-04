@@ -81,15 +81,12 @@ func TestUseGitHubCopilotResponsesEndpoint_CodexModel(t *testing.T) {
 }
 
 func TestUseGitHubCopilotResponsesEndpoint_RegistryResponsesOnlyModel(t *testing.T) {
-	t.Parallel()
 	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
 		t.Fatal("expected responses-only registry model to use /responses")
 	}
 }
 
 func TestUseGitHubCopilotResponsesEndpoint_DynamicRegistryWinsOverStatic(t *testing.T) {
-	t.Parallel()
-
 	reg := registry.GetGlobalRegistry()
 	clientID := "github-copilot-test-client"
 	reg.RegisterClient(clientID, "github-copilot", []*registry.ModelInfo{{

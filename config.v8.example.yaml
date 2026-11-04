@@ -32,6 +32,12 @@ server:
   # Maximum incoming request body size in bytes. Zero disables the limit.
   max-request-body-bytes: 0
 
+  # Compress downstream HTTP responses when the client accepts zstd or gzip.
+  # WebSocket upgrades are excluded; streaming responses retain encoder memory.
+  response-compression:
+    enabled: true
+    min-bytes: 1024
+
   # Global token for GitHub requests (for example, release and asset downloads).
   # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
   # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.

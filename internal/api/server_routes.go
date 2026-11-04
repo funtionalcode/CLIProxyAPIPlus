@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
@@ -570,9 +571,12 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
-// The handler is served as-is without additional middleware beyond the standard stack already configured.
+// Home mode does not support AI Studio and must not expose its websocket gateway.
 func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	if s == nil || s.engine == nil || handler == nil {
+		return
+	}
+	if cfg := s.getConfig(); cfg != nil && cfg.Home.Enabled {
 		return
 	}
 	trimmed := strings.TrimSpace(path)
@@ -593,6 +597,10 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	authMiddleware := AuthMiddleware(s.accessManager)
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
+			middleware.CaptureAuthenticatedRequestBody(c)
+			if c.IsAborted() {
+				return
+			}
 			c.Next()
 			return
 		}
@@ -1106,12 +1114,19 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 	if displayName == "" {
 		displayName = entry.id
 	}
-	return map[string]any{
+	model := map[string]any{
 		"name":                       name,
 		"displayName":                displayName,
 		"description":                displayName,
 		"supportedGenerationMethods": []string{"generateContent"},
 	}
+	if entry.contextLength > 0 {
+		model["inputTokenLimit"] = entry.contextLength
+	}
+	if entry.maxCompletionTokens > 0 {
+		model["outputTokenLimit"] = entry.maxCompletionTokens
+	}
+	return model
 }
 
 func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
@@ -1221,10 +1236,17 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 		return nil, fmt.Errorf("home models payload contains an error envelope")
 	}
 
+	sections := make([]string, 0, len(bySection))
+	for section := range bySection {
+		sections = append(sections, section)
+	}
+	sort.Strings(sections)
+
 	indexByID := make(map[string]int)
 	out := make([]homeModelEntry, 0, 256)
 	hasModelRecords := false
-	for section, models := range bySection {
+	for _, section := range sections {
+		models := bySection[section]
 		if models == nil {
 			return nil, fmt.Errorf("home models section %q is null", section)
 		}
@@ -1246,12 +1268,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				Provider:           provider,
 				NativeCapabilities: nativeCapabilities,
 			}
-			if index, ok := indexByID[id]; ok {
-				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
-				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
-				continue
-			}
-
+			created := homeModelInt64Value(model, "created", "created_at")
 			ownedBy, _ := model["owned_by"].(string)
 			ownedBy = strings.TrimSpace(ownedBy)
 			displayName, _ := model["display_name"].(string)
@@ -1260,10 +1277,13 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				displayName, _ = model["displayName"].(string)
 				displayName = strings.TrimSpace(displayName)
 			}
+			contextLength := int(homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens"))
+			maxContextLength := int(homeModelInt64Value(model, "max_context_length", "maxContextLength"))
+			maxCompletionTokens := int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens"))
 			thinking := homeModelThinkingSupport(model)
 
-			contextLength := int(homeModelInt64Value(model, "context_length", "contextLength", "context_window", "context_window_size", "context_window_tokens", "contextWindow", "max_context_window", "inputTokenLimit", "max_input_tokens"))
-			maxCompletionTokens := int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "max_output_tokens", "output_token_limit", "outputTokenLimit", "max_tokens"))
+			contextLength = int(homeModelInt64Value(model, "context_length", "contextLength", "context_window", "context_window_size", "context_window_tokens", "contextWindow", "max_context_window", "inputTokenLimit", "max_input_tokens"))
+			maxCompletionTokens = int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "max_output_tokens", "output_token_limit", "outputTokenLimit", "max_tokens"))
 			if info := registry.LookupModelInfo(id); info != nil {
 				if contextLength == 0 {
 					contextLength = info.ContextLength
@@ -1273,15 +1293,42 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				}
 			}
 
+			if index, ok := indexByID[id]; ok {
+				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
+				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
+				if out[index].created <= 0 && created > 0 {
+					out[index].created = created
+				}
+				if out[index].ownedBy == "" && ownedBy != "" {
+					out[index].ownedBy = ownedBy
+				}
+				if out[index].displayName == "" && displayName != "" {
+					out[index].displayName = displayName
+				}
+				if out[index].contextLength <= 0 && contextLength > 0 {
+					out[index].contextLength = contextLength
+				}
+				if out[index].maxContextLength <= 0 && maxContextLength > 0 {
+					out[index].maxContextLength = maxContextLength
+				}
+				if out[index].maxCompletionTokens <= 0 && maxCompletionTokens > 0 {
+					out[index].maxCompletionTokens = maxCompletionTokens
+				}
+				if out[index].thinking == nil && thinking != nil {
+					out[index].thinking = thinking
+				}
+				continue
+			}
+
 			indexByID[id] = len(out)
 			out = append(out, homeModelEntry{
 				id:                     id,
-				created:                homeModelInt64Value(model, "created", "created_at"),
+				created:                created,
 				ownedBy:                ownedBy,
 				displayName:            displayName,
 				contextLength:          contextLength,
+				maxContextLength:       maxContextLength,
 				maxCompletionTokens:    maxCompletionTokens,
-				maxContextLength:       int(homeModelInt64Value(model, "max_context_length", "maxContextLength")),
 				thinking:               thinking,
 				providers:              appendUniqueHomeProvider(nil, provider),
 				nativeCapabilityRoutes: []registry.NativeCapabilityRoute{route},

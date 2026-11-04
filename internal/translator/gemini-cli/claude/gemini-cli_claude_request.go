@@ -8,6 +8,7 @@ package claude
 import (
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
@@ -115,7 +116,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) ([
 						if len(toolCallIDs) > 1 {
 							funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
 						}
-						toolResult := util.ConvertClaudeToolResultContent(contentResult.Get("content"))
+						toolResult := util.ConvertClaudeToolResultContent(ojson.Parse(contentResult.Get("content").Raw))
 						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", util.SanitizeFunctionName(funcName))
 						if toolResult.ResultIsRaw {

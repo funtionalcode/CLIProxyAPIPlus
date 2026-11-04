@@ -1,4 +1,14 @@
 # Legacy-layout template with CLIProxyAPIPlus extensions. See config.v8.example.yaml for the v8 layout.
+# Optional model catalog sources and HTTP response compression use v8 keys.
+# See config.v8.example.yaml for their defaults and descriptions.
+# models:
+#   catalog: ""
+#   codex-catalog: ""
+#   devin-catalog: ""
+# server:
+#   response-compression:
+#     enabled: true
+#     min-bytes: 1024
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
 host: ''

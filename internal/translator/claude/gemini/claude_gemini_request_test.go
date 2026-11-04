@@ -2,10 +2,11 @@ package gemini
 
 import (
 	"fmt"
+	"github.com/tidwall/gjson"
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertGeminiRequestToClaude_ParameterlessToolSchema(t *testing.T) {
@@ -52,7 +53,7 @@ func TestConvertGeminiRequestToClaude_ThinkingSummaryVisibility(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			out, _ := ConvertGeminiRequestToClaude("claude-opus-5-5", []byte(test.input), false)
-			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.wanted {
+			if got := ojson.GetBytesNoCopy(out, "thinking.display").String(); got != test.wanted {
 				t.Fatalf("thinking.display = %q, want %q; body=%s", got, test.wanted, out)
 			}
 		})
@@ -101,12 +102,12 @@ func TestConvertGeminiRequestToClaude_PreservesCustomToolIDs(t *testing.T) {
 
 			out, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", raw, false)
 
-			gotCallID := gjson.GetBytes(out, "messages.0.content.0.id").String()
+			gotCallID := ojson.GetBytesNoCopy(out, "messages.0.content.0.id").String()
 			if gotCallID != tt.want {
 				t.Fatalf("expected tool_use id %q, got %q; output=%s", tt.want, gotCallID, string(out))
 			}
 
-			gotResultID := gjson.GetBytes(out, "messages.1.content.0.tool_use_id").String()
+			gotResultID := ojson.GetBytesNoCopy(out, "messages.1.content.0.tool_use_id").String()
 			if gotResultID != tt.want {
 				t.Fatalf("expected tool_result tool_use_id %q, got %q; output=%s", tt.want, gotResultID, string(out))
 			}
@@ -126,7 +127,7 @@ func TestConvertGeminiRequestToClaude_GroupsConsecutiveRoleTurns(t *testing.T) {
 	}`)
 
 	out, _ := ConvertGeminiRequestToClaude("claude-test", raw, false)
-	messages := gjson.GetBytes(out, "messages").Array()
+	messages := ojson.GetBytesNoCopy(out, "messages").Array()
 	if len(messages) != 2 {
 		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
 	}
@@ -160,7 +161,7 @@ func TestConvertGeminiRequestToClaude_KeepsSystemInstructionUserSeparate(t *test
 		"contents":[{"role":"user","parts":[{"text":"question"}]}]
 	}`)
 	out, _ := ConvertGeminiRequestToClaude("claude-test", raw, false)
-	messages := gjson.GetBytes(out, "messages").Array()
+	messages := ojson.GetBytesNoCopy(out, "messages").Array()
 	if len(messages) != 2 {
 		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
 	}
@@ -178,7 +179,7 @@ func TestConvertGeminiRequestToClaude_SupportsCamelCaseSystemInstruction(t *test
 		"contents":[{"role":"user","parts":[{"text":"question"}]}]
 	}`)
 	out, _ := ConvertGeminiRequestToClaude("claude-test", raw, false)
-	messages := gjson.GetBytes(out, "messages").Array()
+	messages := ojson.GetBytesNoCopy(out, "messages").Array()
 	if len(messages) != 2 {
 		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
 	}
@@ -206,20 +207,20 @@ func TestConvertGeminiRequestToClaude_DropsTemperature(t *testing.T) {
 
 	out, _ := ConvertGeminiRequestToClaude("claude-sonnet-5", raw, false)
 
-	if gjson.GetBytes(out, "temperature").Exists() {
+	if ojson.GetBytesNoCopy(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
 	}
-	if got := gjson.GetBytes(out, "top_p").Float(); got != 0.8 {
+	if got := ojson.GetBytesNoCopy(out, "top_p").Float(); got != 0.8 {
 		t.Fatalf("top_p = %v, want 0.8", got)
 	}
 }
 
 func TestConvertGeminiRequestToClaude_AcceptsCamelInlineData(t *testing.T) {
 	out, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}]}`), false)
-	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "image" {
+	if got := ojson.GetBytesNoCopy(out, "messages.0.content.0.type").String(); got != "image" {
 		t.Fatalf("content type = %q, want image. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.source.media_type").String(); got != "image/png" {
+	if got := ojson.GetBytesNoCopy(out, "messages.0.content.0.source.media_type").String(); got != "image/png" {
 		t.Fatalf("media_type = %q, want image/png. Output: %s", got, string(out))
 	}
 }
@@ -228,13 +229,13 @@ func TestConvertGeminiRequestToClaude_SplitsNonImageInlineDataByMIME(t *testing.
 	out, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", []byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`), false)
 
 	// A user attachment Claude cannot read is dropped rather than replaced by placeholder text.
-	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+	if got := ojson.GetBytesNoCopy(out, "messages.0.content.#").Int(); got != 1 {
 		t.Fatalf("user content has %d blocks, want only the document. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "document" {
+	if got := ojson.GetBytesNoCopy(out, "messages.0.content.0.type").String(); got != "document" {
 		t.Fatalf("document content type = %q, want document. Output: %s", got, string(out))
 	}
-	if gjson.GetBytes(out, "messages.0.content.#(type==\"image\")").Exists() {
+	if ojson.GetBytesNoCopy(out, "messages.0.content.#(type==\"image\")").Exists() {
 		t.Fatalf("non-image inlineData must not be converted to image. Output: %s", string(out))
 	}
 	if strings.Contains(string(out), "Media content") {
@@ -251,7 +252,7 @@ func TestConvertGeminiRequestToClaude_DropsHiddenThoughtParts(t *testing.T) {
 			]
 		}`), false)
 
-		messages := gjson.GetBytes(out, "messages").Array()
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
 		if len(messages) != 1 || messages[0].Get("role").String() != "user" || messages[0].Get("content.0.text").String() != "continue" {
 			t.Fatalf("hidden thought turn was not dropped. Output: %s", string(out))
 		}
@@ -265,7 +266,7 @@ func TestConvertGeminiRequestToClaude_DropsHiddenThoughtParts(t *testing.T) {
 			]}]
 		}`), false)
 
-		content := gjson.GetBytes(out, "messages.0.content").Array()
+		content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 		if len(content) != 1 || content[0].Get("type").String() != "text" || content[0].Get("text").String() != "visible answer" {
 			t.Fatalf("hidden thought was not dropped independently of visible text. Output: %s", string(out))
 		}
@@ -312,10 +313,10 @@ func TestConvertGeminiRequestToClaude_DeterministicToolIDs(t *testing.T) {
 	wantID1 := "toolu_gemini_0000000000000001"
 	wantID2 := "toolu_gemini_0000000000000002"
 
-	gotCall1 := gjson.GetBytes(out1, "messages.0.content.0.id").String()
-	gotResp1 := gjson.GetBytes(out1, "messages.1.content.0.tool_use_id").String()
-	gotCall2 := gjson.GetBytes(out1, "messages.2.content.0.id").String()
-	gotResp2 := gjson.GetBytes(out1, "messages.3.content.0.tool_use_id").String()
+	gotCall1 := ojson.GetBytesNoCopy(out1, "messages.0.content.0.id").String()
+	gotResp1 := ojson.GetBytesNoCopy(out1, "messages.1.content.0.tool_use_id").String()
+	gotCall2 := ojson.GetBytesNoCopy(out1, "messages.2.content.0.id").String()
+	gotResp2 := ojson.GetBytesNoCopy(out1, "messages.3.content.0.tool_use_id").String()
 
 	if gotCall1 != wantID1 || gotResp1 != wantID1 {
 		t.Fatalf("expected first tool pair to have id %q, got call=%q, resp=%q", wantID1, gotCall1, gotResp1)
@@ -351,10 +352,10 @@ func TestConvertGeminiRequestToClaude_PreservesCallerSuppliedMetadataUserID(t *t
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			out, _ := ConvertGeminiRequestToClaude("claude-test", []byte(tc.rawJSON), false)
-			if !gjson.ValidBytes(out) {
+			if !ojson.ValidBytes(out) {
 				t.Fatalf("output is invalid json: %s", string(out))
 			}
-			got := gjson.GetBytes(out, "metadata.user_id").String()
+			got := ojson.GetBytesNoCopy(out, "metadata.user_id").String()
 			if got != tc.expected {
 				t.Fatalf("metadata.user_id = %q, want %q", got, tc.expected)
 			}
@@ -367,8 +368,8 @@ func TestConvertGeminiRequestToClaude_DifferentSessionsProduceDifferentUserIDs(t
 	b := []byte(`{"model":"claude-test","prompt_cache_key":"gemini-session-b","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
 	outA, _ := ConvertGeminiRequestToClaude("claude-test", a, false)
 	outB, _ := ConvertGeminiRequestToClaude("claude-test", b, false)
-	idA := gjson.GetBytes(outA, "metadata.user_id").String()
-	idB := gjson.GetBytes(outB, "metadata.user_id").String()
+	idA := ojson.GetBytesNoCopy(outA, "metadata.user_id").String()
+	idB := ojson.GetBytesNoCopy(outB, "metadata.user_id").String()
 	if idA == idB {
 		t.Fatalf("different prompt_cache_key produced identical metadata.user_id: %q", idA)
 	}
@@ -379,13 +380,16 @@ func TestConvertGeminiRequestToClaude_DefaultRoleDifferentContentProducesDiffere
 	b := []byte(`{"contents":[{"parts":[{"text":"second prompt"}]}]}`)
 	outA, _ := ConvertGeminiRequestToClaude("claude-test", a, false)
 	outB, _ := ConvertGeminiRequestToClaude("claude-test", b, false)
-	idA := gjson.GetBytes(outA, "metadata.user_id").String()
-	idB := gjson.GetBytes(outB, "metadata.user_id").String()
+	idA := ojson.GetBytesNoCopy(outA, "metadata.user_id").String()
+	idB := ojson.GetBytesNoCopy(outB, "metadata.user_id").String()
 	if idA == "" || idB == "" || idA == "unknown" || idB == "unknown" {
 		t.Fatalf("expected valid derived user_id without role, got idA=%q idB=%q", idA, idB)
 	}
 	if idA == idB {
 		t.Fatalf("different prompt texts without role produced identical metadata.user_id: %q", idA)
+	}
+	if got := ojson.GetBytesNoCopy(outA, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user; out=%s", got, string(outA))
 	}
 }
 
@@ -436,25 +440,25 @@ func TestConvertGeminiRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchem
 	result, _ := ConvertGeminiRequestToClaude("claude-test", []byte(inputJSON), false)
 
 	// 1. Tool declaration name sanitized
-	toolName := gjson.GetBytes(result, "tools.0.name").String()
+	toolName := ojson.GetBytesNoCopy(result, "tools.0.name").String()
 	if toolName != "mcp_server_get_data" {
 		t.Fatalf("tools.0.name = %q, want mcp_server_get_data. Output: %s", toolName, result)
 	}
 
 	// 2. Fallback input_schema
-	schema := gjson.GetBytes(result, "tools.0.input_schema")
+	schema := ojson.GetBytesNoCopy(result, "tools.0.input_schema")
 	if !schema.Exists() || schema.Get("type").String() != "object" {
 		t.Fatalf("tools.0.input_schema = %s, want object schema. Output: %s", schema, result)
 	}
 
 	// 3. Historical tool_use in model/assistant turn sanitized
-	toolUseName := gjson.GetBytes(result, "messages.0.content.0.name").String()
+	toolUseName := ojson.GetBytesNoCopy(result, "messages.0.content.0.name").String()
 	if toolUseName != "mcp_server_get_data" {
 		t.Fatalf("messages.0.content.0.name = %q, want mcp_server_get_data. Output: %s", toolUseName, result)
 	}
 
 	// 4. Tool choice name sanitized
-	toolChoiceName := gjson.GetBytes(result, "tool_choice.name").String()
+	toolChoiceName := ojson.GetBytesNoCopy(result, "tool_choice.name").String()
 	if toolChoiceName != "mcp_server_get_data" {
 		t.Fatalf("tool_choice.name = %q, want mcp_server_get_data. Output: %s", toolChoiceName, result)
 	}

@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"github.com/MoeForge/moego/ojson"
 	"net/http"
 	"time"
 
@@ -89,7 +90,7 @@ func tokenizerForModel(model string) (tokenizer.Codec, error) {
 }
 
 func collectOpenAIContent(content gjson.Result, segments *[]string) {
-	helps.CollectOpenAIContent(content, segments)
+	helps.CollectOpenAIContent(ojson.Parse(content.Raw), segments)
 }
 
 type usageReporter struct {

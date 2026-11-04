@@ -920,7 +920,7 @@ func (l *FileRequestLogger) generateFilename(url string, body []byte, requestID 
 		idPart = fmt.Sprintf("%d", id)
 	}
 
-	return fmt.Sprintf("%s-%s.log", sanitized, idPart)
+	return filepath.Base(fmt.Sprintf("%s-%s.log", sanitized, idPart))
 }
 
 func (l *FileRequestLogger) requestModelName(rawURL string, body []byte) string {
@@ -987,6 +987,7 @@ func modelNameFromRequestURL(rawURL string) string {
 func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	// Replace slashes with hyphens
 	sanitized := strings.ReplaceAll(path, "/", "-")
+	sanitized = strings.ReplaceAll(sanitized, "\\", "-")
 
 	// Replace colons with hyphens
 	sanitized = strings.ReplaceAll(sanitized, ":", "-")
@@ -994,13 +995,16 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	// Replace other problematic characters with hyphens
 	reg := regexp.MustCompile(`[<>:"|?*\s]`)
 	sanitized = reg.ReplaceAllString(sanitized, "-")
+	for strings.Contains(sanitized, "..") {
+		sanitized = strings.ReplaceAll(sanitized, "..", "-")
+	}
 
 	// Remove multiple consecutive hyphens
 	reg = regexp.MustCompile(`-+`)
 	sanitized = reg.ReplaceAllString(sanitized, "-")
 
 	// Remove leading/trailing hyphens
-	sanitized = strings.Trim(sanitized, "-")
+	sanitized = strings.Trim(sanitized, "-.")
 
 	// Handle empty result
 	if sanitized == "" {
@@ -2443,6 +2447,9 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 }
 
 func createUniqueLogFile(dir, filename string) (*os.File, string, error) {
+	if filename == "" || filename == "." || filename == ".." || strings.ContainsAny(filename, `/\`) || strings.Contains(filename, "..") || filepath.Base(filename) != filename {
+		return nil, "", fmt.Errorf("invalid log filename: %q", filename)
+	}
 	ext := filepath.Ext(filename)
 	base := strings.TrimSuffix(filename, ext)
 	idx := strings.LastIndex(base, "-")

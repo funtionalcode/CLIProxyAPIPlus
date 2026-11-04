@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -231,7 +232,7 @@ func TestResponsesSteerInFlightWebSocket(t *testing.T) {
 			t.Errorf("read create: %v", err)
 			return
 		}
-		if gjson.GetBytes(p, "type").String() != "response.create" {
+		if ojson.GetBytesNoCopy(p, "type").String() != "response.create" {
 			t.Errorf("expected response.create, got %s", p)
 			return
 		}
@@ -245,7 +246,7 @@ func TestResponsesSteerInFlightWebSocket(t *testing.T) {
 			t.Errorf("read steer: %v", err)
 			return
 		}
-		if gjson.GetBytes(steerPayload, "type").String() == "response.steer" {
+		if ojson.GetBytesNoCopy(steerPayload, "type").String() == "response.steer" {
 			close(upstreamReceivedSteer)
 			_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}`))
 		} else {
@@ -298,7 +299,7 @@ func TestResponsesSteerInFlightWebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read response.created: %v", err)
 	}
-	if gjson.GetBytes(p, "type").String() != "response.created" {
+	if ojson.GetBytesNoCopy(p, "type").String() != "response.created" {
 		t.Fatalf("expected response.created, got %s", p)
 	}
 
