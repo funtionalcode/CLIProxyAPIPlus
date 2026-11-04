@@ -164,6 +164,8 @@ func (c ClaudeConfig) SessionDatePinRetention() time.Duration {
 // to the final Anthropic-Beta set; InjectDiagnostics and ClientRequestID tune the
 // first-party Claude Code CLI request shape.
 type ClaudeHeaderDefaults struct {
+	// AutoUpdate periodically replaces software versions with official stable releases.
+	AutoUpdate             bool     `yaml:"auto-update,omitempty" json:"auto-update,omitempty"`
 	UserAgent              string   `yaml:"user-agent" json:"user-agent"`
 	PackageVersion         string   `yaml:"package-version" json:"package-version"`
 	RuntimeVersion         string   `yaml:"runtime-version" json:"runtime-version"`
@@ -211,6 +213,7 @@ const (
 // model requests for OAuth/file-backed auth when the client omits them.
 // UserAgent applies to HTTP and websocket requests; BetaFeatures only applies to websockets.
 type CodexHeaderDefaults struct {
+	AutoUpdate   bool   `yaml:"auto-update,omitempty" json:"auto-update,omitempty"`
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }

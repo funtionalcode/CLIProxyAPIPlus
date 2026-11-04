@@ -938,6 +938,7 @@ nonstream-keepalive-interval: 0
 # the same exact software baseline rather than learning newer client versions.
 # claude-header-defaults:
 #   user-agent: "claude-cli/2.1.280 (external, cli)"
+#   auto-update: false  # opt in: overwrite CLI/SDK/Node versions at startup and every 3h; keep values on lookup failure
 #   package-version: "0.112.1"
 #   runtime-version: "v26.3.0"
 #   os: "MacOS"
@@ -955,6 +956,7 @@ nonstream-keepalive-interval: 0
 # Default headers for Codex OAuth model requests. These are used only when the
 # incoming client omits them and do not apply to codex-api-key entries.
 # codex-header-defaults:
+#   auto-update: false  # opt in: update the official stable Codex CLI version, preserving the User-Agent platform suffix
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 

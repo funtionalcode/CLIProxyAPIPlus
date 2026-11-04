@@ -363,6 +363,11 @@ func (s *Server) Start() error {
 
 	httpErrCh := make(chan error, 1)
 	acceptErrCh := make(chan error, 1)
+	updateCtx, cancelUpdates := context.WithCancel(context.Background())
+	defer cancelUpdates()
+	if s.mgmt != nil {
+		go s.mgmt.RunHeaderDefaultsUpdater(updateCtx)
+	}
 
 	go func() {
 		httpErrCh <- s.server.Serve(httpListener)
