@@ -843,7 +843,9 @@ func reasoningEffortFromConfig(config ThinkingConfig) string {
 	case ModeAuto:
 		return string(LevelAuto)
 	case ModeLevel:
-		return strings.ToLower(strings.TrimSpace(string(config.Level)))
+		// JSON lookups may borrow the request buffer. Usage records outlive the
+		// request, so retaining even a short effort label must not pin its body.
+		return strings.Clone(strings.ToLower(strings.TrimSpace(string(config.Level))))
 	case ModeBudget:
 		level, ok := ConvertBudgetToLevel(config.Budget)
 		if !ok {
