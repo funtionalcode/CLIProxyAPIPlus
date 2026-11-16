@@ -115,10 +115,10 @@ package signature
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"google.golang.org/protobuf/encoding/protowire"
 )

@@ -3,14 +3,14 @@
 package common
 
 import (
-	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 )
 
 // Tool call ID validation constants.
@@ -133,14 +133,14 @@ func ValidateToolCallJSON(data []byte) *ToolCallValidationError {
 	}
 
 	// Must be a JSON object for tool call arguments
-	if !gjson.Valid(trimmed) {
+	if !ojson.Valid(trimmed) {
 		return &ToolCallValidationError{
 			Field:   "arguments",
 			Message: "invalid JSON: " + truncateString(trimmed, 100),
 		}
 	}
 
-	parsed := gjson.Parse(trimmed)
+	parsed := ojson.Parse(trimmed)
 	if !parsed.IsObject() {
 		return &ToolCallValidationError{
 			Field:   "arguments",
@@ -162,8 +162,8 @@ func ValidateToolCallPairing(items []json.RawMessage) (orphanedCalls []string, o
 			continue
 		}
 
-		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+		itemType := strings.TrimSpace(ojson.GetBytes(item, "type").String())
+		callID := strings.TrimSpace(ojson.GetBytes(item, "call_id").String())
 
 		if callID == "" {
 			continue
@@ -217,8 +217,8 @@ func RepairToolCallPairing(items []json.RawMessage) []json.RawMessage {
 		if len(item) == 0 {
 			continue
 		}
-		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+		itemType := strings.TrimSpace(ojson.GetBytes(item, "type").String())
+		callID := strings.TrimSpace(ojson.GetBytes(item, "call_id").String())
 		if callID == "" {
 			continue
 		}
@@ -258,9 +258,9 @@ func RepairToolCallPairing(items []json.RawMessage) []json.RawMessage {
 		if len(item) == 0 {
 			continue
 		}
-		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		itemType := strings.TrimSpace(ojson.GetBytes(item, "type").String())
 		if IsToolCallOutputType(itemType) {
-			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			callID := strings.TrimSpace(ojson.GetBytes(item, "call_id").String())
 			if _, orphaned := orphanedOutputs[callID]; orphaned {
 				continue
 			}
@@ -280,7 +280,7 @@ func ValidateAndSanitizeToolCall(item []byte) (*ValidatedToolCall, *ToolCallVali
 		}
 	}
 
-	itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+	itemType := strings.TrimSpace(ojson.GetBytes(item, "type").String())
 	if !IsToolCallType(itemType) {
 		return nil, &ToolCallValidationError{
 			Field:   "type",
@@ -288,18 +288,18 @@ func ValidateAndSanitizeToolCall(item []byte) (*ValidatedToolCall, *ToolCallVali
 		}
 	}
 
-	callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+	callID := strings.TrimSpace(ojson.GetBytes(item, "call_id").String())
 	sanitizedID, err := ValidateToolCallID(callID)
 	if err != nil {
 		return nil, err
 	}
 
-	name := strings.TrimSpace(gjson.GetBytes(item, "name").String())
+	name := strings.TrimSpace(ojson.GetBytes(item, "name").String())
 	if nameErr := ValidateToolName(name); nameErr != nil {
 		return nil, nameErr
 	}
 
-	arguments := gjson.GetBytes(item, "arguments")
+	arguments := ojson.GetBytes(item, "arguments")
 	if argErr := ValidateToolCallJSON([]byte(arguments.Raw)); argErr != nil {
 		return nil, argErr
 	}
@@ -322,7 +322,7 @@ func ValidateAndSanitizeToolOutput(item []byte) (*ValidatedToolOutput, *ToolCall
 		}
 	}
 
-	itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+	itemType := strings.TrimSpace(ojson.GetBytes(item, "type").String())
 	if !IsToolCallOutputType(itemType) {
 		return nil, &ToolCallValidationError{
 			Field:   "type",
@@ -330,13 +330,13 @@ func ValidateAndSanitizeToolOutput(item []byte) (*ValidatedToolOutput, *ToolCall
 		}
 	}
 
-	callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+	callID := strings.TrimSpace(ojson.GetBytes(item, "call_id").String())
 	sanitizedID, err := ValidateToolCallID(callID)
 	if err != nil {
 		return nil, err
 	}
 
-	output := gjson.GetBytes(item, "output")
+	output := ojson.GetBytes(item, "output")
 
 	return &ValidatedToolOutput{
 		CallID: sanitizedID,

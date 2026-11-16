@@ -88,6 +88,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.Pprof.Addr = DefaultPprofAddr
 	}
 
+	cfg.KVStore.Path = strings.TrimSpace(cfg.KVStore.Path)
+
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
 	}
@@ -131,6 +133,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.SanitizeClaudeConfig()
 	cfg.SanitizeClaudeKeys()
 	cfg.SanitizeKiroKeys()
+	cfg.SanitizeAntigravity()
+	cfg.SanitizeDevin()
 	cfg.SanitizeOpenAICompatibility()
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()

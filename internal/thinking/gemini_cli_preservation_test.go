@@ -3,10 +3,10 @@ package thinking_test
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/geminicli"
-	"github.com/tidwall/gjson"
 )
 
 func TestGeminiCLIThinkingBodyUsesStrictBudgetValidation(t *testing.T) {
@@ -33,7 +33,7 @@ func TestStripThinkingConfig_GeminiCLI(t *testing.T) {
 	body := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}},"contents":[]}}`)
 
 	out := thinking.StripThinkingConfig(body, "gemini-cli")
-	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() {
+	if ojson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() {
 		t.Fatalf("Gemini CLI thinking config was not removed: %s", out)
 	}
 }

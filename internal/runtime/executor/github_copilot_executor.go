@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	copilotauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -21,7 +22,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -503,7 +503,7 @@ func detectLastConversationRole(body []byte) string {
 		return ""
 	}
 
-	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
+	if messages := ojson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
 		arr := messages.Array()
 		for i := len(arr) - 1; i >= 0; i-- {
 			if role := arr[i].Get("role").String(); role != "" {
@@ -512,7 +512,7 @@ func detectLastConversationRole(body []byte) string {
 		}
 	}
 
-	if inputs := gjson.GetBytes(body, "input"); inputs.Exists() && inputs.IsArray() {
+	if inputs := ojson.GetBytes(body, "input"); inputs.Exists() && inputs.IsArray() {
 		arr := inputs.Array()
 		for i := len(arr) - 1; i >= 0; i-- {
 			item := arr[i]
@@ -538,7 +538,7 @@ func detectLastConversationRole(body []byte) string {
 // Returns true if the request includes image_url or image type content blocks.
 func detectVisionContent(body []byte) bool {
 	// Parse messages array
-	messagesResult := gjson.GetBytes(body, "messages")
+	messagesResult := ojson.GetBytes(body, "messages")
 	if !messagesResult.Exists() || !messagesResult.IsArray() {
 		return false
 	}
@@ -609,7 +609,7 @@ func containsEndpoint(endpoints []string, endpoint string) bool {
 // to a joined string. GitHub Copilot requires assistant content as a string;
 // sending it as an array causes Claude models to re-answer all previous prompts.
 func flattenAssistantContent(body []byte) []byte {
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytes(body, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return body
 	}
@@ -649,7 +649,7 @@ func flattenAssistantContent(body []byte) []byte {
 }
 
 func normalizeGitHubCopilotChatTools(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytes(body, "tools")
 	if tools.Exists() {
 		filtered := "[]"
 		if tools.IsArray() {
@@ -663,11 +663,11 @@ func normalizeGitHubCopilotChatTools(body []byte) []byte {
 		body, _ = sjson.SetRawBytes(body, "tools", []byte(filtered))
 	}
 
-	toolChoice := gjson.GetBytes(body, "tool_choice")
+	toolChoice := ojson.GetBytes(body, "tool_choice")
 	if !toolChoice.Exists() {
 		return body
 	}
-	if toolChoice.Type == gjson.String {
+	if toolChoice.Type == ojson.String {
 		switch toolChoice.String() {
 		case "auto", "none", "required":
 			return body
@@ -679,10 +679,10 @@ func normalizeGitHubCopilotChatTools(body []byte) []byte {
 
 func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	body = stripGitHubCopilotResponsesUnsupportedFields(body)
-	input := gjson.GetBytes(body, "input")
+	input := ojson.GetBytes(body, "input")
 	if input.Exists() {
 		// If input is already a string or array, keep it as-is.
-		if input.Type == gjson.String || input.IsArray() {
+		if input.Type == ojson.String || input.IsArray() {
 			return body
 		}
 		// Non-string/non-array input: stringify as fallback.
@@ -696,7 +696,7 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	inputArr := "[]"
 
 	// System messages → developer role
-	if system := gjson.GetBytes(body, "system"); system.Exists() {
+	if system := ojson.GetBytes(body, "system"); system.Exists() {
 		var systemParts []string
 		if system.IsArray() {
 			for _, part := range system.Array() {
@@ -704,7 +704,7 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 					systemParts = append(systemParts, txt)
 				}
 			}
-		} else if system.Type == gjson.String {
+		} else if system.Type == ojson.String {
 			systemParts = append(systemParts, system.String())
 		}
 		if len(systemParts) > 0 {
@@ -719,7 +719,7 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	}
 
 	// Messages → structured input items
-	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
+	if messages := ojson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
 		for _, msg := range messages.Array() {
 			role := msg.Get("role").String()
 			content := msg.Get("content")
@@ -729,7 +729,7 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 			}
 
 			// Simple string content
-			if content.Type == gjson.String {
+			if content.Type == ojson.String {
 				textType := "input_text"
 				if role == "assistant" {
 					textType = "output_text"
@@ -813,7 +813,7 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 					fco, _ = sjson.Set(fco, "call_id", c.Get("tool_use_id").String())
 					// Extract output text
 					resultContent := c.Get("content")
-					if resultContent.Type == gjson.String {
+					if resultContent.Type == ojson.String {
 						fco, _ = sjson.Set(fco, "output", resultContent.String())
 					} else if resultContent.IsArray() {
 						var resultParts []string
@@ -858,7 +858,7 @@ func stripGitHubCopilotResponsesUnsupportedFields(body []byte) []byte {
 }
 
 func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytes(body, "tools")
 	if tools.Exists() {
 		filtered := "[]"
 		if tools.IsArray() {
@@ -900,11 +900,11 @@ func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 		body, _ = sjson.SetRawBytes(body, "tools", []byte(filtered))
 	}
 
-	toolChoice := gjson.GetBytes(body, "tool_choice")
+	toolChoice := ojson.GetBytes(body, "tool_choice")
 	if !toolChoice.Exists() {
 		return body
 	}
-	if toolChoice.Type == gjson.String {
+	if toolChoice.Type == ojson.String {
 		switch toolChoice.String() {
 		case "auto", "none", "required":
 			return body
@@ -913,7 +913,7 @@ func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 			return body
 		}
 	}
-	if toolChoice.Type == gjson.JSON {
+	if toolChoice.Type == ojson.JSON {
 		choiceType := toolChoice.Get("type").String()
 		if isGitHubCopilotResponsesBuiltinTool(choiceType) {
 			body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(toolChoice.Raw))
@@ -945,17 +945,17 @@ func isGitHubCopilotResponsesBuiltinTool(toolType string) bool {
 	}
 }
 
-func collectTextFromNode(node gjson.Result) string {
+func collectTextFromNode(node ojson.Result) string {
 	if !node.Exists() {
 		return ""
 	}
-	if node.Type == gjson.String {
+	if node.Type == ojson.String {
 		return node.String()
 	}
 	if node.IsArray() {
 		var parts []string
 		for _, item := range node.Array() {
-			if item.Type == gjson.String {
+			if item.Type == ojson.String {
 				if text := item.String(); text != "" {
 					parts = append(parts, text)
 				}
@@ -971,7 +971,7 @@ func collectTextFromNode(node gjson.Result) string {
 		}
 		return strings.Join(parts, "\n")
 	}
-	if node.Type == gjson.JSON {
+	if node.Type == ojson.JSON {
 		if text := node.Get("text").String(); text != "" {
 			return text
 		}
@@ -1003,7 +1003,7 @@ type githubCopilotResponsesStreamState struct {
 }
 
 func translateGitHubCopilotResponsesNonStreamToClaude(data []byte) []byte {
-	root := gjson.ParseBytes(data)
+	root := ojson.ParseBytes(data)
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("id").String())
 	out, _ = sjson.Set(out, "model", root.Get("model").String())
@@ -1063,8 +1063,8 @@ func translateGitHubCopilotResponsesNonStreamToClaude(data []byte) []byte {
 				}
 				toolUse, _ = sjson.Set(toolUse, "id", toolID)
 				toolUse, _ = sjson.Set(toolUse, "name", item.Get("name").String())
-				if args := item.Get("arguments").String(); args != "" && gjson.Valid(args) {
-					argObj := gjson.Parse(args)
+				if args := item.Get("arguments").String(); args != "" && ojson.Valid(args) {
+					argObj := ojson.Parse(args)
 					if argObj.IsObject() {
 						toolUse, _ = sjson.SetRaw(toolUse, "input", argObj.Raw)
 					}
@@ -1112,11 +1112,11 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 	if bytes.Equal(payload, []byte("[DONE]")) {
 		return nil
 	}
-	if !gjson.ValidBytes(payload) {
+	if !ojson.ValidBytes(payload) {
 		return nil
 	}
 
-	event := gjson.GetBytes(payload, "type").String()
+	event := ojson.GetBytes(payload, "type").String()
 	results := make([][]byte, 0, 4)
 	appendResult := func(chunk string) {
 		results = append(results, []byte(chunk))
@@ -1126,8 +1126,8 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 			return
 		}
 		messageStart := `{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`
-		messageStart, _ = sjson.Set(messageStart, "message.id", gjson.GetBytes(payload, "response.id").String())
-		messageStart, _ = sjson.Set(messageStart, "message.model", gjson.GetBytes(payload, "response.model").String())
+		messageStart, _ = sjson.Set(messageStart, "message.id", ojson.GetBytes(payload, "response.id").String())
+		messageStart, _ = sjson.Set(messageStart, "message.model", ojson.GetBytes(payload, "response.model").String())
 		appendResult("event: message_start\ndata: " + messageStart + "\n\n")
 		state.MessageStarted = true
 	}
@@ -1175,7 +1175,7 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 	case "response.output_text.delta":
 		ensureMessageStart()
 		startTextBlockIfNeeded()
-		delta := gjson.GetBytes(payload, "delta").String()
+		delta := ojson.GetBytes(payload, "delta").String()
 		if delta != "" {
 			contentDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
 			contentDelta, _ = sjson.Set(contentDelta, "index", state.TextBlockIndex)
@@ -1192,7 +1192,7 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 		appendResult("event: content_block_start\ndata: " + thinkingStart + "\n\n")
 	case "response.reasoning_summary_text.delta":
 		if state.ReasoningActive {
-			delta := gjson.GetBytes(payload, "delta").String()
+			delta := ojson.GetBytes(payload, "delta").String()
 			if delta != "" {
 				thinkingDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
 				thinkingDelta, _ = sjson.Set(thinkingDelta, "index", state.ReasoningIndex)
@@ -1208,7 +1208,7 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 			state.ReasoningActive = false
 		}
 	case "response.output_item.added":
-		if gjson.GetBytes(payload, "item.type").String() != "function_call" {
+		if ojson.GetBytes(payload, "item.type").String() != "function_call" {
 			break
 		}
 		ensureMessageStart()
@@ -1216,16 +1216,16 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 		state.HasToolUse = true
 		tool := &githubCopilotResponsesStreamToolState{
 			Index: state.NextContentIndex,
-			ID:    gjson.GetBytes(payload, "item.call_id").String(),
-			Name:  gjson.GetBytes(payload, "item.name").String(),
+			ID:    ojson.GetBytes(payload, "item.call_id").String(),
+			Name:  ojson.GetBytes(payload, "item.name").String(),
 		}
 		if tool.ID == "" {
-			tool.ID = gjson.GetBytes(payload, "item.id").String()
+			tool.ID = ojson.GetBytes(payload, "item.id").String()
 		}
 		state.NextContentIndex++
-		outputIndex := int(gjson.GetBytes(payload, "output_index").Int())
+		outputIndex := int(ojson.GetBytes(payload, "output_index").Int())
 		state.OutputIndexToTool[outputIndex] = tool
-		if itemID := gjson.GetBytes(payload, "item.id").String(); itemID != "" {
+		if itemID := ojson.GetBytes(payload, "item.id").String(); itemID != "" {
 			state.ItemIDToTool[itemID] = tool
 		}
 		contentBlockStart := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
@@ -1234,15 +1234,15 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 		contentBlockStart, _ = sjson.Set(contentBlockStart, "content_block.name", tool.Name)
 		appendResult("event: content_block_start\ndata: " + contentBlockStart + "\n\n")
 	case "response.output_item.delta":
-		item := gjson.GetBytes(payload, "item")
+		item := ojson.GetBytes(payload, "item")
 		if item.Get("type").String() != "function_call" {
 			break
 		}
-		tool := resolveTool(item.Get("id").String(), int(gjson.GetBytes(payload, "output_index").Int()))
+		tool := resolveTool(item.Get("id").String(), int(ojson.GetBytes(payload, "output_index").Int()))
 		if tool == nil {
 			break
 		}
-		partial := gjson.GetBytes(payload, "delta").String()
+		partial := ojson.GetBytes(payload, "delta").String()
 		if partial == "" {
 			partial = item.Get("arguments").String()
 		}
@@ -1256,13 +1256,13 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 	case "response.function_call_arguments.delta":
 		// Copilot sends tool call arguments via this event type (not response.output_item.delta).
 		// Data format: {"delta":"...", "item_id":"...", "output_index":N, ...}
-		itemID := gjson.GetBytes(payload, "item_id").String()
-		outputIndex := int(gjson.GetBytes(payload, "output_index").Int())
+		itemID := ojson.GetBytes(payload, "item_id").String()
+		outputIndex := int(ojson.GetBytes(payload, "output_index").Int())
 		tool := resolveTool(itemID, outputIndex)
 		if tool == nil {
 			break
 		}
-		partial := gjson.GetBytes(payload, "delta").String()
+		partial := ojson.GetBytes(payload, "delta").String()
 		if partial == "" {
 			break
 		}
@@ -1271,10 +1271,10 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", partial)
 		appendResult("event: content_block_delta\ndata: " + inputDelta + "\n\n")
 	case "response.output_item.done":
-		if gjson.GetBytes(payload, "item.type").String() != "function_call" {
+		if ojson.GetBytes(payload, "item.type").String() != "function_call" {
 			break
 		}
-		tool := resolveTool(gjson.GetBytes(payload, "item.id").String(), int(gjson.GetBytes(payload, "output_index").Int()))
+		tool := resolveTool(ojson.GetBytes(payload, "item.id").String(), int(ojson.GetBytes(payload, "output_index").Int()))
 		if tool == nil {
 			break
 		}
@@ -1288,12 +1288,12 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 			stopReason := "end_turn"
 			if state.HasToolUse {
 				stopReason = "tool_use"
-			} else if sr := gjson.GetBytes(payload, "response.stop_reason").String(); sr == "max_tokens" || sr == "stop" {
+			} else if sr := ojson.GetBytes(payload, "response.stop_reason").String(); sr == "max_tokens" || sr == "stop" {
 				stopReason = sr
 			}
-			inputTokens := gjson.GetBytes(payload, "response.usage.input_tokens").Int()
-			outputTokens := gjson.GetBytes(payload, "response.usage.output_tokens").Int()
-			cachedTokens := gjson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int()
+			inputTokens := ojson.GetBytes(payload, "response.usage.input_tokens").Int()
+			outputTokens := ojson.GetBytes(payload, "response.usage.output_tokens").Int()
+			cachedTokens := ojson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int()
 			if cachedTokens > 0 && inputTokens >= cachedTokens {
 				inputTokens -= cachedTokens
 			}

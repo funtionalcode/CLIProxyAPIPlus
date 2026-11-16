@@ -2,9 +2,9 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/ir"
 )

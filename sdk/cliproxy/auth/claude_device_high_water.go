@@ -2,10 +2,11 @@ package auth
 
 import (
 	"context"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 // ClaudeDeviceHighWaterMetadataKey stores the persisted Claude client

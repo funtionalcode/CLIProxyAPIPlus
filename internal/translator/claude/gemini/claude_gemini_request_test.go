@@ -2,7 +2,6 @@ package gemini
 
 import (
 	"fmt"
-	"github.com/tidwall/gjson"
 	"strings"
 	"testing"
 
@@ -27,7 +26,7 @@ func TestConvertGeminiRequestToClaude_ParameterlessToolSchema(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tool := gjson.GetBytes(out, "tools.0")
+			tool := ojson.GetBytes(out, "tools.0")
 			if tool.Get("name").String() != "CronList" || tool.Get("input_schema.type").String() != "object" {
 				t.Fatalf("missing tool name or object schema: %s", tool.Raw)
 			}

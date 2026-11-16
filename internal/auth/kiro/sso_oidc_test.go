@@ -2,7 +2,6 @@ package kiro
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 type recordingRoundTripper struct {

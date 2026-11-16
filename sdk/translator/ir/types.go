@@ -5,7 +5,7 @@
 // name shortening, call ID normalization, and compact passthrough.
 package ir
 
-import "encoding/json"
+import "github.com/MoeForge/moego/json"
 
 // IRRequest is the unified intermediate representation for all chat request formats.
 type IRRequest struct {

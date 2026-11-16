@@ -27,6 +27,21 @@ trusted-proxies: []
 #   - 127.0.0.1
 #   - 192.0.2.0/24
 
+# Graceful shutdown drain budget, in seconds. When the process receives SIGINT/SIGTERM,
+# in-flight HTTP requests are allowed to finish for up to this many seconds before
+# remaining connections are forcibly closed. Shutdown never hangs longer than this budget.
+# Default 0 keeps the legacy behavior: close immediately without draining.
+# Note: hijacked connections (WebSocket sessions) are not drained; they are
+# released by their own connection managers after the drain window.
+shutdown-timeout: 0
+
+# Local persistent KV store settings (bbolt). Ignored when Home mode is enabled.
+kv-store:
+  # Disable local bbolt KV persistence and fall back to in-memory maps (default: false).
+  disabled: false
+  # File path for the bbolt database (default: "<auth-dir>/kv.db" when empty).
+  path: ""
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
@@ -326,15 +341,35 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
+  # Non-positive weights exclude the credential while this strategy is active.
+  # Sticky requests (including inherited and LCP bindings) also consume weighted credits
+  # without moving existing bindings. Compensation is scoped to each eligible credential set;
+  # priority tiers, transport preferences, and retry/cooldown subsets do not share credits.
+  # Pinned requests use the eligible pool before pinning, within the pinned credential
+  # priority tier and transport class, even when session-affinity is disabled.
+  # Returning to a pool resumes its retained credits.
+  # Settled credits are capped at +/-32 times the eligible pool total; ratios are approximate.
+  # In-flight offsets are preserved until the pool settles, regardless of commit order.
+  # Sticky requests keep their bindings but stop adding compensation when the full
+  # credit delta cannot fit the cap; new sessions keep earning credit to avoid starvation.
+  # Credits are process-local and reset on restart or selector replacement.
+  # In Home mode, compatible Home versions charge retained WS turns from usage after completion;
+  # CPA preserves the retained credential and concurrency slot instead of redispatching each turn.
+  # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # Enable weighted round-robin across all available auths. When enabled,
   # priority is ignored.
   # Set per-account auth file root field `weight: 3` or API key config `weight: 3`.
   # Values <= 0 exclude the credential while weighted routing is active.
   weighted: false # default: false
   # Enable universal session-sticky routing for all clients.
-  # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
-  # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
-  # execution or derived session identity, and the existing first-message hash fallback.
+  # Explicit Claude Code, Codex, OpenCode, pi, and generic (X-Session-ID) session headers
+  # are preferred, followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
+  # execution session identity, Merkle LCP prefix/compaction matching, derived session
+  # identity, and the existing first-message hash fallback.
+  # LCP compaction matching requires at least 2 shared trailing turns; clients whose
+  # compaction replaces all earlier turns with a summary should send X-Session-ID (or
+  # another explicit session ID), or affinity starts a new binding at every compaction.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
@@ -358,6 +393,8 @@ routing:
   #   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
   #     request only while keeping the session bound to its original credential; quota and auth
   #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+  #   - "never": never move or fail over an established session to another credential;
+  #     keep the binding and return the error (or retry the same credential) instead.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
 
@@ -371,9 +408,24 @@ claude:
   # and keys with native-tool-search use native deferred tools; other keys use translation.
   tool-search: false
 
-  # Retain the cloaked currentDate per session for this many days. The default is 7;
-  # an explicit 0 uses the existing one-hour continuity lifetime.
+  # When true, inject Anthropic server-side refusal fallbacks on cloaked Claude requests
+  # when the request body does not already specify fallbacks (claude-opus-5-5 -> claude-opus-4-8,
+  # claude-fable-5-1 -> claude-opus-5). Default false never opts requests into cross-model
+  # fallback unless the caller or requests.payload rules explicitly provide fallbacks.
+  # When fallback occurs, translated OpenAI Chat Completions and Responses payloads report
+  # the actual serving model and attach structured fallback metadata (choices[0].delta.fallback /
+  # choices[0].message.fallback and fallbacks for Chat; response.fallback and response.fallbacks
+  # for Responses).
+  server-side-fallback: false
+
+  # Days to retain the cloaked currentDate pin per session in in-memory mode
+  # (server.kv-store.disabled: true without Home), so an idle gap or a credential
+  # switch cannot re-anchor the date and invalidate earlier thinking signatures and the
+  # prompt cache. Default 7; an explicit 0 keeps the continuity-scoped pin (1h lifetime).
+  # When a KV store (local bbolt or Home KV) is active, session date pins are persisted
+  # permanently and session-date-pin-days is ignored.
   session-date-pin-days: 7
+
   synthetic-device-id:
     enabled: false
     # Secret random salt used for: sha256(salt + stable upstream account key).
@@ -598,13 +650,21 @@ codex:
 
 # Antigravity provider behavior.
 # antigravity:
-#   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
-#     - "API"
-#     - "proxy"
+# sensitive-words:              # optional: words to obfuscate with combining grapheme joiners (U+034F) in system instructions
+#   - "API"
+#   - "proxy"
+# sensitive-words-replace:      # optional: literal sensitive-word replacements ("target": "replacement") in system instructions
+#   "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
+# sensitive-patterns-replace:   # optional: ordered Go RE2 regex replacements in system instructions (deleting flagged text with "" is recommended over obfuscation for Antigravity)
+#   - pattern: '(?m)^RFC 2119[^\n]*\n?'
+#     replacement: ""
+#   - pattern: '(?s)<system[-_](conventions|directive)>.*?</system[-_](conventions|directive)>\n?'
+#     replacement: ""
 #   connection-pool:             # optional: upstream HTTP connection pool settings
 #     enabled: false             # whether to enable connection pooling (default: false; set to true to enable connection pooling)
 #     idle-conn-timeout: "30s"   # idle keep-alive timeout (default: 30s, capped at 210s)
 #     max-idle-conns-per-host: 2 # max idle connections per host per credential (default: 2)
+#   tos-pause-window: "0"  # Optional pool-wide pause after a 403 TOS_VIOLATION; disabled by default.
 
 # Devin provider behavior.
 # devin:
@@ -937,10 +997,10 @@ nonstream-keepalive-interval: 0
 # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
 # the same exact software baseline rather than learning newer client versions.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.280 (external, cli)"
+#   user-agent: "claude-cli/2.1.321 (external, cli)"
 #   auto-update: false  # opt in: overwrite CLI/SDK/Node versions at startup and every 3h; keep values on lookup failure
-#   package-version: "0.112.1"
-#   runtime-version: "v26.3.0"
+#   package-version: "0.128.0"
+#   runtime-version: "v26.12.1"
 #   os: "MacOS"
 #   arch: "arm64"
 #   timeout: "600"
@@ -1321,7 +1381,7 @@ codex-oauth:
 #   default: # Default rules only set parameters when they are missing in the payload.
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
 #           from-protocol: "responses" # restricts the rule to the source protocol, options: openai, responses, gemini, claude
 #           headers: # all configured request headers must match; values support "*" wildcards
 #             X-Client-Tier: "tenant-*-region-*"
@@ -1338,7 +1398,7 @@ codex-oauth:
 #   default-raw: # Default raw rules set parameters using raw JSON when missing (must be valid JSON).
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
 #   override: # Override rules always set parameters, overwriting any existing values.
@@ -1351,7 +1411,7 @@ codex-oauth:
 #         service_tier: priority
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
 #     - models:
@@ -1362,13 +1422,27 @@ codex-oauth:
 #   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
+#   replace: # Ordered literal replacements in existing user text; runs after overrides, before filter.
+#     - models: # Same model, protocol, header, and payload conditions as other rules.
+#         - name: "*"
+#           protocol: "claude"
+#           from-protocol: "openai"
+#       target:
+#         role: user
+#         positions: [1, 2] # One-based user positions in the final upstream body; missing positions are skipped.
+#         # all: true      # Select every user instead of positions (mutually exclusive).
+#       replacements: # Each entry has exactly one non-empty string key and a string value.
+#         - "you are hero": "you are fool"
+#         - "remove this phrase": ""
+#       # Text blocks are processed separately; images, tools, and thinking are not modified.
+#       # Supported layouts: OpenAI Chat, Claude, Responses/Codex, Gemini, and Antigravity.
 #   filter: # Filter rules remove specified parameters from the payload.
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"

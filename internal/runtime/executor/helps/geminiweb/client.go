@@ -2,16 +2,16 @@ package geminiweb
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/regexp"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/publicsuffix"
 )

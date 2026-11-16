@@ -3,9 +3,9 @@ package logging
 import (
 	"context"
 	"io"
-	"regexp"
 	"strings"
 
+	"github.com/MoeForge/moego/regexp"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )

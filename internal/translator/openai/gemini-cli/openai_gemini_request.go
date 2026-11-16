@@ -6,8 +6,8 @@
 package geminiCLI
 
 import (
+	"github.com/MoeForge/moego/ojson"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/gemini"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -16,10 +16,10 @@ import (
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
 func ConvertGeminiCLIRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	rawJSON := inputRawJSON
-	rawJSON = []byte(gjson.GetBytes(rawJSON, "request").Raw)
+	rawJSON = []byte(ojson.GetBytes(rawJSON, "request").Raw)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "model", modelName)
-	if gjson.GetBytes(rawJSON, "systemInstruction").Exists() {
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "system_instruction", []byte(gjson.GetBytes(rawJSON, "systemInstruction").Raw))
+	if ojson.GetBytes(rawJSON, "systemInstruction").Exists() {
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "system_instruction", []byte(ojson.GetBytes(rawJSON, "systemInstruction").Raw))
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 

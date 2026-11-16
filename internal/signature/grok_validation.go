@@ -2,10 +2,11 @@ package signature
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"math"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/MoeForge/moego/base64"
 )
 
 const (

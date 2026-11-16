@@ -24,9 +24,9 @@ func DoXAILogin(cfg *config.Config, options *LoginOptions) {
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
+		ProxyURL:     options.ProxyURL,
 		Metadata:     map[string]string{},
 		Prompt:       promptFn,
-		ProxyURL:     options.ProxyURL,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), "xai", cfg, authOpts)

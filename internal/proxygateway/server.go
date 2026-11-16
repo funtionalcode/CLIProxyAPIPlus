@@ -1,7 +1,6 @@
 package proxygateway
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxytrace"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"

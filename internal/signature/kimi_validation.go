@@ -2,8 +2,9 @@ package signature
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
+
+	"github.com/MoeForge/moego/base64"
 )
 
 // Kimi thinking signatures carry no self-describing envelope. Every byte is

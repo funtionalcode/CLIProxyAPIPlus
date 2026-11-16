@@ -3,14 +3,14 @@ package helps
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -42,7 +42,7 @@ func ApplyClaudeIdentityControls(payload []byte, cfg *config.Config, auth *clipr
 // deterministic per-upstream-account pseudonym while preserving the client
 // session_id and any other existing JSON fields.
 func ApplyClaudeSyntheticDeviceID(payload []byte, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) ([]byte, error) {
-	if cfg == nil || !cfg.Claude.SyntheticDeviceID.Enabled || !gjson.ValidBytes(payload) {
+	if cfg == nil || !cfg.Claude.SyntheticDeviceID.Enabled || !ojson.ValidBytes(payload) {
 		return payload, nil
 	}
 	deviceID := ClaudeSyntheticDeviceID(cfg, auth, apiKey)
@@ -51,7 +51,7 @@ func ApplyClaudeSyntheticDeviceID(payload []byte, cfg *config.Config, auth *clip
 	}
 
 	userID := make(map[string]any)
-	rawUserID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
+	rawUserID := strings.TrimSpace(ojson.GetBytes(payload, "metadata.user_id").String())
 	if rawUserID != "" {
 		var existing map[string]any
 		if errUnmarshal := json.Unmarshal([]byte(rawUserID), &existing); errUnmarshal == nil && existing != nil {
@@ -123,7 +123,7 @@ func ClaudeAccountKey(auth *cliproxyauth.Auth, apiKey string) string {
 // ApplyClaudeEnvironmentNormalization canonicalizes Claude Code env/system
 // reminder text while leaving tool parameters and user paths untouched.
 func ApplyClaudeEnvironmentNormalization(payload []byte, cfg *config.Config, auth *cliproxyauth.Auth) ([]byte, error) {
-	if cfg == nil || !cfg.Claude.NormalizeEnvironment.Enabled || !gjson.ValidBytes(payload) {
+	if cfg == nil || !cfg.Claude.NormalizeEnvironment.Enabled || !ojson.ValidBytes(payload) {
 		return payload, nil
 	}
 	env := resolveClaudeCanonicalEnvironment(cfg, auth)
@@ -167,11 +167,11 @@ func resolveClaudeCanonicalEnvironment(cfg *config.Config, auth *cliproxyauth.Au
 }
 
 func normalizeClaudeSystemText(payload []byte, env claudeCanonicalEnvironment) ([]byte, error) {
-	system := gjson.GetBytes(payload, "system")
+	system := ojson.GetBytes(payload, "system")
 	if !system.Exists() {
 		return payload, nil
 	}
-	if system.Type == gjson.String {
+	if system.Type == ojson.String {
 		return setClaudeNormalizedText(payload, "system", system.String(), env, true)
 	}
 	if !system.IsArray() {
@@ -179,13 +179,13 @@ func normalizeClaudeSystemText(payload []byte, env claudeCanonicalEnvironment) (
 	}
 
 	var err error
-	system.ForEach(func(idx, part gjson.Result) bool {
+	system.ForEach(func(idx, part ojson.Result) bool {
 		if err != nil {
 			return false
 		}
 		index := idx.Int()
 		switch {
-		case part.Type == gjson.String:
+		case part.Type == ojson.String:
 			payload, err = setClaudeNormalizedText(payload, pathWithIndex("system", index), part.String(), env, true)
 		case part.Get("text").Exists():
 			payload, err = setClaudeNormalizedText(payload, pathWithIndex("system", index)+".text", part.Get("text").String(), env, true)
@@ -196,23 +196,23 @@ func normalizeClaudeSystemText(payload []byte, env claudeCanonicalEnvironment) (
 }
 
 func normalizeClaudeMessageReminderText(payload []byte, env claudeCanonicalEnvironment) ([]byte, error) {
-	messages := gjson.GetBytes(payload, "messages")
+	messages := ojson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
 		return payload, nil
 	}
 
 	var err error
-	messages.ForEach(func(messageIdx, message gjson.Result) bool {
+	messages.ForEach(func(messageIdx, message ojson.Result) bool {
 		if err != nil {
 			return false
 		}
 		content := message.Get("content")
 		messagePath := pathWithIndex("messages", messageIdx.Int()) + ".content"
 		switch {
-		case content.Type == gjson.String:
+		case content.Type == ojson.String:
 			payload, err = setClaudeNormalizedText(payload, messagePath, content.String(), env, false)
 		case content.IsArray():
-			content.ForEach(func(contentIdx, part gjson.Result) bool {
+			content.ForEach(func(contentIdx, part ojson.Result) bool {
 				if err != nil {
 					return false
 				}

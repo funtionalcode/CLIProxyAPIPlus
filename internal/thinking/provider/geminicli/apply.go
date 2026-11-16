@@ -5,9 +5,9 @@
 package geminicli
 
 import (
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -38,7 +38,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
 
@@ -63,7 +63,7 @@ func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig) (
 		return body, nil
 	}
 
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
 
@@ -105,9 +105,9 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 	// Respect user's explicit includeThoughts setting from original body; default to true if not set
 	// Support both camelCase and snake_case variants
 	includeThoughts := true
-	if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
+	if inc := ojson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
 		includeThoughts = inc.Bool()
-	} else if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
+	} else if inc := ojson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
 		includeThoughts = inc.Bool()
 	}
 	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
@@ -137,10 +137,10 @@ func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig)
 	// Support both camelCase and snake_case variants
 	var includeThoughts bool
 	var userSetIncludeThoughts bool
-	if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
+	if inc := ojson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
 		includeThoughts = inc.Bool()
 		userSetIncludeThoughts = true
-	} else if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
+	} else if inc := ojson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
 		includeThoughts = inc.Bool()
 		userSetIncludeThoughts = true
 	}

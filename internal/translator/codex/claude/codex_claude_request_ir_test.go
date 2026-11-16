@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertClaudeRequestToCodexIR_SystemMessageScenarios(t *testing.T) {
@@ -63,7 +63,7 @@ func TestConvertClaudeRequestToCodexIR_SystemMessageScenarios(t *testing.T) {
 			if result == nil {
 				t.Fatal("ConvertClaudeRequestToCodexIR returned nil")
 			}
-			resultJSON := gjson.ParseBytes(result)
+			resultJSON := ojson.ParseBytes(result)
 			inputs := resultJSON.Get("input").Array()
 
 			hasDeveloper := len(inputs) > 0 && inputs[0].Get("role").String() == "developer"
@@ -132,7 +132,7 @@ func TestConvertClaudeRequestToCodexIR_ParallelToolCalls(t *testing.T) {
 			if result == nil {
 				t.Fatal("ConvertClaudeRequestToCodexIR returned nil")
 			}
-			resultJSON := gjson.ParseBytes(result)
+			resultJSON := ojson.ParseBytes(result)
 
 			if got := resultJSON.Get("parallel_tool_calls").Bool(); got != tt.wantParallelToolCalls {
 				t.Fatalf("parallel_tool_calls = %v, want %v. Output: %s", got, tt.wantParallelToolCalls, string(result))
@@ -164,7 +164,7 @@ func TestConvertClaudeRequestToCodexIR_ShortenLongToolUseIDs(t *testing.T) {
 	if result == nil {
 		t.Fatal("ConvertClaudeRequestToCodexIR returned nil")
 	}
-	inputs := gjson.GetBytes(result, "input").Array()
+	inputs := ojson.GetBytes(result, "input").Array()
 
 	var callID string
 	var outputCallID string
@@ -232,7 +232,7 @@ func TestConvertClaudeRequestToCodexIR_ToolChoiceModeMapping(t *testing.T) {
 			if result == nil {
 				t.Fatal("ConvertClaudeRequestToCodexIR returned nil")
 			}
-			resultJSON := gjson.ParseBytes(result)
+			resultJSON := ojson.ParseBytes(result)
 
 			if got := resultJSON.Get("tool_choice").String(); got != tt.wantCodexToolChoice {
 				t.Fatalf("tool_choice = %q, want %q. Output: %s", got, tt.wantCodexToolChoice, string(result))
@@ -256,7 +256,7 @@ func TestConvertClaudeRequestToCodexIR_ToolChoiceSpecificFunctionUsesConvertedNa
 	if result == nil {
 		t.Fatal("ConvertClaudeRequestToCodexIR returned nil")
 	}
-	resultJSON := gjson.ParseBytes(result)
+	resultJSON := ojson.ParseBytes(result)
 
 	if got := resultJSON.Get("tool_choice.type").String(); got != "function" {
 		t.Fatalf("tool_choice.type = %q, want function. Output: %s", got, string(result))
@@ -296,7 +296,7 @@ func TestConvertClaudeRequestToCodexIR_WebSearchToolMapping(t *testing.T) {
 	if result == nil {
 		t.Fatal("ConvertClaudeRequestToCodexIR returned nil")
 	}
-	resultJSON := gjson.ParseBytes(result)
+	resultJSON := ojson.ParseBytes(result)
 
 	if got := resultJSON.Get("tools.0.type").String(); got != "web_search" {
 		t.Fatalf("tools.0.type = %q, want web_search. Output: %s", got, string(result))
@@ -321,7 +321,7 @@ func TestConvertClaudeRequestToCodexIR_WebSearchToolChoiceUsesDeclaredTypedToolN
 	if result == nil {
 		t.Fatal("ConvertClaudeRequestToCodexIR returned nil")
 	}
-	resultJSON := gjson.ParseBytes(result)
+	resultJSON := ojson.ParseBytes(result)
 
 	if got := resultJSON.Get("tool_choice.type").String(); got != "function" {
 		t.Fatalf("tool_choice.type = %q, want function. Output: %s", got, string(result))
@@ -361,7 +361,7 @@ func TestConvertClaudeRequestToCodexIR_AssistantThinkingSignatureToReasoningItem
 	if result == nil {
 		t.Fatal("ConvertClaudeRequestToCodexIR returned nil")
 	}
-	resultJSON := gjson.ParseBytes(result)
+	resultJSON := ojson.ParseBytes(result)
 	inputs := resultJSON.Get("input").Array()
 	if len(inputs) != 3 {
 		t.Fatalf("got %d input items, want 3. Output: %s", len(inputs), string(result))

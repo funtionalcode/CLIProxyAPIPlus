@@ -3,8 +3,9 @@
 package common
 
 import (
-	"encoding/json"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // TruncationInfo contains details about detected truncation in a tool use event.

@@ -2,8 +2,9 @@ package proto
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const (

@@ -1,9 +1,10 @@
 package common
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestValidateToolCallID(t *testing.T) {

@@ -6,9 +6,9 @@ package proto
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 
+	"github.com/MoeForge/moego/json"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"

@@ -1,9 +1,10 @@
 package signature
 
 import (
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
 )
 
 func testGPTReasoningSignature() string {

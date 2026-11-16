@@ -2,12 +2,13 @@ package geminiweb
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 type transportFunc func(*http.Request) (*http.Response, error)

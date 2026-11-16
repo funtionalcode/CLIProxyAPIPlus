@@ -57,7 +57,6 @@ import "C"
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"html"
 	"net/http"
@@ -65,6 +64,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )

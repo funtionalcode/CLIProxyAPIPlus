@@ -9,20 +9,20 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 	log "github.com/sirupsen/logrus"
@@ -33,12 +33,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
-var requestLogID atomic.Uint64
+var (
+	requestLogID                        atomic.Uint64
+	sanitizeFilenameInvalidCharsPattern = regexp.MustCompile(`[<>:"|?*\s]`)
+	sanitizeFilenameMultiHyphenPattern  = regexp.MustCompile(`-+`)
+)
 
 const (
 	WebsocketTimelineSourceContextKey    = "WEBSOCKET_TIMELINE_SOURCE"
 	APIRequestSourceContextKey           = "API_REQUEST_SOURCE"
 	DeferredAPIRequestContextKey         = "DEFERRED_API_REQUEST"
+	DeferredAPIResponseContextKey        = "DEFERRED_API_RESPONSE"
 	APIResponseSourceContextKey          = "API_RESPONSE_SOURCE"
 	APIResponseCapturedContextKey        = "API_RESPONSE_CAPTURED"
 	APIWebsocketTimelineSourceContextKey = "API_WEBSOCKET_TIMELINE_SOURCE"
@@ -399,6 +404,9 @@ type StreamingLogWriter interface {
 	//   - error: An error if writing fails, nil otherwise
 	WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error
 
+	// WriteAPIResponseErrors writes upstream API error entries to the log.
+	WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error
+
 	// SetFirstChunkTimestamp sets the TTFB timestamp captured when first chunk was received.
 	//
 	// Parameters:
@@ -668,7 +676,7 @@ func (l *FileRequestLogger) logRequestWithHostAndSources(url, host, method strin
 
 	// Generate filename with request ID
 	filename := l.generateFilename(url, body, requestID)
-	if force && !l.enabled {
+	if (force && !l.enabled) || (statusCode >= 400 && statusCode != 499) {
 		filename = l.generateErrorFilename(url, body, requestID)
 	}
 	filePath := filepath.Join(l.logsDir, filename)
@@ -993,15 +1001,13 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	sanitized = strings.ReplaceAll(sanitized, ":", "-")
 
 	// Replace other problematic characters with hyphens
-	reg := regexp.MustCompile(`[<>:"|?*\s]`)
-	sanitized = reg.ReplaceAllString(sanitized, "-")
+	sanitized = sanitizeFilenameInvalidCharsPattern.ReplaceAllString(sanitized, "-")
 	for strings.Contains(sanitized, "..") {
 		sanitized = strings.ReplaceAll(sanitized, "..", "-")
 	}
 
 	// Remove multiple consecutive hyphens
-	reg = regexp.MustCompile(`-+`)
-	sanitized = reg.ReplaceAllString(sanitized, "-")
+	sanitized = sanitizeFilenameMultiHyphenPattern.ReplaceAllString(sanitized, "-")
 
 	// Remove leading/trailing hyphens
 	sanitized = strings.Trim(sanitized, "-.")
@@ -1930,6 +1936,9 @@ type FileStreamingLogWriter struct {
 	// apiWebsocketTimeline stores the upstream websocket event timeline.
 	apiWebsocketTimeline []byte
 
+	// apiResponseErrors stores upstream API response error entries.
+	apiResponseErrors []*interfaces.ErrorMessage
+
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
 }
@@ -2044,6 +2053,15 @@ func (w *FileStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 	return nil
 }
 
+// WriteAPIResponseErrors buffers upstream API error entries for final writing.
+func (w *FileStreamingLogWriter) WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error {
+	if len(errors) == 0 {
+		return nil
+	}
+	w.apiResponseErrors = append([]*interfaces.ErrorMessage(nil), errors...)
+	return nil
+}
+
 func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	if !timestamp.IsZero() {
 		w.apiResponseTimestamp = timestamp
@@ -2079,6 +2097,9 @@ func (w *FileStreamingLogWriter) Close() error {
 		return nil
 	}
 
+	if w.responseStatus >= 400 && w.responseStatus != 499 && !strings.HasPrefix(filepath.Base(w.logFilePath), "error-") {
+		w.logFilePath = filepath.Join(w.logsDir, "error-"+filepath.Base(w.logFilePath))
+	}
 	logFile, logFilePath, errOpen := createUniqueLogFile(w.logsDir, filepath.Base(w.logFilePath))
 	w.logFilePath = logFilePath
 	if errOpen != nil {
@@ -2100,6 +2121,15 @@ func (w *FileStreamingLogWriter) Close() error {
 
 	w.cleanupTempFiles()
 	return writeErr
+}
+
+// Discard stops the streaming writer and removes temporary files without creating a final log file.
+func (w *FileStreamingLogWriter) Discard() error {
+	if w == nil {
+		return nil
+	}
+	w.logFilePath = ""
+	return w.Close()
 }
 
 // asyncWriter runs in a goroutine to buffer chunks from the channel.
@@ -2150,6 +2180,9 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 		return errWrite
 	}
 	if errWrite := writePreformattedAPISectionWithSource(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, w.apiRequestSource, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPIErrorResponses(logFile, w.apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writePreformattedAPISectionWithSource(logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseSource, w.apiResponseTimestamp); errWrite != nil {
@@ -2263,6 +2296,10 @@ func (w *NoOpStreamingLogWriter) WriteAPIWebsocketTimeline(_ []byte) error {
 	return nil
 }
 
+func (w *NoOpStreamingLogWriter) WriteAPIResponseErrors(_ []*interfaces.ErrorMessage) error {
+	return nil
+}
+
 func (w *NoOpStreamingLogWriter) SetFirstChunkTimestamp(_ time.Time) {}
 
 // Close is a no-op implementation that does nothing and always returns nil.
@@ -2283,16 +2320,17 @@ type homeStreamingLogWriter struct {
 	chunkChan chan []byte
 	doneChan  chan struct{}
 
-	responseStatus   int
-	statusWritten    bool
-	responseHeaders  map[string][]string
-	responseBody     bytes.Buffer
-	apiRequest       []byte
-	apiResponse      []byte
-	apiWebsocketTime []byte
-	requestID        string
-	apiResponseTS    time.Time
-	firstChunkTS     time.Time
+	responseStatus    int
+	statusWritten     bool
+	responseHeaders   map[string][]string
+	responseBody      bytes.Buffer
+	apiRequest        []byte
+	apiResponse       []byte
+	apiWebsocketTime  []byte
+	apiResponseErrors []*interfaces.ErrorMessage
+	requestID         string
+	apiResponseTS     time.Time
+	firstChunkTS      time.Time
 }
 
 func newHomeStreamingLogWriter(url, host, method string, headers map[string][]string, body []byte, requestID string) *homeStreamingLogWriter {
@@ -2380,6 +2418,14 @@ func (w *homeStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 	return nil
 }
 
+func (w *homeStreamingLogWriter) WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error {
+	if w == nil || len(errors) == 0 {
+		return nil
+	}
+	w.apiResponseErrors = append([]*interfaces.ErrorMessage(nil), errors...)
+	return nil
+}
+
 func (w *homeStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	if w == nil {
 		return
@@ -2421,6 +2467,9 @@ func (w *homeStreamingLogWriter) Close() error {
 		return errWrite
 	}
 	if errWrite := writeAPISection(&buf, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPIErrorResponses(&buf, w.apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(&buf, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTS); errWrite != nil {
@@ -2481,4 +2530,16 @@ func createUniqueLogFile(dir, filename string) (*os.File, string, error) {
 		}
 	}
 	return nil, "", fmt.Errorf("too many conflicting log files for %s", filename)
+}
+
+func (w *homeStreamingLogWriter) Discard() error {
+	if w == nil {
+		return nil
+	}
+	if w.chunkChan != nil {
+		close(w.chunkChan)
+		<-w.doneChan
+		w.chunkChan = nil
+	}
+	return nil
 }

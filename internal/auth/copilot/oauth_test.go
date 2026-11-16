@@ -2,11 +2,12 @@ package copilot
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // roundTripFunc lets us inject a custom transport for testing.

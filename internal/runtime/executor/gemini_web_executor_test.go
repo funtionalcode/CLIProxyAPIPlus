@@ -2,19 +2,19 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	exec "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type geminiWebTransport func(*http.Request) (*http.Response, error)
@@ -47,8 +47,8 @@ func TestGeminiWebExecutorPayloadBarrierAndProtocols(t *testing.T) {
 						if err := r.ParseForm(); err != nil {
 							t.Fatal(err)
 						}
-						payload := gjson.Get(r.Form.Get("f.req"), "1").String()
-						if gjson.Get(payload, "0.0").String() != "configured prompt" || gjson.Get(payload, "30").IsArray() {
+						payload := ojson.Get(r.Form.Get("f.req"), "1").String()
+						if ojson.Get(payload, "0.0").String() != "configured prompt" || ojson.Get(payload, "30").IsArray() {
 							t.Fatalf("rules lost after framing: %s", payload)
 						}
 						body = ")]}'\n\n" + geminiWebTestFrame("你", false) + geminiWebTestFrame("你好", true)

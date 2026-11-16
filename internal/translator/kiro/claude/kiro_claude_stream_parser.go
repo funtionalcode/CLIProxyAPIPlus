@@ -1,9 +1,9 @@
 package claude
 
 import (
-	"encoding/json"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	log "github.com/sirupsen/logrus"
 )
 

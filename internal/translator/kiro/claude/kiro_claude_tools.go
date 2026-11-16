@@ -3,10 +3,10 @@
 package claude
 
 import (
-	"encoding/json"
-	"regexp"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/google/uuid"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/common"
 	log "github.com/sirupsen/logrus"

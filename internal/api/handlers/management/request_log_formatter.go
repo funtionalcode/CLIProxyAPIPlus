@@ -2,10 +2,11 @@ package management
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const (

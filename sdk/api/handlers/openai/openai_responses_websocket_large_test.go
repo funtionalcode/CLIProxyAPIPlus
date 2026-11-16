@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -20,7 +21,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexLargeWebsocketRequestTransportAndContinuation(t *testing.T) {
@@ -115,7 +115,7 @@ func TestCodexLargeWebsocketRequestTransportAndContinuation(t *testing.T) {
 						_, payload, readErr := conn.ReadMessage()
 						if turn == 1 && scenario == "large_incremental" {
 							if !websocket.IsCloseError(readErr, websocket.CloseServiceRestart) {
-								t.Fatalf("expected full replay close, got error=%v type=%s", readErr, gjson.GetBytes(payload, "type"))
+								t.Fatalf("expected full replay close, got error=%v type=%s", readErr, ojson.GetBytes(payload, "type"))
 							}
 							select {
 							case <-requests:
@@ -127,10 +127,10 @@ func TestCodexLargeWebsocketRequestTransportAndContinuation(t *testing.T) {
 						if readErr != nil {
 							t.Fatal(readErr)
 						}
-						if gjson.GetBytes(payload, "type").String() == "response.completed" {
+						if ojson.GetBytes(payload, "type").String() == "response.completed" {
 							break
 						}
-						if gjson.GetBytes(payload, "type").String() == "error" {
+						if ojson.GetBytes(payload, "type").String() == "error" {
 							t.Fatalf("unexpected response: %s", payload)
 						}
 					}
@@ -139,14 +139,14 @@ func TestCodexLargeWebsocketRequestTransportAndContinuation(t *testing.T) {
 						t.Fatalf("wrong upstream transport: websocket=%t", captured.websocket)
 					}
 					if scenario == "large" {
-						input := gjson.GetBytes(captured.body, "input").Array()
+						input := ojson.GetBytes(captured.body, "input").Array()
 						if len(input) != 1+turn*2 || input[0].Get("content.0.text").String() != initialText {
 							t.Fatal("HTTP continuation lost or duplicated the full input")
 						}
 						if turn == 1 && (input[1].Get("role").String() != "assistant" || input[2].Get("content.0.text").String() != "followup") {
 							t.Fatal("HTTP continuation lost the completed output or followup")
 						}
-						if gjson.GetBytes(captured.body, "previous_response_id").Exists() {
+						if ojson.GetBytes(captured.body, "previous_response_id").Exists() {
 							t.Fatal("HTTP request retained a websocket-only response reference")
 						}
 					}

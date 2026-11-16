@@ -1,8 +1,9 @@
 package ir
 
 import (
-	"encoding/json"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestParseCodexRequest_DelegatesToOpenAIResponses(t *testing.T) {

@@ -356,12 +356,19 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 	}
 
 	// 3. Model capability check
+	if nativeResponses {
+		normalized, errNormalize := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, applier, fromFormat, providerFormat, HasThinkingSuffix(model))
+		modified = modified || normalized
+		if errNormalize != nil {
+			return modified, errNormalize
+		}
+	}
 	if !suffixResult.HasSuffix && len(sourceBody) > 0 && isResponsesFormat(fromFormat) && !docValid && hasThinkingConfig(extractConfigurationUpdateConfig(sourceBody)) {
 		// Do not rebuild a malformed target from a separate source update.
 		return modified, nil
 	}
 	if nativeResponses && !suffixResult.HasSuffix {
-		// Native Responses keeps the top-level baseline and in-turn updates as-is.
+		// Native Responses preserves the baseline and update timeline after validation.
 		if log.IsLevelEnabled(log.DebugLevel) && (modelInfo.Thinking != nil || modelInfo.UserDefined) {
 			if config := extractCodexUsageConfigDoc(doc, docValid); hasThinkingConfig(config) {
 				fields := log.Fields{
@@ -688,7 +695,7 @@ func applyUserDefinedModelDoc(doc *ojson.Doc, docValid bool, modelInfo *registry
 	}
 
 	if !isPluginApplier {
-		config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+		config = normalizeUserDefinedConfig(config, modelInfo, fromFormat, toFormat)
 	}
 	log.WithFields(log.Fields{
 		"provider": toFormat,
@@ -710,7 +717,7 @@ func applyUserDefinedModelDoc(doc *ojson.Doc, docValid bool, modelInfo *registry
 	return modified, nil
 }
 
-func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat string) ThinkingConfig {
+func normalizeUserDefinedConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFormat, toFormat string) ThinkingConfig {
 	if config.Mode != ModeLevel {
 		return config
 	}
@@ -719,6 +726,11 @@ func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat stri
 	}
 	if !isBudgetCapableProvider(toFormat) {
 		return config
+	}
+	if !strings.EqualFold(string(config.Level), string(LevelNone)) && !strings.EqualFold(string(config.Level), string(LevelAuto)) {
+		if isGeminiFamily(fromFormat) || fromFormat == "interactions" || (modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0) {
+			return config
+		}
 	}
 	budget, ok := ConvertLevelToBudget(string(config.Level))
 	if !ok {
@@ -820,7 +832,15 @@ func extractThinkingConfigForUsage(body []byte, provider string) ThinkingConfig 
 		if ojson.GetBytesNoCopy(body, "thinking.type").String() == "between_tools" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
-		return extractThinkingConfig(body, provider)
+		config := extractThinkingConfig(body, provider)
+		if config.Mode == ModeNone && hasThinkingConfig(config) {
+			return config
+		}
+		// The last effort directive, not the cached top-level placeholder, is the turn's effort.
+		if directive := extractClaudeEffortDirectiveConfig(body); hasThinkingConfig(directive) {
+			return directive
+		}
+		return config
 	default:
 		return extractThinkingConfig(body, provider)
 	}

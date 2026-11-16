@@ -19,7 +19,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-	"github.com/tidwall/gjson"
 )
 
 type responsesInterruptUsageSink struct {
@@ -148,7 +147,7 @@ func TestResponsesInterruptInFlightAndReuseWebSocket(t *testing.T) {
 				if errRead != nil {
 					t.Fatal(errRead)
 				}
-				if got := gjson.GetBytes(frame, "type").String(); got != want {
+				if got := ojson.GetBytes(frame, "type").String(); got != want {
 					t.Fatalf("expected %s, got %s", want, frame)
 				}
 				return frame
@@ -175,11 +174,11 @@ func TestResponsesInterruptInFlightAndReuseWebSocket(t *testing.T) {
 				t.Fatal(err)
 			}
 			frame := readEvent("response.created")
-			if gjson.GetBytes(frame, "response.id").String() != "r2" {
+			if ojson.GetBytes(frame, "response.id").String() != "r2" {
 				t.Fatalf("next response lost: %s", frame)
 			}
 			readEvent("response.completed")
-			if frame = <-frames; gjson.GetBytes(frame, "type").String() != "response.create" {
+			if frame = <-frames; ojson.GetBytes(frame, "type").String() != "response.create" {
 				t.Fatalf("next create changed: %s", frame)
 			}
 			for _, total := range []int64{11, 22} {

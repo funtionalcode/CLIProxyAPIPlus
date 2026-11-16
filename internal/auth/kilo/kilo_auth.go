@@ -4,10 +4,11 @@ package kilo
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const (

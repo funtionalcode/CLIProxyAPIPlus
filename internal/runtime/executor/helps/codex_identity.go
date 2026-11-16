@@ -3,13 +3,12 @@ package helps
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"regexp"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 var (
@@ -24,13 +23,22 @@ var (
 // ApplyCodexEnvironmentNormalization canonicalizes Codex instructions/input
 // environment text while leaving tool call arguments untouched.
 func ApplyCodexEnvironmentNormalization(payload []byte, cfg *config.Config, auth *cliproxyauth.Auth) []byte {
-	if cfg == nil || !cfg.Codex.NormalizeEnvironment.Enabled || !gjson.ValidBytes(payload) {
+	if cfg == nil || !cfg.Codex.NormalizeEnvironment.Enabled || !ojson.ValidBytes(payload) {
 		return payload
 	}
+	doc := ojson.NewDoc(payload)
+	ApplyCodexEnvironmentNormalizationDoc(doc, cfg, auth)
+	return doc.Bytes()
+}
+
+// ApplyCodexEnvironmentNormalizationDoc updates the shared request document before payload rules run.
+func ApplyCodexEnvironmentNormalizationDoc(doc *ojson.Doc, cfg *config.Config, auth *cliproxyauth.Auth) {
+	if doc == nil || cfg == nil || !cfg.Codex.NormalizeEnvironment.Enabled {
+		return
+	}
 	env := resolveCodexCanonicalEnvironment(cfg, auth)
-	payload = normalizeCodexInstructionsText(payload, env)
-	payload = normalizeCodexInputText(payload, env)
-	return payload
+	normalizeCodexInstructionsText(doc, env)
+	normalizeCodexInputText(doc, env)
 }
 
 type codexCanonicalEnvironment struct {
@@ -59,61 +67,57 @@ func resolveCodexCanonicalEnvironment(cfg *config.Config, auth *cliproxyauth.Aut
 	return codexCanonicalEnvironment{Home: home, CWD: cwd, User: user}
 }
 
-func normalizeCodexInstructionsText(payload []byte, env codexCanonicalEnvironment) []byte {
-	instructions := gjson.GetBytes(payload, "instructions")
-	if !instructions.Exists() || instructions.Type != gjson.String {
-		return payload
+func normalizeCodexInstructionsText(doc *ojson.Doc, env codexCanonicalEnvironment) {
+	instructions := doc.Get("instructions")
+	if !instructions.Exists() || instructions.Type != ojson.String {
+		return
 	}
-	return setCodexNormalizedText(payload, "instructions", instructions.String(), env, true)
+	setCodexNormalizedText(doc, "instructions", instructions.String(), env, true)
 }
 
-func normalizeCodexInputText(payload []byte, env codexCanonicalEnvironment) []byte {
-	input := gjson.GetBytes(payload, "input")
-	if input.Type == gjson.String {
-		return setCodexNormalizedText(payload, "input", input.String(), env, false)
+func normalizeCodexInputText(doc *ojson.Doc, env codexCanonicalEnvironment) {
+	input := doc.Get("input")
+	if input.Type == ojson.String {
+		setCodexNormalizedText(doc, "input", input.String(), env, false)
+		return
 	}
 	if !input.IsArray() {
-		return payload
+		return
 	}
 
-	input.ForEach(func(inputIdx, item gjson.Result) bool {
+	input.ForEach(func(inputIdx, item ojson.Result) bool {
 		itemPath := pathWithIndex("input", inputIdx.Int())
-		if text := item.Get("text"); text.Exists() && text.Type == gjson.String {
-			payload = setCodexNormalizedText(payload, itemPath+".text", text.String(), env, false)
+		if text := item.Get("text"); text.Exists() && text.Type == ojson.String {
+			setCodexNormalizedText(doc, itemPath+".text", text.String(), env, false)
 		}
 
 		content := item.Get("content")
 		switch {
-		case content.Type == gjson.String:
-			payload = setCodexNormalizedText(payload, itemPath+".content", content.String(), env, false)
+		case content.Type == ojson.String:
+			setCodexNormalizedText(doc, itemPath+".content", content.String(), env, false)
 		case content.IsArray():
-			content.ForEach(func(contentIdx, part gjson.Result) bool {
+			content.ForEach(func(contentIdx, part ojson.Result) bool {
 				text := part.Get("text")
-				if text.Exists() && text.Type == gjson.String {
+				if text.Exists() && text.Type == ojson.String {
 					path := itemPath + ".content." + intPath(contentIdx.Int()) + ".text"
-					payload = setCodexNormalizedText(payload, path, text.String(), env, false)
+					setCodexNormalizedText(doc, path, text.String(), env, false)
 				}
 				return true
 			})
 		}
 		return true
 	})
-	return payload
 }
 
-func setCodexNormalizedText(payload []byte, path, text string, env codexCanonicalEnvironment, force bool) []byte {
+func setCodexNormalizedText(doc *ojson.Doc, path, text string, env codexCanonicalEnvironment, force bool) {
 	if !force && !codexTextLooksLikeEnvironmentReminder(text) {
-		return payload
+		return
 	}
 	normalized := normalizeCodexEnvironmentText(text, env)
 	if normalized == text {
-		return payload
+		return
 	}
-	updated, errSet := sjson.SetBytes(payload, path, normalized)
-	if errSet != nil {
-		return payload
-	}
-	return updated
+	_ = doc.Set(path, normalized)
 }
 
 func codexTextLooksLikeEnvironmentReminder(text string) bool {

@@ -1,8 +1,9 @@
 package ir
 
 import (
-	"encoding/json"
 	"fmt"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // ParseOpenAIChatRequest parses an OpenAI Chat Completions request into the IR.

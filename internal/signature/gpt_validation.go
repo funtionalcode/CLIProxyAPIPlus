@@ -2,9 +2,10 @@ package signature
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/MoeForge/moego/base64"
 )
 
 const MaxGPTReasoningSignatureLen = 32 * 1024 * 1024

@@ -1,8 +1,9 @@
 package ir
 
 import (
-	"encoding/json"
 	"fmt"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // ParseOpenAIResponsesRequest parses an OpenAI Responses API request into the IR.

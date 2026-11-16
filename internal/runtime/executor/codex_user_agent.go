@@ -3,10 +3,11 @@ package executor
 import (
 	"fmt"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 var (

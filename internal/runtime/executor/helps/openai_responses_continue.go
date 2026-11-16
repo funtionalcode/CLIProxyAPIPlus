@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/tidwall/sjson"
 )
 
@@ -67,12 +67,12 @@ func (b *openAIResponsesAutoContinueBody) fill() error {
 		}
 
 		payload := openAIResponsesSSEPayload(frame)
-		if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		if len(payload) == 0 || !ojson.ValidBytes(payload) {
 			b.pending.Write(frame)
 			return nil
 		}
 
-		terminalType := gjson.GetBytes(payload, "type").String()
+		terminalType := ojson.GetBytes(payload, "type").String()
 		terminal := terminalType == "response.completed" || terminalType == "response.incomplete" || terminalType == "response.failed"
 		if !terminal {
 			b.pending.Write(frame)
@@ -131,14 +131,14 @@ func openAIResponsesSSEPayload(frame []byte) []byte {
 }
 
 func openAIResponsesLengthLimitedID(payload []byte) (string, bool) {
-	if gjson.GetBytes(payload, "type").String() != "response.incomplete" {
+	if ojson.GetBytes(payload, "type").String() != "response.incomplete" {
 		return "", false
 	}
-	reason := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "response.incomplete_details.reason").String()))
+	reason := strings.ToLower(strings.TrimSpace(ojson.GetBytes(payload, "response.incomplete_details.reason").String()))
 	if reason != "length" && reason != "max_tokens" && reason != "max_output_tokens" {
 		return "", false
 	}
-	responseID := strings.TrimSpace(gjson.GetBytes(payload, "response.id").String())
+	responseID := strings.TrimSpace(ojson.GetBytes(payload, "response.id").String())
 	return responseID, responseID != ""
 }
 
@@ -152,7 +152,7 @@ type openAIResponsesContinuationUsage struct {
 }
 
 func (u *openAIResponsesContinuationUsage) add(payload []byte) {
-	usageNode := gjson.GetBytes(payload, "response.usage")
+	usageNode := ojson.GetBytes(payload, "response.usage")
 	if !usageNode.Exists() || !usageNode.IsObject() {
 		return
 	}

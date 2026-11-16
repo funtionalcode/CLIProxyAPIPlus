@@ -3,7 +3,7 @@ package claude
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertClaudeRequestToCLI_ToolChoice_SpecificTool(t *testing.T) {
@@ -36,12 +36,12 @@ func TestConvertClaudeRequestToCLI_ToolChoice_SpecificTool(t *testing.T) {
 		t.Fatal(errConvert)
 	}
 
-	if got := gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.mode").String(); got != "ANY" {
+	if got := ojson.GetBytes(output, "request.toolConfig.functionCallingConfig.mode").String(); got != "ANY" {
 		t.Fatalf("Expected request.toolConfig.functionCallingConfig.mode 'ANY', got '%s'", got)
 	}
-	allowed := gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+	allowed := ojson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Array()
 	if len(allowed) != 1 || allowed[0].String() != "json" {
-		t.Fatalf("Expected allowedFunctionNames ['json'], got %s", gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Raw)
+		t.Fatalf("Expected allowedFunctionNames ['json'], got %s", ojson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Raw)
 	}
 }
 
@@ -61,9 +61,9 @@ func TestConvertClaudeRequestToCLI_StripsClaudeCodeAttribution(t *testing.T) {
 		t.Fatal(errConvert)
 	}
 
-	parts := gjson.GetBytes(output, "request.systemInstruction.parts").Array()
+	parts := ojson.GetBytes(output, "request.systemInstruction.parts").Array()
 	if len(parts) != 1 {
-		t.Fatalf("Expected 1 system part after attribution strip, got %d: %s", len(parts), gjson.GetBytes(output, "request.systemInstruction.parts").Raw)
+		t.Fatalf("Expected 1 system part after attribution strip, got %d: %s", len(parts), ojson.GetBytes(output, "request.systemInstruction.parts").Raw)
 	}
 	if got := parts[0].Get("text").String(); got != "User system prompt" {
 		t.Fatalf("Unexpected system part: %q", got)
@@ -87,13 +87,13 @@ func TestConvertClaudeRequestToCLI_ConvertsMessageSystemRoleToUserContent(t *tes
 		t.Fatal(errConvert)
 	}
 
-	if systemContent := gjson.GetBytes(output, `request.contents.#(role=="system")`); systemContent.Exists() {
+	if systemContent := ojson.GetBytes(output, `request.contents.#(role=="system")`); systemContent.Exists() {
 		t.Fatalf("system role should not be emitted in request.contents: %s", systemContent.Raw)
 	}
 
-	contents := gjson.GetBytes(output, "request.contents").Array()
+	contents := ojson.GetBytes(output, "request.contents").Array()
 	if len(contents) != 3 {
-		t.Fatalf("Expected the user and message-level system turns in request.contents, got %d: %s", len(contents), gjson.GetBytes(output, "request.contents").Raw)
+		t.Fatalf("Expected the user and message-level system turns in request.contents, got %d: %s", len(contents), ojson.GetBytes(output, "request.contents").Raw)
 	}
 	if got := contents[0].Get("role").String(); got != "user" {
 		t.Fatalf("Expected first content role user, got %q", got)
@@ -111,9 +111,9 @@ func TestConvertClaudeRequestToCLI_ConvertsMessageSystemRoleToUserContent(t *tes
 		t.Fatalf("Unexpected array message-level system content text: %q", got)
 	}
 
-	parts := gjson.GetBytes(output, "request.systemInstruction.parts").Array()
+	parts := ojson.GetBytes(output, "request.systemInstruction.parts").Array()
 	if len(parts) != 1 {
-		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.GetBytes(output, "request.systemInstruction.parts").Raw)
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), ojson.GetBytes(output, "request.systemInstruction.parts").Raw)
 	}
 	if got := parts[0].Get("text").String(); got != "Top-level rules" {
 		t.Fatalf("Unexpected first system part: %q", got)
@@ -152,16 +152,16 @@ func TestConvertClaudeRequestToCLI_StructuredToolResult(t *testing.T) {
 		t.Fatal(errConvert)
 	}
 
-	fr := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse")
+	fr := ojson.GetBytes(output, "request.contents.1.parts.0.functionResponse")
 	if !fr.Exists() {
-		t.Fatalf("expected functionResponse part, contents=%s", gjson.GetBytes(output, "request.contents").Raw)
+		t.Fatalf("expected functionResponse part, contents=%s", ojson.GetBytes(output, "request.contents").Raw)
 	}
 	// The text block must remain structured JSON, not a double-encoded string blob.
 	if got := fr.Get("response.result.text").String(); got != "alpha" {
 		t.Fatalf("expected structured result text 'alpha', got result=%s", fr.Get("response.result").Raw)
 	}
 	// The image block must be emitted as a separate inlineData part, not embedded in result.
-	img := gjson.GetBytes(output, "request.contents.1.parts.1.inlineData")
+	img := ojson.GetBytes(output, "request.contents.1.parts.1.inlineData")
 	if got := img.Get("mime_type").String(); got != "image/png" {
 		t.Fatalf("expected image mime type 'image/png', got '%s'", got)
 	}
@@ -195,9 +195,9 @@ func TestConvertClaudeRequestToCLI_StringToolResult(t *testing.T) {
 		t.Fatal(errConvert)
 	}
 
-	fr := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse")
+	fr := ojson.GetBytes(output, "request.contents.1.parts.0.functionResponse")
 	if !fr.Exists() {
-		t.Fatalf("expected functionResponse part, contents=%s", gjson.GetBytes(output, "request.contents").Raw)
+		t.Fatalf("expected functionResponse part, contents=%s", ojson.GetBytes(output, "request.contents").Raw)
 	}
 	// String content must not be double-encoded: result should be exactly "alpha".
 	if got := fr.Get("response.result").String(); got != "alpha" {

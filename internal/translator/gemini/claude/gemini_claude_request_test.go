@@ -3,12 +3,12 @@ package claude
 import (
 	"errors"
 	"fmt"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 )
 
 func TestConvertClaudeRequestToGemini_ToolChoice_SpecificTool(t *testing.T) {

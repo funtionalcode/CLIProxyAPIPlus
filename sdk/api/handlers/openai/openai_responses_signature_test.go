@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -83,7 +83,7 @@ func TestOpenAIResponsesRepairsOrphanFunctionCallBeforeExecutor(t *testing.T) {
 	if executor.calls != 1 {
 		t.Fatalf("executor calls = %d, want 1", executor.calls)
 	}
-	input := gjson.GetBytes(executor.payload, "input").Array()
+	input := ojson.GetBytes(executor.payload, "input").Array()
 	if len(input) != 2 {
 		t.Fatalf("forwarded input len = %d, want 2: %s", len(input), executor.payload)
 	}

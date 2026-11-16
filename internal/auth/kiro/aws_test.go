@@ -1,10 +1,11 @@
 package kiro
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 )
 
 func TestExtractEmailFromJWT(t *testing.T) {

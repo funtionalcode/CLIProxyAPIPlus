@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"runtime"
@@ -26,8 +27,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -68,6 +67,31 @@ func translateCodexRequestPairWithUpdateIntentContext(ctx context.Context, from,
 	originalTranslated, _, _ := translate(originalPayload)
 	body, changed, err := translate(payload)
 	return originalTranslated, body, changed, err
+}
+
+// codexMinOutputTokens is the smallest integer max_output_tokens value the ChatGPT
+// Codex backend accepts; smaller integers are rejected with invalid_request_error.
+const codexMinOutputTokens = 16
+
+// normalizeCodexOutputBudgetDoc raises small positive integer output budgets to the
+// Codex minimum. It judges the translated payload (max_output_tokens) rather than the
+// client payload so every source format and budget field (max_tokens,
+// max_completion_tokens, generation_config, ...) is covered uniformly. Budgets that
+// are missing, non-numeric, non-integral, or <= 0 are left untouched for the upstream
+// to reject. This runs before user payload rules so overrides and filters stay final.
+func normalizeCodexOutputBudgetDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	translated := doc.Get("max_output_tokens")
+	if translated.Type != ojson.Number {
+		return
+	}
+	tokens, errFloat := strconv.ParseFloat(translated.Raw, 64)
+	if errFloat != nil || tokens < 1 || tokens >= codexMinOutputTokens || tokens != math.Trunc(tokens) {
+		return
+	}
+	_ = doc.Set("max_output_tokens", codexMinOutputTokens)
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.
@@ -186,12 +210,7 @@ func (e *CodexExecutor) cacheHelperWithIdentityDoc(ctx context.Context, from sdk
 		helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", cache.ID)
 	}
 	helps.SanitizeCodexInputItemIDsDoc(doc)
-	var identityState codexIdentityConfuseState
-	if doc != nil {
-		var identityBody []byte
-		identityBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, doc.Bytes())
-		doc = ojson.NewDoc(identityBody)
-	}
+	identityState := applyCodexIdentityConfuseBodyDoc(e.cfg, auth, userPayload, doc)
 	if identityState.promptCacheKey != "" {
 		cache.ID = identityState.promptCacheKey
 	}
@@ -234,35 +253,35 @@ func (e *CodexExecutor) cacheHelperWithIdentityDoc(ctx context.Context, from sdk
 	return httpReq, rawJSON, identityState, nil
 }
 
-func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, rawJSON []byte) ([]byte, codexIdentityConfuseState) {
-	rawJSON = helps.ApplyCodexEnvironmentNormalization(rawJSON, cfg, auth)
-	if !codexIdentityConfuseEnabled(cfg) || auth == nil || strings.TrimSpace(auth.ID) == "" || len(rawJSON) == 0 {
-		return rawJSON, codexIdentityConfuseState{}
+func applyCodexIdentityConfuseBodyDoc(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, doc *ojson.Doc) codexIdentityConfuseState {
+	helps.ApplyCodexEnvironmentNormalizationDoc(doc, cfg, auth)
+	if !codexIdentityConfuseEnabled(cfg) || auth == nil || strings.TrimSpace(auth.ID) == "" || doc == nil {
+		return codexIdentityConfuseState{}
 	}
 
 	state := codexIdentityConfuseState{enabled: true, authID: strings.TrimSpace(auth.ID)}
-	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
+	if promptCacheKey := strings.TrimSpace(ojson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
 		state.originalPromptCacheKey = promptCacheKey
 		state.promptCacheKey = codexIdentityConfuseUUID(auth.ID, "prompt-cache", promptCacheKey)
-		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", state.promptCacheKey)
+		helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", state.promptCacheKey)
 	}
-	installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String())
+	installationID := strings.TrimSpace(ojson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String())
 	if installationID == "" {
 		installationID = "account"
 	}
 	if installationID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-installation-id", codexIdentityConfuseUUID(auth.ID, "installation", installationID))
+		_ = doc.Set("client_metadata.x-codex-installation-id", codexIdentityConfuseUUID(auth.ID, "installation", installationID))
 	}
-	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-turn-metadata", applyCodexTurnMetadataIdentityConfuse(turnMetadata, &state))
+	if turnMetadata := strings.TrimSpace(doc.Get("client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
+		_ = doc.Set("client_metadata.x-codex-turn-metadata", applyCodexTurnMetadataIdentityConfuse(turnMetadata, &state))
 	}
 	if state.promptCacheKey != "" {
-		if windowID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-window-id").String()); windowID != "" {
-			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", state.promptCacheKey+":0")
+		if windowID := strings.TrimSpace(doc.Get("client_metadata.x-codex-window-id").String()); windowID != "" {
+			_ = doc.Set("client_metadata.x-codex-window-id", state.promptCacheKey+":0")
 		}
 	}
 
-	return rawJSON, state
+	return state
 }
 
 func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityConfuseState) {
@@ -294,18 +313,21 @@ func applyCodexTurnMetadataIdentityConfuse(rawTurnMetadata string, state *codexI
 	if state == nil || !state.enabled {
 		return updatedTurnMetadata
 	}
-	if state.promptCacheKey != "" && gjson.Get(rawTurnMetadata, "prompt_cache_key").Exists() {
-		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "prompt_cache_key", state.promptCacheKey)
-	} else if state.promptCacheKey != "" && state.originalPromptCacheKey != "" {
+	hasPromptCacheKey := ojson.Get(rawTurnMetadata, "prompt_cache_key").Exists()
+	if !hasPromptCacheKey && state.promptCacheKey != "" && state.originalPromptCacheKey != "" {
 		updatedTurnMetadata = strings.ReplaceAll(updatedTurnMetadata, state.originalPromptCacheKey, state.promptCacheKey)
 	}
-	if turnID := strings.TrimSpace(gjson.Get(rawTurnMetadata, "turn_id").String()); turnID != "" {
-		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "turn_id", state.confuseTurnID(turnID))
+	doc := ojson.NewDocString(updatedTurnMetadata)
+	if state.promptCacheKey != "" && hasPromptCacheKey {
+		_ = doc.Set("prompt_cache_key", state.promptCacheKey)
 	}
-	if state.promptCacheKey != "" && gjson.Get(rawTurnMetadata, "window_id").Exists() {
-		updatedTurnMetadata, _ = sjson.Set(updatedTurnMetadata, "window_id", state.promptCacheKey+":0")
+	if turnID := strings.TrimSpace(ojson.Get(rawTurnMetadata, "turn_id").String()); turnID != "" {
+		_ = doc.Set("turn_id", state.confuseTurnID(turnID))
 	}
-	return updatedTurnMetadata
+	if state.promptCacheKey != "" && ojson.Get(rawTurnMetadata, "window_id").Exists() {
+		_ = doc.Set("window_id", state.promptCacheKey+":0")
+	}
+	return doc.String()
 }
 
 func applyCodexIdentityConfuseResponsePayload(payload []byte, state codexIdentityConfuseState) []byte {
@@ -532,7 +554,6 @@ func applyModelHeaderOverrides(headers http.Header, modelName string) {
 // applyCodexDirectImageHeaders sets Codex upstream headers for direct /images/* calls.
 // Downstream client User-Agent values are not forwarded to reduce Cloudflare 1010 blocks.
 func applyCodexDirectImageHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, clientHeaders ...http.Header) {
-	useSIWC := codexUseSIWCForRequest(r.Context(), auth, clientHeaders...)
 	var ginHeaders http.Header
 	if len(clientHeaders) > 0 && clientHeaders[0] != nil {
 		ginHeaders = clientHeaders[0].Clone()
@@ -541,7 +562,7 @@ func applyCodexDirectImageHeaders(r *http.Request, auth *cliproxyauth.Auth, toke
 		ginHeaders = ginCtx.Request.Header.Clone()
 		ginHeaders.Del("User-Agent")
 	}
-	applyCodexHeadersWithSIWC(r, auth, useSIWC, token, stream, cfg, ginHeaders)
+	applyCodexHeadersWithSIWC(r, auth, false, token, stream, cfg, ginHeaders)
 }
 
 func codexSIWCUserAgent(cfg *config.Config) string {
@@ -870,14 +891,11 @@ func normalizeCodexInstructionsDoc(doc *ojson.Doc, nativeRequest ...bool) bool {
 }
 
 func isCodexResponsesLiteRequestDoc(doc *ojson.Doc, headers http.Header) bool {
-	if strings.EqualFold(strings.TrimSpace(headers.Get(codexResponsesLiteHeader)), "true") {
-		return true
-	}
-	if doc == nil {
-		return false
-	}
-	value := doc.Get("client_metadata.ws_request_header_x_openai_internal_codex_responses_lite")
-	return value.Type == ojson.True || (value.Type == ojson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true"))
+	return helps.CodexResponsesLiteRequestDoc(doc, headers)
+}
+
+func isCodexResponsesLiteModel(model string) bool {
+	return helps.CodexModelUsesResponsesLite(model)
 }
 
 var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
@@ -996,27 +1014,110 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 	return doc.Bytes()
 }
 
-func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *cliproxyauth.Auth, headers http.Header) bool {
-	if doc == nil || isCodexResponsesLiteRequestDoc(doc, headers) {
-		return false
-	}
-	if strings.HasSuffix(baseModel, "spark") {
-		return false
-	}
-	if isCodexFreePlanAuth(auth) {
-		return false
-	}
+func codexRequestHasReasoningForHostedImageDoc(doc *ojson.Doc, model string) bool {
+	return helps.CodexRequestHasReasoningForHostedImageDoc(doc, model)
+}
 
+func isCodexResponsesLiteRequestForAuthDoc(doc *ojson.Doc, modelName string, auth *cliproxyauth.Auth, headers http.Header) bool {
+	return helps.CodexResponsesLiteRequestForAuthDoc(doc, modelName, auth, headers)
+}
+
+func codexToolsAlreadyContainImageGenDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	tools := doc.Get("tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+	for _, t := range tools.Array() {
+		if t.Get("type").String() == "image_generation" || isImageGenerationFunctionTool(t) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendImageGenerationToolDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
 	tools := doc.Get("tools")
 	if !tools.Exists() || !tools.IsArray() {
 		return doc.SetRawBytes("tools", imageGenToolArrayJSON) == nil
 	}
-	for _, t := range tools.Array() {
-		if t.Get("type").String() == "image_generation" || isImageGenerationFunctionTool(t) {
-			return false
+	return doc.SetRawBytes("tools.-1", imageGenToolJSON) == nil
+}
+
+func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *cliproxyauth.Auth, headers http.Header) bool {
+	if doc == nil || isCodexFreePlanAuth(auth) || codexToolsAlreadyContainImageGenDoc(doc) {
+		return false
+	}
+	modelName := strings.TrimSpace(thinking.ParseSuffix(baseModel).ModelName)
+	if modelName == "" {
+		modelName = strings.TrimSpace(thinking.ParseSuffix(doc.Get("model").String()).ModelName)
+	}
+	if isCodexResponsesLiteRequestForAuthDoc(doc, modelName, auth, headers) {
+		return false
+	}
+	if isCodexResponsesLiteModel(modelName) && codexRequestHasReasoningForHostedImageDoc(doc, baseModel) {
+		return false
+	}
+	if strings.HasSuffix(strings.ToLower(modelName), "spark") {
+		return false
+	}
+	return appendImageGenerationToolDoc(doc)
+}
+
+func resolveCodexGPTImage2BaseModel(cfg *config.Config) string {
+	if cfg == nil {
+		return codexOpenAIImagesMainModel
+	}
+	model := strings.TrimSpace(cfg.GPTImage2BaseModel)
+	if model == "" {
+		return codexOpenAIImagesMainModel
+	}
+	if !strings.HasPrefix(strings.ToLower(model), "gpt-") || isCodexResponsesLiteModel(model) {
+		return codexOpenAIImagesMainModel
+	}
+	return model
+}
+
+// normalizeCodexImageGenerationToolsDoc strips parameters rejected by the
+// hosted image_generation tool on Codex /responses (which binds to
+// gpt-image-2-codex and rejects the complexity parameter).
+func normalizeCodexImageGenerationToolsDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	changed := false
+	stripAtPath := func(toolsPath string) {
+		tools := doc.Get(toolsPath)
+		if !tools.IsArray() {
+			return
+		}
+		for idx, tool := range tools.Array() {
+			if strings.TrimSpace(tool.Get("type").String()) != "image_generation" {
+				continue
+			}
+			if tool.Get("complexity").Exists() {
+				if doc.Delete(fmt.Sprintf("%s.%d.complexity", toolsPath, idx)) == nil {
+					changed = true
+				}
+			}
 		}
 	}
-	return doc.SetRawBytes("tools.-1", imageGenToolJSON) == nil
+	stripAtPath("tools")
+	input := doc.Get("input")
+	if input.IsArray() {
+		for idx, item := range input.Array() {
+			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
+				continue
+			}
+			stripAtPath(fmt.Sprintf("input.%d.tools", idx))
+		}
+	}
+	return changed
 }
 
 func normalizeCodexParallelToolCalls(body []byte, headers http.Header) []byte {

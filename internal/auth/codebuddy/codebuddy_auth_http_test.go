@@ -2,11 +2,12 @@ package codebuddy
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 )
 
 // newTestAuth creates a CodeBuddyAuth pointing at the given test server.

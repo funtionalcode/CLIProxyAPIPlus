@@ -1,11 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestErrorEnvelopeCarriesHTTPStatus(t *testing.T) {

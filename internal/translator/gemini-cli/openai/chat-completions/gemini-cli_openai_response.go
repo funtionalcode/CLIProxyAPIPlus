@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/chat-completions"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -66,12 +66,12 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
 
 	// Extract and set the model version.
-	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
+	if modelVersionResult := ojson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 		template, _ = sjson.SetBytes(template, "model", modelVersionResult.String())
 	}
 
 	// Extract and set the creation timestamp.
-	if createTimeResult := gjson.GetBytes(rawJSON, "response.createTime"); createTimeResult.Exists() {
+	if createTimeResult := ojson.GetBytes(rawJSON, "response.createTime"); createTimeResult.Exists() {
 		t, err := time.Parse(time.RFC3339Nano, createTimeResult.String())
 		if err == nil {
 			(*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp = t.Unix()
@@ -82,19 +82,19 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 	}
 
 	// Extract and set the response ID.
-	if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
+	if responseIDResult := ojson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
 		template, _ = sjson.SetBytes(template, "id", responseIDResult.String())
 	}
 
-	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
+	if finishReasonResult := ojson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
 		(*param).(*convertCliResponseToOpenAIChatParams).UpstreamFinishReason = strings.ToUpper(finishReasonResult.String())
 	}
-	if stopReasonResult := gjson.GetBytes(rawJSON, "response.stop_reason"); stopReasonResult.Exists() && stopReasonResult.String() != "" {
+	if stopReasonResult := ojson.GetBytes(rawJSON, "response.stop_reason"); stopReasonResult.Exists() && stopReasonResult.String() != "" {
 		(*param).(*convertCliResponseToOpenAIChatParams).UpstreamFinishReason = strings.ToUpper(stopReasonResult.String())
 	}
 
 	// Extract and set usage metadata (token counts).
-	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
+	if usageResult := ojson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
 		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
@@ -119,7 +119,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 	}
 
 	// Process the main content part of the response.
-	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
+	partsResult := ojson.GetBytes(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
 		for i := 0; i < len(partResults); i++ {
@@ -156,7 +156,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 			} else if functionCallResult.Exists() {
 				// Handle function call content.
 				(*param).(*convertCliResponseToOpenAIChatParams).SawToolCall = true
-				toolCallsResult := gjson.GetBytes(template, "choices.0.delta.tool_calls")
+				toolCallsResult := ojson.GetBytes(template, "choices.0.delta.tool_calls")
 				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
 				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
 				if toolCallsResult.Exists() && toolCallsResult.IsArray() {
@@ -188,11 +188,11 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 					mimeType = "image/png"
 				}
 				imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-				imagesResult := gjson.GetBytes(template, "choices.0.delta.images")
+				imagesResult := ojson.GetBytes(template, "choices.0.delta.images")
 				if !imagesResult.Exists() || !imagesResult.IsArray() {
 					template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
 				}
-				imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+				imageIndex := len(ojson.GetBytes(template, "choices.0.delta.images").Array())
 				imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 				imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
 				imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
@@ -205,7 +205,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 	params := (*param).(*convertCliResponseToOpenAIChatParams)
 	upstreamFinishReason := params.UpstreamFinishReason
 	sawToolCall := params.SawToolCall
-	usageExists := gjson.GetBytes(rawJSON, "response.usageMetadata").Exists()
+	usageExists := ojson.GetBytes(rawJSON, "response.usageMetadata").Exists()
 	isFinalChunk := upstreamFinishReason != "" && usageExists
 
 	if isFinalChunk {
@@ -238,7 +238,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertCliResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
-	responseResult := gjson.GetBytes(rawJSON, "response")
+	responseResult := ojson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param)
 	}

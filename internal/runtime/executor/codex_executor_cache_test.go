@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"github.com/tidwall/gjson"
 	"context"
 	"io"
 	"net/http"
@@ -209,24 +208,24 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 
 	expectedPromptCacheKey := codexIdentityConfuseUUID("auth-1", "prompt-cache", "cache-1")
 	expectedTurnID := codexIdentityConfuseUUID("auth-1", "turn", "turn-1")
-	if gotKey := gjson.GetBytes(body, "prompt_cache_key").String(); gotKey != expectedPromptCacheKey {
+	if gotKey := ojson.GetBytes(body, "prompt_cache_key").String(); gotKey != expectedPromptCacheKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedPromptCacheKey)
 	}
 	expectedInstallationID := codexIdentityConfuseUUID("auth-1", "installation", "install-1")
-	if gotID := gjson.GetBytes(body, "client_metadata.x-codex-installation-id").String(); gotID != expectedInstallationID {
+	if gotID := ojson.GetBytes(body, "client_metadata.x-codex-installation-id").String(); gotID != expectedInstallationID {
 		t.Fatalf("installation id = %q, want %q", gotID, expectedInstallationID)
 	}
-	gotBodyMetadata := gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").String()
-	if gotMetadataPromptCacheKey := gjson.Get(gotBodyMetadata, "prompt_cache_key").String(); gotMetadataPromptCacheKey != expectedPromptCacheKey {
+	gotBodyMetadata := ojson.GetBytes(body, "client_metadata.x-codex-turn-metadata").String()
+	if gotMetadataPromptCacheKey := ojson.Get(gotBodyMetadata, "prompt_cache_key").String(); gotMetadataPromptCacheKey != expectedPromptCacheKey {
 		t.Fatalf("client_metadata.x-codex-turn-metadata.prompt_cache_key = %q, want %q", gotMetadataPromptCacheKey, expectedPromptCacheKey)
 	}
-	if gotMetadataTurnID := gjson.Get(gotBodyMetadata, "turn_id").String(); gotMetadataTurnID != expectedTurnID {
+	if gotMetadataTurnID := ojson.Get(gotBodyMetadata, "turn_id").String(); gotMetadataTurnID != expectedTurnID {
 		t.Fatalf("client_metadata.x-codex-turn-metadata.turn_id = %q, want %q", gotMetadataTurnID, expectedTurnID)
 	}
-	if gotMetadataWindowID := gjson.Get(gotBodyMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
+	if gotMetadataWindowID := ojson.Get(gotBodyMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("client_metadata.x-codex-turn-metadata.window_id = %q, want %q", gotMetadataWindowID, expectedPromptCacheKey+":0")
 	}
-	if gotWindowID := gjson.GetBytes(body, "client_metadata.x-codex-window-id").String(); gotWindowID != expectedPromptCacheKey+":0" {
+	if gotWindowID := ojson.GetBytes(body, "client_metadata.x-codex-window-id").String(); gotWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("client_metadata.x-codex-window-id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")
 	}
 	if gotHeader := httpReq.Header["Session-Id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
@@ -244,13 +243,13 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindow, expectedPromptCacheKey+":0")
 	}
 	gotHeaderMetadata := httpReq.Header.Get("X-Codex-Turn-Metadata")
-	if gotMetadataPromptCacheKey := gjson.Get(gotHeaderMetadata, "prompt_cache_key").String(); gotMetadataPromptCacheKey != expectedPromptCacheKey {
+	if gotMetadataPromptCacheKey := ojson.Get(gotHeaderMetadata, "prompt_cache_key").String(); gotMetadataPromptCacheKey != expectedPromptCacheKey {
 		t.Fatalf("X-Codex-Turn-Metadata.prompt_cache_key = %q, want %q", gotMetadataPromptCacheKey, expectedPromptCacheKey)
 	}
-	if gotMetadataTurnID := gjson.Get(gotHeaderMetadata, "turn_id").String(); gotMetadataTurnID != expectedTurnID {
+	if gotMetadataTurnID := ojson.Get(gotHeaderMetadata, "turn_id").String(); gotMetadataTurnID != expectedTurnID {
 		t.Fatalf("X-Codex-Turn-Metadata.turn_id = %q, want %q", gotMetadataTurnID, expectedTurnID)
 	}
-	if gotMetadataWindowID := gjson.Get(gotHeaderMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
+	if gotMetadataWindowID := ojson.Get(gotHeaderMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Turn-Metadata.window_id = %q, want %q", gotMetadataWindowID, expectedPromptCacheKey+":0")
 	}
 }
@@ -273,7 +272,7 @@ func TestCodexExecutorCacheHelper_IdentityConfuseAddsStableInstallationIDWhenMis
 	}
 
 	expectedInstallationID := codexIdentityConfuseUUID("auth-1", "installation", "account")
-	if got := gjson.GetBytes(body, "client_metadata.x-codex-installation-id").String(); got != expectedInstallationID {
+	if got := ojson.GetBytes(body, "client_metadata.x-codex-installation-id").String(); got != expectedInstallationID {
 		t.Fatalf("installation id = %q, want %q", got, expectedInstallationID)
 	}
 }
@@ -312,7 +311,7 @@ func TestCodexExecutorCacheHelper_NormalizesCodexEnvironmentText(t *testing.T) {
 		t.Fatalf("cacheHelper error: %v", err)
 	}
 
-	instructions := gjson.GetBytes(body, "instructions").String()
+	instructions := ojson.GetBytes(body, "instructions").String()
 	if !strings.Contains(instructions, "Working directory: /Users/codex/project") {
 		t.Fatalf("instructions missing canonical cwd: %q", instructions)
 	}
@@ -326,7 +325,7 @@ func TestCodexExecutorCacheHelper_NormalizesCodexEnvironmentText(t *testing.T) {
 		t.Fatalf("instructions still leak original identity: %q", instructions)
 	}
 
-	messageText := gjson.GetBytes(body, "input.0.content.0.text").String()
+	messageText := ojson.GetBytes(body, "input.0.content.0.text").String()
 	if !strings.Contains(messageText, "Current directory: /Users/codex/project") {
 		t.Fatalf("message text missing canonical cwd: %q", messageText)
 	}
@@ -340,7 +339,7 @@ func TestCodexExecutorCacheHelper_NormalizesCodexEnvironmentText(t *testing.T) {
 		t.Fatalf("message text still leaks original identity: %q", messageText)
 	}
 
-	arguments := gjson.GetBytes(body, "input.1.arguments").String()
+	arguments := ojson.GetBytes(body, "input.1.arguments").String()
 	if !strings.Contains(arguments, "/Users/alice/private") {
 		t.Fatalf("tool arguments were unexpectedly normalized: %q", arguments)
 	}

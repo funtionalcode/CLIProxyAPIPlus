@@ -1,8 +1,9 @@
 package ir
 
 import (
-	"encoding/json"
 	"fmt"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // ParseClaudeRequest parses a Claude Messages API request into the IR.

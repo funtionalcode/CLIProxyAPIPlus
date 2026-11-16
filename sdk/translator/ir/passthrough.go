@@ -1,6 +1,6 @@
 package ir
 
-import "encoding/json"
+import "github.com/MoeForge/moego/json"
 
 // StorePassthrough extracts all top-level fields from rawJSON that are NOT in the
 // knownFields set and stores them in a Passthrough map. This allows unrecognized

@@ -54,8 +54,9 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		loggerEnabled := logger.IsEnabled()
-		captureBody := shouldCaptureRequestBody(loggerEnabled, c.Request)
-		if maxBytes := c.GetInt64("maxRequestBodyBytes"); loggerEnabled && maxBytes > 0 && maxBytes <= maxCapturedRequestBodyBytes && c.Request.ContentLength < 0 {
+		hasMatchedRoute := c.FullPath() != ""
+		captureBody := hasMatchedRoute && shouldCaptureRequestBody(loggerEnabled, c.Request)
+		if maxBytes := c.GetInt64("maxRequestBodyBytes"); hasMatchedRoute && loggerEnabled && maxBytes > 0 && maxBytes <= maxCapturedRequestBodyBytes && c.Request.ContentLength < 0 {
 			captureBody = true
 		}
 
@@ -68,11 +69,16 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
+		wrapper.ginContext = c
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
+			deferredAPICapture := logging.NewDeferredAPICapture()
+			wrapper.deferredAPICapture = deferredAPICapture
+			c.Request = c.Request.WithContext(logging.WithDeferredAPICapture(c.Request.Context(), deferredAPICapture))
+			c.Set(logging.DeferredAPIResponseContextKey, deferredAPICapture)
 		}
 		c.Writer = wrapper
-		attachRequestLogSources(c, logger, loggerEnabled)
+		attachRequestLogSources(c, logger, loggerEnabled && hasMatchedRoute)
 		deferredCapture := attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, false, false)
 		if captureBody {
 			c.Set(authenticatedRequestBodyCapturerContextKey, func() {

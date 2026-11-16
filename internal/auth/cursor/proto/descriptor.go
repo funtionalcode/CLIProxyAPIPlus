@@ -1,9 +1,9 @@
 package proto
 
 import (
-	"encoding/base64"
 	"sync"
 
+	"github.com/MoeForge/moego/base64"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"

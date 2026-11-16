@@ -1,11 +1,12 @@
 package iflow
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // NormalizeCookie normalizes raw cookie strings for iFlow authentication flows.

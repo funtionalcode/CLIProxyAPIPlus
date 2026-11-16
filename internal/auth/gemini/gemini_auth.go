@@ -6,13 +6,14 @@ package gemini
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -20,7 +21,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -161,8 +161,8 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 		return nil, fmt.Errorf("get user info request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	emailResult := gjson.GetBytes(bodyBytes, "email")
-	if emailResult.Exists() && emailResult.Type == gjson.String {
+	emailResult := ojson.GetBytes(bodyBytes, "email")
+	if emailResult.Exists() && emailResult.Type == ojson.String {
 		fmt.Printf("Authenticated user email: %s\n", emailResult.String())
 	} else {
 		fmt.Println("Failed to get user email from token")

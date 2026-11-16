@@ -1,12 +1,13 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestManagerServiceProxyRoutesForwardManagerOnlyPaths(t *testing.T) {

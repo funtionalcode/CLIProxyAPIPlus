@@ -2,12 +2,13 @@ package gitlab
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestAuthClientGenerateAuthURLIncludesPKCE(t *testing.T) {

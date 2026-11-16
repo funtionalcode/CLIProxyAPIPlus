@@ -1,8 +1,9 @@
 package ir
 
 import (
-	"encoding/json"
 	"fmt"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // ParseCodexRequest parses a Codex (OpenAI Responses) request into the IR.

@@ -2,7 +2,6 @@ package logging
 
 import (
 	"errors"
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"testing/iotest"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 

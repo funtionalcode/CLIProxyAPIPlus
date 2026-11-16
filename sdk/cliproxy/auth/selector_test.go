@@ -2,15 +2,16 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -135,6 +136,105 @@ func TestRoundRobinSelectorPick_WeightedIgnoresPriorityBuckets(t *testing.T) {
 		}
 		if got.ID != id {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+	}
+}
+
+func TestAuthWeight_MetadataFallbackAndAttributePrecedence(t *testing.T) {
+	t.Parallel()
+
+	if got := authWeight(&Auth{Metadata: map[string]any{AttributeWeight: float64(7)}}); got != 7 {
+		t.Fatalf("authWeight(metadata) = %d, want 7", got)
+	}
+	if got := authWeight(&Auth{
+		Attributes: map[string]string{AttributeWeight: "3"},
+		Metadata:   map[string]any{AttributeWeight: float64(7)},
+	}); got != 3 {
+		t.Fatalf("authWeight(attribute and metadata) = %d, want attribute weight 3", got)
+	}
+}
+
+func TestAuthWeight_InvalidAndOverflowValuesAreExcluded(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{"1.5", "1000001", "9223372036854775807", "9223372036854775808"} {
+		auth := &Auth{Attributes: map[string]string{AttributeWeight: raw}}
+		if got := authWeight(auth); got != 0 {
+			t.Fatalf("authWeight(%q) = %d, want 0", raw, got)
+		}
+	}
+	if got := authWeight(&Auth{Metadata: map[string]any{AttributeWeight: 1.5}}); got != 0 {
+		t.Fatalf("authWeight(invalid metadata) = %d, want 0", got)
+	}
+	if got := authWeight(&Auth{Attributes: map[string]string{AttributeWeight: "-1"}}); got != 0 {
+		t.Fatalf("authWeight(-1) = %d, want 0", got)
+	}
+}
+
+func TestSmoothWeightedStateCharge_SaturatesAndClampsCorruptState(t *testing.T) {
+	t.Parallel()
+
+	state := weightedPoolForTest("route", map[string]int64{"a": 1, "b": 1}, map[string]int64{"a": math.MaxInt64, "b": math.MinInt64})
+	state.charge(0, false)
+	limit := maxSmoothWeightedCreditRounds * 2
+	if state.currentForTest()["a"] != limit || state.currentForTest()["b"] != -limit {
+		t.Fatalf("current state = %#v, want saturated and clamped arithmetic", state.currentForTest())
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_RecoveredAuthReturnsWithoutAccumulatedCredit(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	authA := &Auth{ID: "a", Attributes: map[string]string{AttributeWeight: "5"}}
+	authB := &Auth{ID: "b", Attributes: map[string]string{AttributeWeight: "1"}}
+	auths := []*Auth{authA, authB}
+
+	for index := 0; index < 6; index++ {
+		if _, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths); errPick != nil {
+			t.Fatalf("warmup Pick() #%d error = %v", index, errPick)
+		}
+	}
+	authA.Unavailable = true
+	authA.NextRetryAfter = time.Now().Add(time.Hour)
+	for index := 0; index < 6; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil || got == nil || got.ID != "b" {
+			t.Fatalf("unavailable Pick() #%d = %#v, %v; want b", index, got, errPick)
+		}
+	}
+	authA.Unavailable = false
+	authA.NextRetryAfter = time.Time{}
+
+	counts := make(map[string]int)
+	for index := 0; index < 6; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil {
+			t.Fatalf("recovered Pick() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	if counts["a"] != 5 || counts["b"] != 1 {
+		t.Fatalf("recovered picks = %#v, want a:b=5:1", counts)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_DefaultWeightIsOne(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	counts := make(map[string]int)
+	for index := 0; index < 30; index++ {
+		got, errPick := selector.Pick(context.Background(), "gemini", "model", cliproxyexecutor.Options{}, auths)
+		if errPick != nil {
+			t.Fatalf("Pick() #%d error = %v", index, errPick)
+		}
+		counts[got.ID]++
+	}
+	for _, authID := range []string{"a", "b", "c"} {
+		if counts[authID] != 10 {
+			t.Fatalf("auth %q picks = %d, want 10", authID, counts[authID])
 		}
 	}
 }

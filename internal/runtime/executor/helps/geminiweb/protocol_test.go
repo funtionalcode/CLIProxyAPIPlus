@@ -1,10 +1,11 @@
 package geminiweb
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func testFrame(text string, complete bool) string {

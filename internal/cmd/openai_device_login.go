@@ -34,11 +34,11 @@ func DoCodexDeviceLogin(cfg *config.Config, options *LoginOptions) {
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
+		ProxyURL:     options.ProxyURL,
 		Metadata: map[string]string{
 			codexLoginModeMetadataKey: codexLoginModeDevice,
 		},
-		Prompt:   promptFn,
-		ProxyURL: options.ProxyURL,
+		Prompt: promptFn,
 	}
 
 	_, savedPath, err := manager.Login(context.Background(), "codex", cfg, authOpts)

@@ -5,9 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cursor"
 	cursorproto "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cursor/proto"
@@ -25,7 +26,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"golang.org/x/net/http2"
 )
 
@@ -225,7 +225,7 @@ func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, re
 			log.Debugf("cursor CountTokens: model=%s result=%s", req.Model, string(resp.Payload))
 		}
 	}()
-	model := gjson.GetBytes(req.Payload, "model").String()
+	model := ojson.GetBytes(req.Payload, "model").String()
 	if model == "" {
 		model = req.Model
 	}
@@ -238,7 +238,7 @@ func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, re
 
 	// Detect format: Claude (/v1/messages) vs OpenAI (/v1/chat/completions)
 	var count int64
-	if gjson.GetBytes(req.Payload, "system").Exists() || opts.SourceFormat.String() == "claude" {
+	if ojson.GetBytes(req.Payload, "system").Exists() || opts.SourceFormat.String() == "claude" {
 		count, _ = countClaudeChatTokens(enc, req.Payload)
 	} else {
 		count, _ = countOpenAIChatTokens(enc, req.Payload)
@@ -1081,8 +1081,8 @@ func processH2SessionFrames(
 
 type parsedOpenAIRequest struct {
 	Model        string
-	Messages     []gjson.Result
-	Tools        []gjson.Result
+	Messages     []ojson.Result
+	Tools        []ojson.Result
 	Stream       bool
 	SystemPrompt string
 	UserText     string
@@ -1098,11 +1098,11 @@ type toolResultInfo struct {
 
 func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	p := &parsedOpenAIRequest{
-		Model:  gjson.GetBytes(payload, "model").String(),
-		Stream: gjson.GetBytes(payload, "stream").Bool(),
+		Model:  ojson.GetBytes(payload, "model").String(),
+		Stream: ojson.GetBytes(payload, "stream").Bool(),
 	}
 
-	messages := gjson.GetBytes(payload, "messages").Array()
+	messages := ojson.GetBytes(payload, "messages").Array()
 	p.Messages = messages
 
 	// Extract system prompt
@@ -1166,7 +1166,7 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	}
 
 	// Extract tools
-	p.Tools = gjson.GetBytes(payload, "tools").Array()
+	p.Tools = ojson.GetBytes(payload, "tools").Array()
 
 	return p
 }
@@ -1226,8 +1226,8 @@ func flattenConversationIntoUserText(parsed *parsedOpenAIRequest) {
 	parsed.ToolResults = nil
 }
 
-func extractTextContent(content gjson.Result) string {
-	if content.Type == gjson.String {
+func extractTextContent(content ojson.Result) string {
+	if content.Type == ojson.String {
 		return content.String()
 	}
 	if content.IsArray() {
@@ -1242,7 +1242,7 @@ func extractTextContent(content gjson.Result) string {
 	return content.String()
 }
 
-func extractImages(content gjson.Result) []cursorproto.ImageData {
+func extractImages(content ojson.Result) []cursorproto.ImageData {
 	if !content.IsArray() {
 		return nil
 	}
@@ -1372,12 +1372,12 @@ func extractCCH(systemPrompt string) string {
 // extractClaudeCodeSessionId extracts session_id from Claude Code's metadata.user_id JSON.
 // Format: {"metadata":{"user_id":"{\"session_id\":\"xxx\",\"device_id\":\"yyy\"}"}}
 func extractClaudeCodeSessionId(payload []byte) string {
-	userIdStr := gjson.GetBytes(payload, "metadata.user_id").String()
+	userIdStr := ojson.GetBytes(payload, "metadata.user_id").String()
 	if userIdStr == "" {
 		return ""
 	}
 	// user_id is a JSON string that needs to be parsed again
-	sid := gjson.Get(userIdStr, "session_id").String()
+	sid := ojson.Get(userIdStr, "session_id").String()
 	return sid
 }
 
@@ -1407,7 +1407,7 @@ func deriveConversationId(apiKey, sessionId, systemPrompt string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", s[:8], s[8:12], s[12:16], s[16:20], s[20:32])
 }
 
-func deriveSessionKey(clientKey string, model string, messages []gjson.Result) string {
+func deriveSessionKey(clientKey string, model string, messages []ojson.Result) string {
 	var firstUserContent string
 	var systemContent string
 	for _, msg := range messages {

@@ -2,11 +2,11 @@ package management
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
 )

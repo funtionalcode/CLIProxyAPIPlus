@@ -2,12 +2,13 @@ package auth
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
 )
 
 func TestRequestRetryOverride(t *testing.T) {

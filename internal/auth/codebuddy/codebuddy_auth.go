@@ -3,8 +3,6 @@ package codebuddy
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 

@@ -4,24 +4,24 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/gitlab"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -573,7 +573,7 @@ func (e *GitLabExecutor) refreshOAuthToken(ctx context.Context, client *gitlab.A
 }
 
 func buildGitLabPrompt(payload []byte) gitLabPrompt {
-	root := gjson.ParseBytes(payload)
+	root := ojson.ParseBytes(payload)
 	prompt := gitLabPrompt{
 		FileName: "prompt.txt",
 	}
@@ -584,7 +584,7 @@ func buildGitLabPrompt(payload []byte) gitLabPrompt {
 		contextIndex := 0
 		transcript := make([]string, 0, len(msgs.Array()))
 		var lastUser string
-		msgs.ForEach(func(_, msg gjson.Result) bool {
+		msgs.ForEach(func(_, msg ojson.Result) bool {
 			role := strings.TrimSpace(msg.Get("role").String())
 			if role == "" {
 				role = "user"
@@ -646,7 +646,7 @@ func buildGitLabPrompt(payload []byte) gitLabPrompt {
 	return prompt
 }
 
-func openAIContentText(content gjson.Result) string {
+func openAIContentText(content ojson.Result) string {
 	segments := make([]string, 0, 8)
 	collectOpenAIContent(content, &segments)
 	return strings.TrimSpace(strings.Join(segments, "\n"))
@@ -666,14 +666,14 @@ func parseGitLabTextResponse(endpoint string, body []byte) (string, error) {
 		if err := json.Unmarshal(body, &text); err == nil {
 			return text, nil
 		}
-		if value := strings.TrimSpace(gjson.GetBytes(body, "response").String()); value != "" {
+		if value := strings.TrimSpace(ojson.GetBytes(body, "response").String()); value != "" {
 			return value, nil
 		}
 	}
-	if value := strings.TrimSpace(gjson.GetBytes(body, "choices.0.text").String()); value != "" {
+	if value := strings.TrimSpace(ojson.GetBytes(body, "choices.0.text").String()); value != "" {
 		return value, nil
 	}
-	if value := strings.TrimSpace(gjson.GetBytes(body, "response").String()); value != "" {
+	if value := strings.TrimSpace(ojson.GetBytes(body, "response").String()); value != "" {
 		return value, nil
 	}
 	var plain string
@@ -768,7 +768,7 @@ func normalizeGitLabStreamChunk(eventName string, payload []byte, fallbackModel 
 		return finalizeGitLabStream(fallbackModel, state)
 	}
 
-	root := gjson.ParseBytes(payload)
+	root := ojson.ParseBytes(payload)
 	if root.Exists() {
 		if obj := root.Get("object").String(); obj == "chat.completion.chunk" {
 			return [][]byte{append([]byte("data: "), bytes.Clone(payload)...)}
@@ -801,7 +801,7 @@ func normalizeGitLabStreamChunk(eventName string, payload []byte, fallbackModel 
 	return state.emitText(extractGitLabStreamText(root))
 }
 
-func extractGitLabStreamText(root gjson.Result) string {
+func extractGitLabStreamText(root ojson.Result) string {
 	for _, key := range []string{
 		"choices.0.delta.content",
 		"choices.0.text",
@@ -823,11 +823,11 @@ func finalizeGitLabStream(fallbackModel string, state *gitLabOpenAIStreamState) 
 	if state == nil {
 		return nil
 	}
-	state.ensureInitialized(fallbackModel, gjson.Result{})
+	state.ensureInitialized(fallbackModel, ojson.Result{})
 	return state.finish("stop")
 }
 
-func (s *gitLabOpenAIStreamState) ensureInitialized(fallbackModel string, root gjson.Result) {
+func (s *gitLabOpenAIStreamState) ensureInitialized(fallbackModel string, root ojson.Result) {
 	if s == nil {
 		return
 	}

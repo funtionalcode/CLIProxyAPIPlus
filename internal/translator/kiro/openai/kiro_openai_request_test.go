@@ -1,8 +1,9 @@
 package openai
 
 import (
-	"encoding/json"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // TestToolResultsAttachedToCurrentMessage verifies that tool results from "tool" role messages

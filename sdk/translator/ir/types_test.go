@@ -1,8 +1,9 @@
 package ir
 
 import (
-	"encoding/json"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestIRRequest_Serialization(t *testing.T) {

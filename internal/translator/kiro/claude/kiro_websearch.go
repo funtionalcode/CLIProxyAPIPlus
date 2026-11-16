@@ -5,15 +5,15 @@
 package claude
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -121,7 +121,7 @@ func isWebSearchTool(name, toolType string) bool {
 // Returns true only if tools array has exactly one tool named "web_search".
 // Only intercept pure web_search requests (single-tool array).
 func HasWebSearchTool(body []byte) bool {
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytes(body, "tools")
 	if !tools.IsArray() {
 		return false
 	}
@@ -144,7 +144,7 @@ func HasWebSearchTool(body []byte) bool {
 // ExtractSearchQuery extracts the search query from the request.
 // Reads messages[0].content and removes "Perform a web search for the query: " prefix.
 func ExtractSearchQuery(body []byte) string {
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytes(body, "messages")
 	if !messages.IsArray() || len(messages.Array()) == 0 {
 		return ""
 	}
@@ -224,7 +224,7 @@ func GenerateToolUseID() string {
 // non-coding topics" instruction from the original Kiro tools/list response.
 // This keeps the tool available so the model can request additional searches.
 func ReplaceWebSearchToolDescription(body []byte) ([]byte, error) {
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytes(body, "tools")
 	if !tools.IsArray() {
 		return body, nil
 	}

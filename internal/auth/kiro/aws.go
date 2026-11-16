@@ -3,8 +3,6 @@
 package kiro
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 	log "github.com/sirupsen/logrus"
 )
 

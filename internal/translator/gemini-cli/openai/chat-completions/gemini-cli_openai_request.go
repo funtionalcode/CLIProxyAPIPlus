@@ -6,19 +6,19 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 
 // ConvertOpenAIRequestToGeminiCLI converts an OpenAI Chat Completions request (raw JSON)
-// into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
+// into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use ojson.
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request
@@ -36,13 +36,13 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Let user-provided generationConfig pass through
-	if genConfig := gjson.GetBytes(rawJSON, "generationConfig"); genConfig.Exists() {
+	if genConfig := ojson.GetBytes(rawJSON, "generationConfig"); genConfig.Exists() {
 		out, _ = sjson.SetRawBytes(out, "request.generationConfig", []byte(genConfig.Raw))
 	}
 
 	// Apply thinking configuration: convert OpenAI reasoning_effort to Gemini CLI thinkingConfig.
 	// Inline translation-only mapping; capability checks happen later in ApplyThinking.
-	re := gjson.GetBytes(rawJSON, "reasoning_effort")
+	re := ojson.GetBytes(rawJSON, "reasoning_effort")
 	if re.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(re.String()))
 		if effort != "" {
@@ -58,18 +58,18 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 	}
 
 	// Temperature/top_p/top_k
-	if tr := gjson.GetBytes(rawJSON, "temperature"); tr.Exists() && tr.Type == gjson.Number {
+	if tr := ojson.GetBytes(rawJSON, "temperature"); tr.Exists() && tr.Type == ojson.Number {
 		out, _ = sjson.SetBytes(out, "request.generationConfig.temperature", tr.Num)
 	}
-	if tpr := gjson.GetBytes(rawJSON, "top_p"); tpr.Exists() && tpr.Type == gjson.Number {
+	if tpr := ojson.GetBytes(rawJSON, "top_p"); tpr.Exists() && tpr.Type == ojson.Number {
 		out, _ = sjson.SetBytes(out, "request.generationConfig.topP", tpr.Num)
 	}
-	if tkr := gjson.GetBytes(rawJSON, "top_k"); tkr.Exists() && tkr.Type == gjson.Number {
+	if tkr := ojson.GetBytes(rawJSON, "top_k"); tkr.Exists() && tkr.Type == ojson.Number {
 		out, _ = sjson.SetBytes(out, "request.generationConfig.topK", tkr.Num)
 	}
 
 	// Candidate count (OpenAI 'n' parameter)
-	if n := gjson.GetBytes(rawJSON, "n"); n.Exists() && n.Type == gjson.Number {
+	if n := ojson.GetBytes(rawJSON, "n"); n.Exists() && n.Type == ojson.Number {
 		if val := n.Int(); val > 1 {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.candidateCount", val)
 		}
@@ -77,7 +77,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 
 	// Map OpenAI modalities -> Gemini CLI request.generationConfig.responseModalities
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
-	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
+	if mods := ojson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
 		var responseMods []string
 		for _, m := range mods.Array() {
 			switch strings.ToLower(m.String()) {
@@ -94,17 +94,17 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 
 	// OpenRouter-style image_config support
 	// If the input uses top-level image_config.aspect_ratio, map it into request.generationConfig.imageConfig.aspectRatio.
-	if imgCfg := gjson.GetBytes(rawJSON, "image_config"); imgCfg.Exists() && imgCfg.IsObject() {
-		if ar := imgCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == gjson.String {
+	if imgCfg := ojson.GetBytes(rawJSON, "image_config"); imgCfg.Exists() && imgCfg.IsObject() {
+		if ar := imgCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == ojson.String {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.aspectRatio", ar.Str)
 		}
-		if size := imgCfg.Get("image_size"); size.Exists() && size.Type == gjson.String {
+		if size := imgCfg.Get("image_size"); size.Exists() && size.Type == ojson.String {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.imageSize", size.Str)
 		}
 	}
 
 	// messages -> systemInstruction + contents
-	messages := gjson.GetBytes(rawJSON, "messages")
+	messages := ojson.GetBytes(rawJSON, "messages")
 	if messages.IsArray() {
 		arr := messages.Array()
 		// First pass: assistant tool_calls id->name map
@@ -149,7 +149,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 
 			if (role == "system" || role == "developer") && len(arr) > 1 {
 				// system -> request.systemInstruction as a user message style
-				if content.Type == gjson.String {
+				if content.Type == ojson.String {
 					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
 					out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), content.String())
 					systemPartIndex++
@@ -170,7 +170,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 			} else if role == "user" || ((role == "system" || role == "developer") && len(arr) == 1) {
 				// Build single user content node to avoid splitting into multiple contents
 				node := []byte(`{"role":"user","parts":[]}`)
-				if content.Type == gjson.String {
+				if content.Type == ojson.String {
 					node, _ = sjson.SetBytes(node, "parts.0.text", content.String())
 				} else if content.IsArray() {
 					items := content.Array()
@@ -214,7 +214,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 			} else if role == "assistant" {
 				p := 0
 				node := []byte(`{"role":"model","parts":[]}`)
-				if content.Type == gjson.String {
+				if content.Type == ojson.String {
 					// Assistant text -> single model content
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
 					p++
@@ -289,7 +289,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 	}
 
 	// tools -> request.tools[].functionDeclarations + request.tools[].googleSearch/codeExecution/urlContext passthrough
-	tools := gjson.GetBytes(rawJSON, "tools")
+	tools := ojson.GetBytes(rawJSON, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		functionToolNode := []byte(`{}`)
 		hasFunction := false
@@ -398,7 +398,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 	return common.AttachDefaultSafetySettings(out, "request.safetySettings"), nil
 }
 
-func openAIToolCallGeminiThoughtSignature(toolCall gjson.Result) string {
+func openAIToolCallGeminiThoughtSignature(toolCall ojson.Result) string {
 	for _, path := range []string{
 		"extra_content.google.thought_signature",
 		"function.extra_content.google.thought_signature",

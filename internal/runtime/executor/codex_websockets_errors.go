@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"github.com/tidwall/gjson"
 	"context"
 	"io"
 	"net/http"
@@ -91,7 +90,7 @@ func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexR
 }
 
 func codexWebsocketErrorEnvelope(payload []byte) bool {
-	return gjson.GetBytes(payload, "error").Exists() || gjson.GetBytes(payload, "body.error").Exists()
+	return ojson.GetBytes(payload, "error").Exists() || ojson.GetBytes(payload, "body.error").Exists()
 }
 
 func inferCodexWebsocketErrorStatus(payload []byte) int {
@@ -103,7 +102,7 @@ func inferCodexWebsocketErrorStatus(payload []byte) int {
 
 func isCodexWebsocketUsageLimitError(payload []byte) bool {
 	for _, path := range []string{"error.type", "body.error.type", "body.type", "type"} {
-		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, path).String()), "usage_limit_reached") {
+		if strings.EqualFold(strings.TrimSpace(ojson.GetBytes(payload, path).String()), "usage_limit_reached") {
 			return true
 		}
 	}
@@ -221,15 +220,50 @@ func recordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, resp *
 }
 
 func websocketHandshakeBody(resp *http.Response) []byte {
+	body, _ := websocketHandshakeBodyWithReadErr(resp)
+	return body
+}
+
+func websocketHandshakeBodyWithReadErr(resp *http.Response) ([]byte, error) {
 	if resp == nil || resp.Body == nil {
-		return nil
+		return nil, nil
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, errRead := io.ReadAll(resp.Body)
 	closeHTTPResponseBody(resp, "codex websockets executor: close handshake response body error")
 	if len(body) == 0 {
-		return nil
+		return nil, errRead
 	}
-	return body
+	return body, errRead
+}
+
+func recordWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, wsReqLog helps.UpstreamRequestLog, resp *http.Response) []byte {
+	bodyErr, errRead := websocketHandshakeBodyWithReadErr(resp)
+	if resp != nil {
+		helps.RecordAPIWebsocketUpgradeRejection(ctx, cfg, websocketUpgradeRequestLog(wsReqLog), resp.StatusCode, resp.Header.Clone(), bodyErr)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, cfg, errRead)
+		}
+	}
+	return bodyErr
+}
+
+func recordWebsocketDialFailure(ctx context.Context, cfg *config.Config, wsReqLog helps.UpstreamRequestLog, resp *http.Response, errDial error) []byte {
+	bodyErr := recordWebsocketUpgradeRejection(ctx, cfg, wsReqLog, resp)
+	helps.RecordAPIWebsocketError(ctx, cfg, "dial", errDial)
+	return bodyErr
+}
+
+func recordWebsocketDialRetryFailure(ctx context.Context, cfg *config.Config, wsReqLog helps.UpstreamRequestLog, resp *http.Response, errDial error) []byte {
+	if resp != nil {
+		bodyErr := recordWebsocketUpgradeRejection(ctx, cfg, wsReqLog, resp)
+		helps.RecordAPIWebsocketError(ctx, cfg, "dial_retry", errDial)
+		return bodyErr
+	}
+	if cfg != nil && !cfg.CommercialMode && !cfg.RequestLog {
+		helps.RecordAPIRequest(ctx, cfg, websocketUpgradeRequestLog(wsReqLog))
+	}
+	helps.RecordAPIWebsocketError(ctx, cfg, "dial_retry", errDial)
+	return nil
 }
 
 func closeHTTPResponseBody(resp *http.Response, logPrefix string) {

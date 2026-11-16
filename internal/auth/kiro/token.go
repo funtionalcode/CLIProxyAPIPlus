@@ -1,10 +1,11 @@
 package kiro
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // KiroTokenStorage holds the persistent token data for Kiro authentication.

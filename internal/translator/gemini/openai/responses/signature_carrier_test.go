@@ -2,11 +2,11 @@ package responses
 
 import (
 	"context"
-	"github.com/MoeForge/moego/base64"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"google.golang.org/protobuf/encoding/protowire"
 )

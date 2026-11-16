@@ -56,10 +56,11 @@ static void free_host_buffer(void* ptr, size_t len) {
 import "C"
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 	"unsafe"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const abiVersion uint32 = 1

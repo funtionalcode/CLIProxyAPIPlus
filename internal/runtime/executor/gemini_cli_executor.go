@@ -7,15 +7,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -26,7 +27,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -252,7 +252,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			continue
 		}
 
-		err = newGeminiStatusErr(httpResp.StatusCode, data)
+		err = newGeminiCLIStatusErr(httpResp.StatusCode, data)
 		return resp, err
 	}
 
@@ -262,7 +262,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	err = newGeminiStatusErr(lastStatus, lastBody)
+	err = newGeminiCLIStatusErr(lastStatus, lastBody)
 	return resp, err
 }
 
@@ -394,7 +394,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 				continue
 			}
-			err = newGeminiStatusErr(httpResp.StatusCode, data)
+			err = newGeminiCLIStatusErr(httpResp.StatusCode, data)
 			return nil, err
 		}
 
@@ -490,7 +490,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	err = newGeminiStatusErr(lastStatus, lastBody)
+	err = newGeminiCLIStatusErr(lastStatus, lastBody)
 	return nil, err
 }
 
@@ -589,7 +589,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			count := gjson.GetBytes(data, "totalTokens").Int()
+			count := ojson.GetBytes(data, "totalTokens").Int()
 			translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, data)
 			return cliproxyexecutor.Response{Payload: translated, Headers: resp.Header.Clone()}, nil
 		}
@@ -605,7 +605,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	return cliproxyexecutor.Response{}, newGeminiStatusErr(lastStatus, lastBody)
+	return cliproxyexecutor.Response{}, newGeminiCLIStatusErr(lastStatus, lastBody)
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini CLI).
@@ -873,14 +873,14 @@ func cleanGeminiCLIRequestSchemas(body []byte) []byte {
 	if len(body) == 0 {
 		return body
 	}
-	hasTools := gjson.GetBytes(body, "request.tools.0").Exists()
-	hasResponseSchema := gjson.GetBytes(body, "request.generationConfig.responseSchema").Exists()
-	hasResponseJSONSchema := gjson.GetBytes(body, "request.generationConfig.responseJsonSchema").Exists()
+	hasTools := ojson.GetBytes(body, "request.tools.0").Exists()
+	hasResponseSchema := ojson.GetBytes(body, "request.generationConfig.responseSchema").Exists()
+	hasResponseJSONSchema := ojson.GetBytes(body, "request.generationConfig.responseJsonSchema").Exists()
 	if !hasTools && !hasResponseSchema && !hasResponseJSONSchema {
 		return body
 	}
 
-	tools := gjson.GetBytes(body, "request.tools")
+	tools := ojson.GetBytes(body, "request.tools")
 	if tools.IsArray() {
 		for i, tool := range tools.Array() {
 			for _, declarationsKey := range []string{"function_declarations", "functionDeclarations"} {
@@ -912,7 +912,7 @@ func cleanGeminiCLIRequestSchemas(body []byte) []byte {
 		"request.generationConfig.responseSchema",
 		"request.generationConfig.responseJsonSchema",
 	} {
-		responseSchema := gjson.GetBytes(body, schemaPath)
+		responseSchema := ojson.GetBytes(body, schemaPath)
 		if !responseSchema.IsObject() {
 			continue
 		}
@@ -930,9 +930,9 @@ func cleanGeminiCLIRequestSchemas(body []byte) []byte {
 
 func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 	if modelName == "gemini-2.5-flash-image-preview" {
-		aspectRatioResult := gjson.GetBytes(rawJSON, "request.generationConfig.imageConfig.aspectRatio")
+		aspectRatioResult := ojson.GetBytes(rawJSON, "request.generationConfig.imageConfig.aspectRatio")
 		if aspectRatioResult.Exists() {
-			contents := gjson.GetBytes(rawJSON, "request.contents")
+			contents := ojson.GetBytes(rawJSON, "request.contents")
 			contentArray := contents.Array()
 			if len(contentArray) > 0 {
 				hasInlineData := false
@@ -970,7 +970,7 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 	return rawJSON
 }
 
-func newGeminiStatusErr(statusCode int, body []byte) statusErr {
+func newGeminiCLIStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := parseRetryDelay(body); parseErr == nil && retryAfter != nil {
@@ -986,7 +986,7 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 	// Try to parse the retryDelay from the error response
 	// Format: error.details[].retryDelay where @type == "type.googleapis.com/google.rpc.RetryInfo"
-	details := gjson.GetBytes(errorBody, "error.details")
+	details := ojson.GetBytes(errorBody, "error.details")
 	if details.Exists() && details.IsArray() {
 		for _, detail := range details.Array() {
 			typeVal := detail.Get("@type").String()
@@ -1019,7 +1019,7 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 	}
 
 	// Fallback: parse from error.message "Your quota will reset after Xs."
-	message := gjson.GetBytes(errorBody, "error.message").String()
+	message := ojson.GetBytes(errorBody, "error.message").String()
 	if message != "" {
 		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {

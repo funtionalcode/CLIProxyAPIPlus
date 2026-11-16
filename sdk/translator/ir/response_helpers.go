@@ -1,6 +1,6 @@
 package ir
 
-import "encoding/json"
+import "github.com/MoeForge/moego/json"
 
 // BuildClaudeToolNameReverseMap extracts tool names from a raw Claude Messages API
 // request and returns a map from shortened tool name to original tool name. This is

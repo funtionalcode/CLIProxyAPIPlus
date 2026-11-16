@@ -9,11 +9,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestOpenAICompatExecutorUsesNativeResponsesProtocol(t *testing.T) {
@@ -46,13 +46,13 @@ func TestOpenAICompatExecutorUsesNativeResponsesProtocol(t *testing.T) {
 	if gotPath != "/api/plan/v3/responses" {
 		t.Fatalf("path = %q, want %q", gotPath, "/api/plan/v3/responses")
 	}
-	if got := gjson.GetBytes(gotBody, "max_output_tokens").Int(); got != 65536 {
+	if got := ojson.GetBytes(gotBody, "max_output_tokens").Int(); got != 65536 {
 		t.Fatalf("max_output_tokens = %d, want 65536; body=%s", got, gotBody)
 	}
-	if gjson.GetBytes(gotBody, "max_tokens").Exists() {
+	if ojson.GetBytes(gotBody, "max_tokens").Exists() {
 		t.Fatalf("max_tokens should not be sent to Responses API; body=%s", gotBody)
 	}
-	if got := gjson.GetBytes(response.Payload, "choices.0.message.content").String(); got != "ok" {
+	if got := ojson.GetBytes(response.Payload, "choices.0.message.content").String(); got != "ok" {
 		t.Fatalf("response content = %q, want ok; payload=%s", got, response.Payload)
 	}
 }
@@ -99,10 +99,10 @@ func TestOpenAICompatExecutorStreamsNativeResponsesProtocol(t *testing.T) {
 	if gotPath != "/api/plan/v3/responses" {
 		t.Fatalf("path = %q, want %q", gotPath, "/api/plan/v3/responses")
 	}
-	if got := gjson.GetBytes(gotBody, "max_output_tokens").Int(); got != 65536 {
+	if got := ojson.GetBytes(gotBody, "max_output_tokens").Int(); got != 65536 {
 		t.Fatalf("max_output_tokens = %d, want 65536; body=%s", got, gotBody)
 	}
-	if gjson.GetBytes(gotBody, "stream_options").Exists() {
+	if ojson.GetBytes(gotBody, "stream_options").Exists() {
 		t.Fatalf("stream_options should not be sent to Responses API; body=%s", gotBody)
 	}
 	if !bytes.Contains(responseBody.Bytes(), []byte(`"content":"ok"`)) {
@@ -124,7 +124,7 @@ func TestOpenAICompatExecutorAutoContinuesLengthLimitedResponsesStream(t *testin
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		if requestNumber == 1 {
-			initialStore.Store(gjson.GetBytes(body, "store").Bool())
+			initialStore.Store(ojson.GetBytes(body, "store").Bool())
 			_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_1\",\"delta\":\"part1\"}\n\n")
 			_, _ = io.WriteString(w, "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"length\"},\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens\":100,\"output_tokens_details\":{\"reasoning_tokens\":50},\"total_tokens\":110}}}\n\n")
 			return
@@ -133,9 +133,9 @@ func TestOpenAICompatExecutorAutoContinuesLengthLimitedResponsesStream(t *testin
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		continuationPreviousResponseID.Store(gjson.GetBytes(body, "previous_response_id").String())
-		continuationInput.Store(gjson.GetBytes(body, "input").String())
-		continuationConfiguredInput.Store(gjson.GetBytes(body, "metadata.configured_input").String())
+		continuationPreviousResponseID.Store(ojson.GetBytes(body, "previous_response_id").String())
+		continuationInput.Store(ojson.GetBytes(body, "input").String())
+		continuationConfiguredInput.Store(ojson.GetBytes(body, "metadata.configured_input").String())
 		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_2\",\"delta\":\"part2\"}\n\n")
 		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":3},\"output_tokens\":200,\"output_tokens_details\":{\"reasoning_tokens\":75},\"total_tokens\":220}}}\n\n")
 	}))
@@ -249,10 +249,10 @@ func TestOpenAICompatExecutorKeepsChatCompletionsAsDefaultProtocol(t *testing.T)
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
 	}
-	if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 65536 {
+	if got := ojson.GetBytes(gotBody, "max_tokens").Int(); got != 65536 {
 		t.Fatalf("max_tokens = %d, want 65536; body=%s", got, gotBody)
 	}
-	if gjson.GetBytes(gotBody, "max_output_tokens").Exists() {
+	if ojson.GetBytes(gotBody, "max_output_tokens").Exists() {
 		t.Fatalf("max_output_tokens should not be sent to Chat Completions; body=%s", gotBody)
 	}
 }

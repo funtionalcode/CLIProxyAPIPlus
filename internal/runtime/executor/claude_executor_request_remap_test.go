@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"github.com/tidwall/gjson"
 	"bytes"
 	"errors"
 	"fmt"
@@ -219,7 +218,7 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	if got := ojson.GetBytes(restored, "content.2.content.0.tool_name").String(); got != "read" {
 		t.Fatalf("nested mixed alias restored to %q, want read", got)
 	}
-	if got := gjson.GetBytes(restored, "content.3.name").String(); got != playwrightTool {
+	if got := ojson.GetBytes(restored, "content.3.name").String(); got != playwrightTool {
 		t.Fatalf("missing tool digest alias restored to %q, want %q", got, playwrightTool)
 	}
 

@@ -5,10 +5,10 @@ package claude
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"strings"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"

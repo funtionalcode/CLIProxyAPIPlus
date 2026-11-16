@@ -1,8 +1,9 @@
 package ir
 
 import (
-	"encoding/json"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestParseClaudeRequest_Basic(t *testing.T) {

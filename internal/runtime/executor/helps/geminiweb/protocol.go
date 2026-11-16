@@ -3,12 +3,12 @@ package geminiweb
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // Model identifies a selectable web mode, independently of the public Gemini API.
@@ -44,19 +44,19 @@ func ValidateInput(body []byte) error {
 		return &Error{400, "invalid JSON request"}
 	}
 	for _, key := range []string{"previous_response_id", "conversation"} {
-		v := gjson.GetBytes(body, key)
+		v := ojson.GetBytes(body, key)
 		if v.Exists() && v.Raw != "null" && v.String() != "" {
 			return &Error{400, "stateful continuation is not supported; send the complete text history"}
 		}
 	}
 	for _, key := range []string{"response_format", "text.format", "generationConfig.responseSchema", "generationConfig.responseJsonSchema"} {
-		v := gjson.GetBytes(body, key)
+		v := ojson.GetBytes(body, key)
 		if v.Exists() && v.Raw != "null" && v.Get("type").String() != "text" {
 			return &Error{400, "structured output is not supported by the web text channel"}
 		}
 	}
 	for _, key := range []string{"tools", "functions"} {
-		v := gjson.GetBytes(body, key)
+		v := ojson.GetBytes(body, key)
 		if v.Exists() && v.Raw != "null" && v.Raw != "[]" {
 			return &Error{400, "native tool calls are not supported by the web text channel"}
 		}
@@ -99,16 +99,16 @@ func Prompt(body []byte) (string, error) {
 		return "", &Error{400, "invalid JSON request"}
 	}
 	for _, key := range []string{"tools", "functions"} {
-		if v := gjson.GetBytes(body, key); v.Exists() && v.Raw != "null" && v.Raw != "[]" {
+		if v := ojson.GetBytes(body, key); v.Exists() && v.Raw != "null" && v.Raw != "[]" {
 			return "", &Error{400, "native tool calls are not supported by the web text channel"}
 		}
 	}
 	for _, key := range []string{"response_format", "audio", "modalities"} {
-		if v := gjson.GetBytes(body, key); v.Exists() && v.Raw != "null" {
+		if v := ojson.GetBytes(body, key); v.Exists() && v.Raw != "null" {
 			return "", &Error{400, "structured or multimodal output is not supported by the web text channel"}
 		}
 	}
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytes(body, "messages")
 	if !messages.IsArray() || len(messages.Array()) == 0 {
 		return "", &Error{400, "messages must contain text"}
 	}
@@ -127,12 +127,12 @@ func Prompt(body []byte) (string, error) {
 		content := message.Get("content")
 		var text string
 		switch {
-		case content.Type == gjson.String:
+		case content.Type == ojson.String:
 			text = content.String()
 		case content.IsArray():
 			var chunks []string
 			for _, part := range content.Array() {
-				if part.Get("type").String() != "text" || part.Get("text").Type != gjson.String {
+				if part.Get("type").String() != "text" || part.Get("text").Type != ojson.String {
 					return "", &Error{400, "images, files and other non-text input are not supported by the web text channel"}
 				}
 				chunks = append(chunks, part.Get("text").String())
@@ -189,19 +189,19 @@ func ReadStream(reader io.Reader, emit func(string) error) (string, error) {
 		if !json.Valid([]byte(line)) || !strings.HasPrefix(line, "[") {
 			return "", &Error{502, "invalid stream frame"}
 		}
-		for _, record := range gjson.Parse(line).Array() {
+		for _, record := range ojson.Parse(line).Array() {
 			kind := record.Get("0").String()
 			if kind != "wrb.fr" {
 				continue
 			}
 			data := record.Get("2")
-			if data.Type != gjson.String {
+			if data.Type != ojson.String {
 				return "", &Error{502, "upstream rejected the web request"}
 			}
 			if !json.Valid([]byte(data.String())) {
 				return "", &Error{502, "invalid stream payload"}
 			}
-			inner := gjson.Parse(data.String())
+			inner := ojson.Parse(data.String())
 			candidate := inner.Get("4.0")
 			if !candidate.Exists() {
 				continue
@@ -212,7 +212,7 @@ func ReadStream(reader io.Reader, emit func(string) error) (string, error) {
 			}
 			candidateID = id
 			text := candidate.Get("1.0")
-			if text.Type != gjson.String {
+			if text.Type != ojson.String {
 				continue
 			}
 			if text.String() != answer {

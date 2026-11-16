@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // joinBytes concatenates a [][]byte into a single string.
@@ -58,7 +58,7 @@ func TestGitHubCopilotNormalizeModel_StripsSuffix(t *testing.T) {
 			body := []byte(`{"model":"` + tt.model + `","messages":[]}`)
 			got := e.normalizeModel(tt.model, body)
 
-			gotModel := gjson.GetBytes(got, "model").String()
+			gotModel := ojson.GetBytes(got, "model").String()
 			if gotModel != tt.wantModel {
 				t.Fatalf("normalizeModel() model = %q, want %q", gotModel, tt.wantModel)
 			}
@@ -111,7 +111,7 @@ func TestNormalizeGitHubCopilotChatTools_KeepFunctionOnly(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"tools":[{"type":"function","function":{"name":"ok"}},{"type":"code_interpreter"}],"tool_choice":"auto"}`)
 	got := normalizeGitHubCopilotChatTools(body)
-	tools := gjson.GetBytes(got, "tools").Array()
+	tools := ojson.GetBytes(got, "tools").Array()
 	if len(tools) != 1 {
 		t.Fatalf("tools len = %d, want 1", len(tools))
 	}
@@ -124,8 +124,8 @@ func TestNormalizeGitHubCopilotChatTools_InvalidToolChoiceDowngradeToAuto(t *tes
 	t.Parallel()
 	body := []byte(`{"tools":[],"tool_choice":{"type":"function","function":{"name":"x"}}}`)
 	got := normalizeGitHubCopilotChatTools(body)
-	if gjson.GetBytes(got, "tool_choice").String() != "auto" {
-		t.Fatalf("tool_choice = %s, want auto", gjson.GetBytes(got, "tool_choice").Raw)
+	if ojson.GetBytes(got, "tool_choice").String() != "auto" {
+		t.Fatalf("tool_choice = %s, want auto", ojson.GetBytes(got, "tool_choice").Raw)
 	}
 }
 
@@ -133,7 +133,7 @@ func TestNormalizeGitHubCopilotResponsesInput_MissingInputExtractedFromSystemAnd
 	t.Parallel()
 	body := []byte(`{"system":"sys text","messages":[{"role":"user","content":"user text"},{"role":"assistant","content":[{"type":"text","text":"assistant text"}]}]}`)
 	got := normalizeGitHubCopilotResponsesInput(body)
-	in := gjson.GetBytes(got, "input")
+	in := ojson.GetBytes(got, "input")
 	if !in.IsArray() {
 		t.Fatalf("input type = %v, want array", in.Type)
 	}
@@ -141,10 +141,10 @@ func TestNormalizeGitHubCopilotResponsesInput_MissingInputExtractedFromSystemAnd
 	if !strings.Contains(raw, "sys text") || !strings.Contains(raw, "user text") || !strings.Contains(raw, "assistant text") {
 		t.Fatalf("input = %s, want structured array with all texts", raw)
 	}
-	if gjson.GetBytes(got, "messages").Exists() {
+	if ojson.GetBytes(got, "messages").Exists() {
 		t.Fatal("messages should be removed after conversion")
 	}
-	if gjson.GetBytes(got, "system").Exists() {
+	if ojson.GetBytes(got, "system").Exists() {
 		t.Fatal("system should be removed after conversion")
 	}
 }
@@ -153,8 +153,8 @@ func TestNormalizeGitHubCopilotResponsesInput_NonStringInputStringified(t *testi
 	t.Parallel()
 	body := []byte(`{"input":{"foo":"bar"}}`)
 	got := normalizeGitHubCopilotResponsesInput(body)
-	in := gjson.GetBytes(got, "input")
-	if in.Type != gjson.String {
+	in := ojson.GetBytes(got, "input")
+	if in.Type != ojson.String {
 		t.Fatalf("input type = %v, want string", in.Type)
 	}
 	if !strings.Contains(in.String(), "foo") {
@@ -167,11 +167,11 @@ func TestNormalizeGitHubCopilotResponsesInput_StripsServiceTier(t *testing.T) {
 	body := []byte(`{"input":"user text","service_tier":"default"}`)
 	got := normalizeGitHubCopilotResponsesInput(body)
 
-	if gjson.GetBytes(got, "service_tier").Exists() {
-		t.Fatalf("service_tier should be removed, got %s", gjson.GetBytes(got, "service_tier").Raw)
+	if ojson.GetBytes(got, "service_tier").Exists() {
+		t.Fatalf("service_tier should be removed, got %s", ojson.GetBytes(got, "service_tier").Raw)
 	}
-	if gjson.GetBytes(got, "input").String() != "user text" {
-		t.Fatalf("input = %q, want %q", gjson.GetBytes(got, "input").String(), "user text")
+	if ojson.GetBytes(got, "input").String() != "user text" {
+		t.Fatalf("input = %q, want %q", ojson.GetBytes(got, "input").String(), "user text")
 	}
 }
 
@@ -179,7 +179,7 @@ func TestNormalizeGitHubCopilotResponsesTools_FlattenFunctionTools(t *testing.T)
 	t.Parallel()
 	body := []byte(`{"tools":[{"type":"function","function":{"name":"sum","description":"d","parameters":{"type":"object"}}},{"type":"web_search"}]}`)
 	got := normalizeGitHubCopilotResponsesTools(body)
-	tools := gjson.GetBytes(got, "tools").Array()
+	tools := ojson.GetBytes(got, "tools").Array()
 	if len(tools) != 1 {
 		t.Fatalf("tools len = %d, want 1", len(tools))
 	}
@@ -195,7 +195,7 @@ func TestNormalizeGitHubCopilotResponsesTools_ClaudeFormatTools(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"tools":[{"name":"Bash","description":"Run commands","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}},{"name":"Read","description":"Read files","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]}`)
 	got := normalizeGitHubCopilotResponsesTools(body)
-	tools := gjson.GetBytes(got, "tools").Array()
+	tools := ojson.GetBytes(got, "tools").Array()
 	if len(tools) != 2 {
 		t.Fatalf("tools len = %d, want 2", len(tools))
 	}
@@ -223,11 +223,11 @@ func TestNormalizeGitHubCopilotResponsesTools_FlattenToolChoiceFunctionObject(t 
 	t.Parallel()
 	body := []byte(`{"tool_choice":{"type":"function","function":{"name":"sum"}}}`)
 	got := normalizeGitHubCopilotResponsesTools(body)
-	if gjson.GetBytes(got, "tool_choice.type").String() != "function" {
-		t.Fatalf("tool_choice.type = %q, want function", gjson.GetBytes(got, "tool_choice.type").String())
+	if ojson.GetBytes(got, "tool_choice.type").String() != "function" {
+		t.Fatalf("tool_choice.type = %q, want function", ojson.GetBytes(got, "tool_choice.type").String())
 	}
-	if gjson.GetBytes(got, "tool_choice.name").String() != "sum" {
-		t.Fatalf("tool_choice.name = %q, want sum", gjson.GetBytes(got, "tool_choice.name").String())
+	if ojson.GetBytes(got, "tool_choice.name").String() != "sum" {
+		t.Fatalf("tool_choice.name = %q, want sum", ojson.GetBytes(got, "tool_choice.name").String())
 	}
 }
 
@@ -235,8 +235,8 @@ func TestNormalizeGitHubCopilotResponsesTools_InvalidToolChoiceDowngradeToAuto(t
 	t.Parallel()
 	body := []byte(`{"tool_choice":{"type":"function"}}`)
 	got := normalizeGitHubCopilotResponsesTools(body)
-	if gjson.GetBytes(got, "tool_choice").String() != "auto" {
-		t.Fatalf("tool_choice = %s, want auto", gjson.GetBytes(got, "tool_choice").Raw)
+	if ojson.GetBytes(got, "tool_choice").String() != "auto" {
+		t.Fatalf("tool_choice = %s, want auto", ojson.GetBytes(got, "tool_choice").Raw)
 	}
 }
 
@@ -244,14 +244,14 @@ func TestTranslateGitHubCopilotResponsesNonStreamToClaude_TextMapping(t *testing
 	t.Parallel()
 	resp := []byte(`{"id":"resp_1","model":"gpt-5-codex","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":5}}`)
 	out := translateGitHubCopilotResponsesNonStreamToClaude(resp)
-	if gjson.GetBytes(out, "type").String() != "message" {
-		t.Fatalf("type = %q, want message", gjson.GetBytes(out, "type").String())
+	if ojson.GetBytes(out, "type").String() != "message" {
+		t.Fatalf("type = %q, want message", ojson.GetBytes(out, "type").String())
 	}
-	if gjson.GetBytes(out, "content.0.type").String() != "text" {
-		t.Fatalf("content.0.type = %q, want text", gjson.GetBytes(out, "content.0.type").String())
+	if ojson.GetBytes(out, "content.0.type").String() != "text" {
+		t.Fatalf("content.0.type = %q, want text", ojson.GetBytes(out, "content.0.type").String())
 	}
-	if gjson.GetBytes(out, "content.0.text").String() != "hello" {
-		t.Fatalf("content.0.text = %q, want hello", gjson.GetBytes(out, "content.0.text").String())
+	if ojson.GetBytes(out, "content.0.text").String() != "hello" {
+		t.Fatalf("content.0.text = %q, want hello", ojson.GetBytes(out, "content.0.text").String())
 	}
 }
 
@@ -259,14 +259,14 @@ func TestTranslateGitHubCopilotResponsesNonStreamToClaude_ToolUseMapping(t *test
 	t.Parallel()
 	resp := []byte(`{"id":"resp_2","model":"gpt-5-codex","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"sum","arguments":"{\"a\":1}"}],"usage":{"input_tokens":1,"output_tokens":2}}`)
 	out := translateGitHubCopilotResponsesNonStreamToClaude(resp)
-	if gjson.GetBytes(out, "content.0.type").String() != "tool_use" {
-		t.Fatalf("content.0.type = %q, want tool_use", gjson.GetBytes(out, "content.0.type").String())
+	if ojson.GetBytes(out, "content.0.type").String() != "tool_use" {
+		t.Fatalf("content.0.type = %q, want tool_use", ojson.GetBytes(out, "content.0.type").String())
 	}
-	if gjson.GetBytes(out, "content.0.name").String() != "sum" {
-		t.Fatalf("content.0.name = %q, want sum", gjson.GetBytes(out, "content.0.name").String())
+	if ojson.GetBytes(out, "content.0.name").String() != "sum" {
+		t.Fatalf("content.0.name = %q, want sum", ojson.GetBytes(out, "content.0.name").String())
 	}
-	if gjson.GetBytes(out, "stop_reason").String() != "tool_use" {
-		t.Fatalf("stop_reason = %q, want tool_use", gjson.GetBytes(out, "stop_reason").String())
+	if ojson.GetBytes(out, "stop_reason").String() != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use", ojson.GetBytes(out, "stop_reason").String())
 	}
 }
 
