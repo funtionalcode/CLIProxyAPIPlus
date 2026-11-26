@@ -297,9 +297,9 @@ type AntigravityConfig struct {
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
 
 	// TOSPauseWindow controls the pool-wide protective pause armed after the first
-	// 403 TOS_VIOLATION. Defaults to "0" (disabled), so only the violating
-	// credential is deactivated unless a positive Go duration string (e.g. "6h")
-	// is explicitly configured. Set to "0", "off", "false", "none", or
+	// 403 TOS_VIOLATION. Defaults to "0" (disabled). The pause requires an
+	// explicit positive Go duration string (e.g. "6h") and does not disable
+	// credentials. Set to "0", "off", "false", "none", or
 	// "disabled" to explicitly disable the pause.
 	TOSPauseWindow string `yaml:"tos-pause-window,omitempty" json:"tos-pause-window,omitempty"`
 }

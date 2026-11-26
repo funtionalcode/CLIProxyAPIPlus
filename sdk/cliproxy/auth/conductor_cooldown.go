@@ -1472,7 +1472,7 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 		// access-token refresh (same credential, refresh token retained) must not
 		// discard the terminal signal. A genuine credential replacement under the
 		// same auth ID is a different account: an old request's TOS result must
-		// not disable the fresh credential. The access token alone cannot tell
+		// not penalize the fresh credential. The access token alone cannot tell
 		// these apart, so exempt only when the refresh credential proves the same
 		// account (identical refresh token) or the result carries no account hint
 		// (internal/token-less paths where replacement cannot be detected).
@@ -1612,7 +1612,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		} else {
 			if modelKey != "" {
 				if auth.Disabled || auth.Status == StatusDisabled {
-					// A disabled credential (operator action or terminal TOS) is
+					// An operator-disabled credential is
 					// terminal until explicitly re-enabled; a late failure must not
 					// overwrite its disabled state or arm a new cooldown.
 				} else if !shouldSkipCredentialCooldown(result.Error) {
@@ -1726,14 +1726,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 						state.NextRetryAfter = next
 						state.Unavailable = !next.IsZero()
-					} else if isTOSViolationResultError(result.Error) {
-						// Terminal TOS suspension: keep the model state blocked
-						// without a retry deadline; the auth-level terminal state
-						// is finalized below.
-						state.NextRetryAfter = time.Time{}
-						state.Unavailable = true
-						state.Status = StatusDisabled
-						state.StatusMessage = "tos_violation"
 					} else {
 						switch statusCode {
 						case 401, 402, 403:
@@ -2018,15 +2010,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						}
 					}
+					auth.Status = StatusError
 					if isTOSViolationResultError(result.Error) {
+						// Preserve the upstream suspension detail without changing
+						// the operator-controlled enabled state.
 						auth.StatusMessage = "tos_violation"
-						auth.Status = StatusDisabled
-						auth.Disabled = true
-						auth.Unavailable = true
-						auth.NextRetryAfter = time.Time{}
+						state.StatusMessage = "tos_violation"
 						persistTOSAppealMetadata(auth, result.Error)
-					} else {
-						auth.Status = StatusError
 					}
 					updateAggregatedAvailability(auth, now)
 				}
@@ -2036,7 +2026,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					disableCooling = false
 				}
 				if auth.Disabled || auth.Status == StatusDisabled {
-					// A disabled credential (operator action or terminal TOS) is
+					// An operator-disabled credential is
 					// terminal until explicitly re-enabled; a late auth-level failure
 					// must not overwrite its disabled state or arm a new cooldown.
 				} else if !wasTerminalUnauthorized {
@@ -2141,9 +2131,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.NextRefreshAfter = time.Time{}
 			auth.NextRetryAfter = time.Time{}
 		} else if auth.Status == StatusDisabled {
-			// A terminal TOS_VIOLATION already deactivated the credential inside
-			// applyAuthFailureState; preserve that state instead of overwriting
-			// it with a generic error status.
+			// Preserve an operator-disabled credential instead of overwriting
+			// its state with a generic error status.
 		} else if rejectsToken && authHasRefreshCredential(auth) {
 			if auth.NextRefreshAfter.IsZero() {
 				if !auth.LastRefreshedAt.IsZero() && now.Sub(auth.LastRefreshedAt) < refreshFailureBackoff {
@@ -3725,8 +3714,7 @@ func isCloudflareChallengeResultError(err *Error) bool {
 // isTOSViolationResultError reports whether the failure is a terminal Antigravity
 // Terms-of-Service suspension (403 PERMISSION_DENIED + ErrorInfo reason=
 // TOS_VIOLATION). The executor marks these via the tos_violation error code so
-// the credential is deactivated instead of cooled; sibling credentials are not
-// hammered during an automated sweep.
+// the upstream error and appeal detail remain distinguishable from other 403s.
 func isTOSViolationResultError(err *Error) bool {
 	if err == nil {
 		return false
@@ -4193,26 +4181,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			}
 		case 402, 403:
 			if isTOSViolationResultError(resultErr) {
-				// Terminal credential suspension: deactivate so the credential is
-				// excluded from selection/rotation, but keep OAuth refresh intact
-				// (the suspension is service-scoped per issue #7515; the token and
-				// model catalog keep working) so operator tooling can verify
-				// account liveness. The appeal detail travels on the result error's
-				// Metadata and is persisted onto the credential record below.
+				// Keep the normal 403 cooldown and leave disabling to the operator.
 				auth.StatusMessage = "tos_violation"
-				auth.Status = StatusDisabled
-				auth.Disabled = true
-				auth.Unavailable = true
-				auth.NextRetryAfter = time.Time{}
-				auth.LastError = cloneError(resultErr)
 				persistTOSAppealMetadata(auth, resultErr)
 			} else {
 				auth.StatusMessage = "payment_required"
-				if disableCooling {
-					auth.NextRetryAfter = time.Time{}
-				} else {
-					auth.NextRetryAfter = now.Add(30 * time.Minute)
-				}
+			}
+			if disableCooling {
+				auth.NextRetryAfter = time.Time{}
+			} else {
+				auth.NextRetryAfter = now.Add(30 * time.Minute)
 			}
 		case 404:
 			auth.StatusMessage = "not_found"

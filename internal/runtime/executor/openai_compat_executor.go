@@ -1525,8 +1525,8 @@ func (e statusErr) IsStreamTruncated() bool { return e.streamTruncated }
 func (e statusErr) IsTransientRateLimit() bool { return e.transientRateLimit }
 
 // IsTerminalTOSViolation marks a 403 PERMISSION_DENIED carrying an ErrorInfo
-// reason=TOS_VIOLATION. The conductor must deactivate the credential rather
-// than cool it, so sibling credentials are not hammered during a sweep.
+// reason=TOS_VIOLATION. It describes the upstream suspension without changing
+// the local credential's operator-controlled enabled state.
 func (e statusErr) IsTerminalTOSViolation() bool { return e.tosViolation }
 
 // TOSAppealMetadata exposes the operator-facing appeal detail extracted from

@@ -358,9 +358,8 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 // antigravityTOSViolation captures the parsed state of a 403 PERMISSION_DENIED
 // carrying an ErrorInfo reason=TOS_VIOLATION (issue #7515). This is a
 // terminal, service-scoped credential suspension — the OAuth token and model
-// catalog keep working while inference is refused — so the credential must be
-// deactivated rather than cooled, and sibling credentials in the same pool
-// should not be hammered during an automated sweep.
+// catalog keep working while inference is refused. The error and appeal detail
+// are reported without automatically disabling the local credential.
 type antigravityTOSViolation struct {
 	AppealURL     string
 	AppealURLText string
@@ -421,8 +420,8 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 
 // applyAntigravityTOSState performs the executor-side bookkeeping for a terminal
 // TOS_VIOLATION: it arms the optional pool-wide protective pause and logs the
-// appeal URL for the operator. The durable credential deactivation and the
-// appeal metadata on the auth record are carried by the returned statusErr
+// appeal URL for the operator. The error classification and appeal metadata
+// on the auth record are carried by the returned statusErr
 // (tos_violation code + Error.Metadata) through the conductor, since the
 // executor only sees a cloned auth. It is a no-op for non-TOS errors.
 func (e *AntigravityExecutor) applyAntigravityTOSState(cfg *config.Config, auth *cliproxyauth.Auth, body []byte) {
@@ -432,9 +431,9 @@ func (e *AntigravityExecutor) applyAntigravityTOSState(cfg *config.Config, auth 
 	}
 	markAntigravityTOSPause(cfg, auth)
 	if violation.AppealURL != "" {
-		log.Warnf("antigravity executor: credential %s suspended for TOS_VIOLATION; submit appeal: %s (%s)", auth.ID, redactTOSAppealURL(violation.AppealURL), violation.AppealURLText)
+		log.Warnf("antigravity executor: upstream rejected credential %s with TOS_VIOLATION; submit appeal: %s (%s)", auth.ID, redactTOSAppealURL(violation.AppealURL), violation.AppealURLText)
 	} else {
-		log.Warnf("antigravity executor: credential %s suspended for TOS_VIOLATION", auth.ID)
+		log.Warnf("antigravity executor: upstream rejected credential %s with TOS_VIOLATION", auth.ID)
 	}
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
@@ -881,8 +880,8 @@ var antigravityTOSPauseUntil sync.Map
 const antigravityTOSPauseKVKey = "cpa:antigravity:tos-pause:until"
 
 // antigravityTOSPauseWindow resolves the configured protective pause window.
-// Defaults to disabled (0) so a TOS_VIOLATION only deactivates the offending
-// credential unless a positive Go duration (e.g. "6h") is explicitly configured.
+// Defaults to disabled (0); pausing the pool requires an explicitly configured
+// positive Go duration (e.g. "6h").
 func antigravityTOSPauseWindow(cfg *config.Config) (time.Duration, bool) {
 	if cfg == nil {
 		return 0, false

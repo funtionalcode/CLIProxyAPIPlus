@@ -4,59 +4,69 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 )
 
-// TestMarkResult_TOSViolation_DisablesCredential verifies that a 403
-// PERMISSION_DENIED carrying the tos_violation error code (produced by the
-// Antigravity executor on the verbatim issue #7515 signature) deactivates the
-// credential instead of applying the generic 30-minute 403 cooldown, while a
-// non-TOS 403 keeps the existing cooldown behavior.
-func TestMarkResult_TOSViolation_DisablesCredential(t *testing.T) {
-	manager := NewManager(nil, nil, nil)
-	ctx := context.Background()
+// TOS failures retain diagnostic details and normal 403 cooling, but never
+// change the operator-controlled enabled state of an account or model.
+func TestMarkResult_TOSViolation_DoesNotDisableCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		model          string
+		disableCooling bool
+	}{
+		{name: "model", model: "gemini-3-pro"},
+		{name: "auth"},
+		{name: "model without cooling", model: "gemini-3-pro", disableCooling: true},
+		{name: "auth without cooling", disableCooling: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			ctx := context.Background()
+			auth := &Auth{
+				ID: "tos-cred", Provider: "antigravity", Status: StatusActive,
+				Metadata: map[string]any{"disabled": false, "disable_cooling": tc.disableCooling},
+			}
+			if _, err := manager.Register(ctx, auth); err != nil {
+				t.Fatalf("register auth: %v", err)
+			}
+			manager.MarkResult(ctx, Result{
+				AuthID: auth.ID, Provider: "antigravity", Model: tc.model, CredentialScope: true,
+				Error: &Error{
+					HTTPStatus: http.StatusForbidden,
+					Code:       "tos_violation",
+					Message:    "TOS_VIOLATION",
+					Metadata:   map[string]string{"tos_appeal_url": "https://forms.gle/x", "tos_appeal_url_text": "Submit Appeal"},
+				},
+			})
 
-	auth := &Auth{ID: "tos-cred", Provider: "antigravity", Status: StatusActive}
-	if _, err := manager.Register(ctx, auth); err != nil {
-		t.Fatalf("register auth: %v", err)
-	}
-
-	// The executor carries the appeal detail on the result error via
-	// Error.Metadata; the conductor persists it onto the credential record.
-	manager.MarkResult(ctx, Result{
-		AuthID:          auth.ID,
-		Provider:        "antigravity",
-		Model:           "gemini-3-pro",
-		Success:         false,
-		CredentialScope: true,
-		Error: &Error{
-			HTTPStatus: http.StatusForbidden,
-			Code:       "tos_violation",
-			Message:    "TOS_VIOLATION",
-			Metadata:   map[string]string{"tos_appeal_url": "https://forms.gle/hGzM9MEUv2azZsrb9", "tos_appeal_url_text": "Submit Appeal"},
-		},
-	})
-
-	updated, ok := manager.GetByID(auth.ID)
-	if !ok || updated == nil {
-		t.Fatal("auth not found after MarkResult")
-	}
-	if updated.Status != StatusDisabled {
-		t.Fatalf("auth.Status = %q, want %q (terminal TOS suspension must deactivate)", updated.Status, StatusDisabled)
-	}
-	if !updated.Disabled {
-		t.Fatal("auth.Disabled = false, want true (terminal state must persist via the file store)")
-	}
-	if !updated.Unavailable {
-		t.Fatal("auth.Unavailable = false, want true")
-	}
-	if updated.StatusMessage != "tos_violation" {
-		t.Fatalf("auth.StatusMessage = %q, want %q", updated.StatusMessage, "tos_violation")
-	}
-	if !updated.NextRetryAfter.IsZero() {
-		t.Fatalf("auth.NextRetryAfter = %v, want zero (terminal, not a timed cooldown)", updated.NextRetryAfter)
-	}
-	if appeal, _ := updated.Metadata["tos_appeal_url"].(string); appeal != "https://forms.gle/hGzM9MEUv2azZsrb9" {
-		t.Fatalf("auth.Metadata[tos_appeal_url] = %q, want appeal URL preserved", appeal)
+			updated, ok := manager.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatal("auth not found after MarkResult")
+			}
+			if updated.Status != StatusError || updated.Disabled || updated.Metadata["disabled"] != false {
+				t.Fatalf("TOS failure changed enabled state: status=%q disabled=%v metadata=%v", updated.Status, updated.Disabled, updated.Metadata["disabled"])
+			}
+			if updated.StatusMessage != "tos_violation" || updated.LastError == nil || updated.LastError.Code != "tos_violation" {
+				t.Fatalf("TOS diagnostic lost: status=%q error=%+v", updated.StatusMessage, updated.LastError)
+			}
+			if updated.Metadata["tos_appeal_url"] != "https://forms.gle/x" || updated.Metadata["tos_appeal_url_text"] != "Submit Appeal" {
+				t.Fatal("TOS appeal metadata lost")
+			}
+			var wantRetry time.Time
+			if !tc.disableCooling {
+				wantRetry = updated.UpdatedAt.Add(30 * time.Minute)
+			}
+			if !updated.NextRetryAfter.Equal(wantRetry) || updated.Unavailable == tc.disableCooling {
+				t.Fatalf("cooldown = %v (unavailable=%v), want %v", updated.NextRetryAfter, updated.Unavailable, wantRetry)
+			}
+			if tc.model != "" {
+				state := updated.ModelStates[tc.model]
+				if state == nil || state.Status != StatusError || !state.NextRetryAfter.Equal(wantRetry) {
+					t.Fatalf("model should retain normal 403 cooling: %+v", state)
+				}
+			}
+		})
 	}
 }
 
@@ -88,10 +98,7 @@ func TestMarkResult_NonTOS403_StillCools(t *testing.T) {
 	}
 }
 
-// TestMarkResult_TOSViolation_LateResultDoesNotRevive verifies that a
-// success or ordinary failure recorded after the TOS suspension does not bring
-// the disabled credential back into rotation.
-func TestMarkResult_TOSViolation_LateResultDoesNotRevive(t *testing.T) {
+func TestMarkResult_TOSViolation_SuccessRecovers(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	ctx := context.Background()
 	auth := &Auth{ID: "tos-late", Provider: "antigravity", Status: StatusActive}
@@ -103,40 +110,47 @@ func TestMarkResult_TOSViolation_LateResultDoesNotRevive(t *testing.T) {
 		Success: false, CredentialScope: true,
 		Error: &Error{HTTPStatus: http.StatusForbidden, Code: "tos_violation"},
 	})
-	// A stale success arriving after the suspension must not reactivate it.
+	// A successful request can clear the error without an enable action.
 	manager.MarkResult(ctx, Result{
 		AuthID: auth.ID, Provider: "antigravity", Model: "gemini-3-pro", Success: true,
 	})
 	updated, _ := manager.GetByID(auth.ID)
-	if updated.Status != StatusDisabled || !updated.Disabled {
-		t.Fatalf("late success revived credential: status=%q disabled=%v", updated.Status, updated.Disabled)
+	if updated.Status != StatusActive || updated.Disabled || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("success did not recover credential: status=%q disabled=%v unavailable=%v next=%v", updated.Status, updated.Disabled, updated.Unavailable, updated.NextRetryAfter)
 	}
 }
 
-// TestMarkResult_TOSViolation_LateAuthLevelFailure verifies that an auth-level
-// (model-less) failure arriving after the TOS suspension cannot overwrite the
-// terminal state or arm a new cooldown.
-func TestMarkResult_TOSViolation_LateAuthLevelFailure(t *testing.T) {
-	manager := NewManager(nil, nil, nil)
-	ctx := context.Background()
-	auth := &Auth{ID: "tos-late-auth", Provider: "antigravity", Status: StatusActive}
-	if _, err := manager.Register(ctx, auth); err != nil {
-		t.Fatalf("register auth: %v", err)
-	}
-	manager.MarkResult(ctx, Result{
-		AuthID: auth.ID, Provider: "antigravity", Success: false, CredentialScope: true,
-		Error: &Error{HTTPStatus: http.StatusForbidden, Code: "tos_violation"},
-	})
-	manager.MarkResult(ctx, Result{
-		AuthID: auth.ID, Provider: "antigravity", Success: false,
-		Error: &Error{HTTPStatus: http.StatusForbidden, Message: "plain 403"},
-	})
-	updated, _ := manager.GetByID(auth.ID)
-	if updated.Status != StatusDisabled || !updated.Disabled {
-		t.Fatalf("late auth-level failure overwrote terminal state: status=%q disabled=%v", updated.Status, updated.Disabled)
-	}
-	if updated.StatusMessage != "tos_violation" {
-		t.Fatalf("StatusMessage = %q, want tos_violation preserved", updated.StatusMessage)
+// Late results must still honor an explicit operator disable.
+func TestMarkResult_TOSViolation_PreservesManualDisable(t *testing.T) {
+	for _, model := range []string{"gemini-3-pro", ""} {
+		t.Run("model="+model, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			ctx := context.Background()
+			auth := &Auth{
+				ID: "manual-disabled", Provider: "antigravity", Status: StatusDisabled,
+				Disabled: true, StatusMessage: "disabled by operator",
+				Metadata: map[string]any{"disabled": true},
+			}
+			if _, err := manager.Register(ctx, auth); err != nil {
+				t.Fatalf("register auth: %v", err)
+			}
+			for _, result := range []Result{
+				{Error: &Error{HTTPStatus: http.StatusForbidden, Code: "tos_violation"}},
+				{Error: &Error{HTTPStatus: http.StatusForbidden, Message: "plain 403"}},
+				{Success: true},
+			} {
+				result.AuthID, result.Provider, result.Model = auth.ID, auth.Provider, model
+				result.CredentialScope = true
+				manager.MarkResult(ctx, result)
+				updated, _ := manager.GetByID(auth.ID)
+				if updated.Status != StatusDisabled || !updated.Disabled || updated.Metadata["disabled"] != true {
+					t.Fatalf("result overwrote manual disable: status=%q disabled=%v", updated.Status, updated.Disabled)
+				}
+				if updated.StatusMessage != "disabled by operator" || !updated.NextRetryAfter.IsZero() {
+					t.Fatalf("result changed manual disable details: status=%q next=%v", updated.StatusMessage, updated.NextRetryAfter)
+				}
+			}
+		})
 	}
 }
 
@@ -159,7 +173,7 @@ func TestMarkResult_TOSViolation_NotDroppedByCredentialVersionBumps(t *testing.T
 		Error:             &Error{HTTPStatus: http.StatusForbidden, Code: "tos_violation", Metadata: map[string]string{"tos_appeal_url": "https://forms.gle/x"}},
 	})
 	updated, _ := manager.GetByID(auth.ID)
-	if updated.Status != StatusDisabled || !updated.Disabled {
+	if updated.Status != StatusError || updated.Disabled || updated.StatusMessage != "tos_violation" || updated.NextRetryAfter.IsZero() {
 		t.Fatalf("TOS result dropped as stale after version bump: status=%q disabled=%v", updated.Status, updated.Disabled)
 	}
 	if got := updated.Metadata["tos_appeal_url"]; got != "https://forms.gle/x" {
@@ -170,7 +184,7 @@ func TestMarkResult_TOSViolation_NotDroppedByCredentialVersionBumps(t *testing.T
 // TestMarkResult_TOSViolation_RejectedAfterCredentialReplacement verifies that
 // a TOS result from a request issued under a previous credential is dropped as
 // stale after the credential is genuinely replaced (refresh token swapped),
-// rather than disabling the fresh credential.
+// rather than penalizing the fresh credential.
 func TestMarkResult_TOSViolation_RejectedAfterCredentialReplacement(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	ctx := context.Background()
@@ -189,15 +203,15 @@ func TestMarkResult_TOSViolation_RejectedAfterCredentialReplacement(t *testing.T
 		Error: &Error{HTTPStatus: http.StatusForbidden, Code: "tos_violation"},
 	})
 	updated, _ := manager.GetByID(auth.ID)
-	if updated.Status == StatusDisabled || updated.Disabled {
-		t.Fatalf("stale TOS result disabled fresh credential: status=%q disabled=%v", updated.Status, updated.Disabled)
+	if updated.Status != StatusActive || updated.Disabled || updated.LastError != nil || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("stale TOS result penalized fresh credential: status=%q disabled=%v", updated.Status, updated.Disabled)
 	}
 }
 
 // TestMarkResult_TOSViolation_SameAccountRefreshApplies verifies that a TOS
 // result issued before a same-account OAuth refresh (access token rotated,
 // refresh token retained) is NOT dropped as stale: the refresh token proves it
-// is the same account, so the terminal state is applied.
+// is the same account, so the error and cooldown are applied.
 func TestMarkResult_TOSViolation_SameAccountRefreshApplies(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	ctx := context.Background()
@@ -217,7 +231,7 @@ func TestMarkResult_TOSViolation_SameAccountRefreshApplies(t *testing.T) {
 		Error: &Error{HTTPStatus: http.StatusForbidden, Code: "tos_violation"},
 	})
 	updated, _ := manager.GetByID(auth.ID)
-	if updated.Status != StatusDisabled || !updated.Disabled {
+	if updated.Status != StatusError || updated.Disabled || updated.StatusMessage != "tos_violation" || updated.NextRetryAfter.IsZero() {
 		t.Fatalf("same-account TOS result dropped after refresh: status=%q disabled=%v", updated.Status, updated.Disabled)
 	}
 }

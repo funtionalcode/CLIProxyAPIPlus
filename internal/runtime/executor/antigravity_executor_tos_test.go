@@ -166,7 +166,7 @@ func TestAntigravityTOSErrorCarriesTerminalMarker(t *testing.T) {
 
 // TestAntigravityClaudeNonStream_SSEErrorFrameIsTerminal verifies that a TOS
 // error frame arriving inside an HTTP 200 SSE stream is surfaced as the
-// terminal tos_violation error (so the credential is deactivated), not
+// terminal tos_violation error (with the upstream suspension detail), not
 // swallowed by the aggregation loop into a generic empty-output failure.
 func TestAntigravityClaudeNonStream_SSEErrorFrameIsTerminal(t *testing.T) {
 	resetAntigravityCreditsRetryState()
