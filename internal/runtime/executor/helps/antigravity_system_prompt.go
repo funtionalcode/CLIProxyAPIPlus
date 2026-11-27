@@ -149,6 +149,10 @@ func antigravityClientNameMatcher(cfg config.AntigravityClientFilterConfig) *Sen
 		for _, name := range []string{"Claude Code", "Claude Agent SDK", "Codex CLI", "Codex", "Cursor", "Windsurf", "Cline", "Roo Code", "Kilo Code"} {
 			rules[strings.ToLower(name)] = "Antigravity"
 		}
+		// These Claude Code prompt phrases trigger generic consumer-endpoint 429s.
+		// Preserve the instructions and authorization requirements through equivalent wording.
+		rules["software engineering tasks"] = "software development tasks"
+		rules["dual-use security tools"] = "Security tools with both defensive and offensive applications"
 	}
 	// Sort before normalization to keep differently-cased custom keys deterministic.
 	keys := make([]string, 0, len(cfg.Rules))

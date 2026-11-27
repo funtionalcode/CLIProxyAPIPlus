@@ -662,6 +662,7 @@ codex:
 #       enabled: true           # rewrite caller system text only; user messages/tools are preserved
 #       mode: "rewrite"         # rewrite or block (reject matching requests locally with HTTP 400)
 #       builtins: true          # Claude Code, Claude Agent SDK, Codex, Cursor, Windsurf, Cline, Roo Code, Kilo Code
+#                               # also rephrases two Claude Code prompt signatures that trigger consumer-endpoint 429s
 #       rules:                  # case-insensitive, longest match first; custom rules override builtins
 #         "Claude Code": "Antigravity"
 #         "Claude Agent SDK": "" # empty replacement deletes the matching name

@@ -148,6 +148,39 @@ func TestAntigravityClientFilterBlockDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestAntigravityClaudeCodePromptSignatures(t *testing.T) {
+	const source = "You are an interactive agent that helps users with software engineering tasks. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context. Refuse malicious requests."
+	for _, tc := range []struct {
+		name   string
+		filter config.AntigravityClientFilterConfig
+		want   string
+	}{
+		{"default", config.AntigravityClientFilterConfig{}, "You are an interactive agent that helps users with software development tasks. Security tools with both defensive and offensive applications (C2 frameworks, credential testing, exploit development) require clear authorization context. Refuse malicious requests."},
+		{"disabled", config.AntigravityClientFilterConfig{Enabled: new(false)}, source},
+		{"no-builtins", config.AntigravityClientFilterConfig{Builtins: new(false)}, source},
+		{"custom-override", config.AntigravityClientFilterConfig{Rules: map[string]string{"SOFTWARE ENGINEERING TASKS": "software engineering tasks", "Dual-use security tools": "Dual-use security tools"}}, source},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Antigravity.SystemPrompt.ClientFilter = tc.filter
+			doc := ojson.NewDocString(`{"request":{"systemInstruction":{"role":"system","parts":[]},"contents":[{"role":"user","parts":[{"text":"Dual-use security tools for software engineering tasks"}]}],"tools":[{"functionDeclarations":[{"name":"lookup","description":"Dual-use security tools","parameters":{"type":"object","properties":{"task":{"const":"software engineering tasks"}}}}]}]}}`)
+			_ = doc.Set("request.systemInstruction.parts", []any{map[string]any{"text": source}})
+			before := ojson.NewDoc(doc.Bytes())
+			if err := ApplyAntigravitySystemPromptDoc(cfg, misc.AntigravityDeviceProfile{}, "gemini-4-hydrogen-xhigh", doc); err != nil {
+				t.Fatal(err)
+			}
+			if got := doc.Get("request.systemInstruction.parts.1.text").String(); got != tc.want {
+				t.Fatalf("guidance = %q, want %q", got, tc.want)
+			}
+			for _, path := range []string{"request.systemInstruction.role", "request.contents", "request.tools"} {
+				if doc.Get(path).Raw != before.Get(path).Raw {
+					t.Fatalf("changed %s", path)
+				}
+			}
+		})
+	}
+}
+
 func TestAntigravityPromptTextModesAndRole(t *testing.T) {
 	source := "Write a response.\n```go\nvar name = `Codex`\n```\nOutput JSON only: {\"name\":\"Codex\"}\nUse /workspace/main.go\n"
 	protected := antigravityEncodeCallerText(source, "protected")
