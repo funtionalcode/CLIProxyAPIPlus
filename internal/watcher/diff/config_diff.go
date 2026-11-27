@@ -120,6 +120,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.QuotaExceeded.AntigravityCredits != newCfg.QuotaExceeded.AntigravityCredits {
 		changes = append(changes, fmt.Sprintf("quota-exceeded.antigravity-credits: %t -> %t", oldCfg.QuotaExceeded.AntigravityCredits, newCfg.QuotaExceeded.AntigravityCredits))
 	}
+	if !reflect.DeepEqual(oldCfg.Antigravity.DeviceProfile, newCfg.Antigravity.DeviceProfile) {
+		changes = append(changes, "antigravity.device-profile: updated")
+	}
+	if !reflect.DeepEqual(oldCfg.Antigravity.SystemPrompt, newCfg.Antigravity.SystemPrompt) {
+		changes = append(changes, "antigravity.system-prompt: updated")
+	}
+	if oldCfg.Antigravity.Telemetry.EffectiveMode() != newCfg.Antigravity.Telemetry.EffectiveMode() {
+		changes = append(changes, fmt.Sprintf("antigravity.telemetry.mode: %s -> %s", oldCfg.Antigravity.Telemetry.EffectiveMode(), newCfg.Antigravity.Telemetry.EffectiveMode()))
+	}
 	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: %d -> %d", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}

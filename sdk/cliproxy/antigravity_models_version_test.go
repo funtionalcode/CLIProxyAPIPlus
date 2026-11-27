@@ -10,6 +10,8 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -23,9 +25,11 @@ func overrideAntigravityModelUserAgent(t *testing.T) *atomic.Value {
 	t.Helper()
 	var current atomic.Value
 	current.Store(antigravityOldTestUA)
-	previous := antigravityModelUserAgent
-	antigravityModelUserAgent = func() string { return current.Load().(string) }
-	t.Cleanup(func() { antigravityModelUserAgent = previous })
+	previous := antigravityModelProfile
+	antigravityModelProfile = func(*config.Config, *coreauth.Auth) misc.AntigravityDeviceProfile {
+		return misc.AntigravityDeviceProfile{UserAgent: current.Load().(string)}
+	}
+	t.Cleanup(func() { antigravityModelProfile = previous })
 	return &current
 }
 
@@ -35,6 +39,29 @@ func antigravityVersionTestResponse(req *http.Request, status int, body string) 
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Request:    req,
+	}
+}
+
+func TestAntigravityModelProbeUsesAccountProfile(t *testing.T) {
+	resetAntigravityCapabilityCache()
+	t.Cleanup(resetAntigravityCapabilityCache)
+	svc := &Service{cfg: &config.Config{}}
+	auth := antigravityTestAuth("profile-probe", "https://profile.invalid")
+	auth.Metadata["device_profile"] = map[string]any{"hub_version": "2.30.1", "os_type": "linux", "arch": "amd64", "locale": "ja-JP"}
+	want := helps.AntigravityProfile(svc.cfg, auth)
+	previous := http.DefaultTransport
+	var headers http.Header
+	http.DefaultTransport = antigravityReviewTransport(func(req *http.Request) (*http.Response, error) {
+		headers = req.Header.Clone()
+		return antigravityVersionTestResponse(req, http.StatusOK, `{"models":{"gemini-test":{}}}`), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	hints := svc.fetchAntigravityModelCapabilityHintsForAuth(t.Context(), auth)
+	if headers.Get("User-Agent") != want.UserAgent || headers.Get("Accept-Language") != want.Locale {
+		t.Fatalf("model discovery profile differs from executor: %v", headers)
+	}
+	if _, ok := hints.ModelIDs["gemini-test"]; !ok {
+		t.Fatal("profile probe did not publish models")
 	}
 }
 

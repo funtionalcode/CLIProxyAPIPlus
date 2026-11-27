@@ -651,6 +651,13 @@ codex:
 # Antigravity provider behavior.
 # TOS_VIOLATION errors preserve the enabled state and follow normal 403 cooling; disable accounts manually if needed.
 # antigravity:
+#   device-profile:
+#     enabled: true             # stable per-account platform/locale; versions follow the existing updater
+#   system-prompt:
+#     enabled: true             # prepend compatibility guidance while retaining caller instructions
+#     text: ""                  # optional replacement template: {hub_version}, {os}, {arch}
+#   telemetry:
+#     mode: "preview"           # default: local metadata-only logs; off disables; send explicitly enables delivery
 # sensitive-words:              # optional: words to obfuscate with combining grapheme joiners (U+034F) in system instructions
 #   - "API"
 #   - "proxy"

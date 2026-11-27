@@ -74,7 +74,7 @@ func TestIssue7000AntigravityAliasesPreserveOtherFieldsAndToolChoice(t *testing.
 					assertIssue7000PromptSchema(t, request.Get(systemKey), issue7000LiteralSchema)
 					for path, want := range map[string]string{
 						"generationConfig.temperature": "0.25", "generation_config.stopSequences.0": "STOP",
-						systemKey + ".parts.0.text": "keep system", "contents.0.parts.0.text": "keep history",
+						systemKey + ".parts.1.text": "keep system", "contents.0.parts.0.text": "keep history",
 						"tools.0.functionDeclarations.0.name": "lookup",
 					} {
 						if got := request.Get(path).String(); got != want {
@@ -148,8 +148,8 @@ func TestIssue7000AntigravityModelAndPlainRequestBoundaries(t *testing.T) {
 			if errMarshal != nil {
 				t.Fatal(errMarshal)
 			}
-			if got := ojson.GetBytes(encoded, "request.systemInstruction.parts.#").Int(); got != 1 {
-				t.Errorf("plain request gained instructions: %s", encoded)
+			if got := ojson.GetBytes(encoded, "request.systemInstruction.parts.#").Int(); got != 2 || ojson.GetBytes(encoded, "request.systemInstruction.parts.1.text").String() != "unchanged" {
+				t.Errorf("plain request must retain caller instructions after the compatibility template: %s", encoded)
 			}
 			if got := ojson.GetBytes(encoded, "request.toolConfig.functionCallingConfig.mode").String(); got != "VALIDATED" {
 				t.Errorf("unrelated legacy tool behavior changed: %q", got)
@@ -241,7 +241,7 @@ func TestIssue7000AntigravityExecutionAndFinalPayloadRules(t *testing.T) {
 					switch rules {
 					case "none":
 						assertIssue7000PromptSchema(t, request.Get("systemInstruction"), issue7000LiteralSchema)
-						if !strings.Contains(request.Get("systemInstruction.parts.0.text").String(), "a\u034fnthropic") {
+						if !strings.Contains(request.Get("systemInstruction.parts.1.text").String(), "a\u034fnthropic") {
 							t.Errorf("original system instruction was lost or not obfuscated: %s", body)
 						}
 						for _, key := range []string{"responseSchema", "responseMimeType"} {

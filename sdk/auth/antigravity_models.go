@@ -58,6 +58,7 @@ type AntigravityModelProbeRequest struct {
 	AccessToken string
 	ProjectID   string
 	UserAgent   string
+	Locale      string
 }
 
 // FetchAntigravityAvailableModels performs a single-shot POST /v1internal:fetchAvailableModels request
@@ -108,6 +109,9 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 	httpReq.Header.Set("User-Agent", userAgent)
+	if req.Locale != "" {
+		httpReq.Header.Set("Accept-Language", req.Locale)
+	}
 
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {

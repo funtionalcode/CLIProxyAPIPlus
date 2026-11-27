@@ -1,6 +1,11 @@
 // Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
 package antigravity
 
+import "time"
+
+// RefreshLead is shared by scheduled and request-time OAuth refreshes.
+const RefreshLead = 5 * time.Minute
+
 // OAuth client credentials and configuration
 const (
 	ClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"

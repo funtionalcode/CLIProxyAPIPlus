@@ -17,6 +17,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -41,7 +42,7 @@ const (
 	antigravityClientID                    = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret                = "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"
 	antigravityAuthType                    = "antigravity"
-	antigravityRequestTokenSafetyWindow    = 5 * time.Minute
+	antigravityRequestTokenSafetyWindow    = antigravityauth.RefreshLead
 	antigravityCreditsHintRefreshInterval  = cliproxyauth.AntigravityCreditsHintRefreshInterval
 	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
@@ -55,6 +56,7 @@ type AntigravityExecutor struct {
 	matcherMu     sync.RWMutex
 	lastWordsKey  string
 	cachedMatcher *helps.SensitiveWordMatcher
+	sessions      helps.AntigravitySessions
 }
 
 // NewAntigravityExecutor creates a new Antigravity executor instance.
@@ -1072,7 +1074,7 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 		httpReq.Header.Set("Content-Type", contentType)
 	}
 	// Content-Length is managed automatically by Go's http.Client from the Body
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	helps.AntigravityProfile(e.cfg, auth).ApplyHeaders(httpReq.Header)
 
 	// Inject Authorization: Bearer <token>
 	if err := e.PrepareRequest(httpReq, auth); err != nil {

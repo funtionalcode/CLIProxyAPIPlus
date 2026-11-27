@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -72,7 +73,7 @@ func nextAntigravityFailure(previous antigravityFailureState, now time.Time, ran
 
 var (
 	antigravityNowFunc          = time.Now
-	antigravityModelUserAgent   = misc.AntigravityUserAgent
+	antigravityModelProfile     = helps.AntigravityProfile
 	antigravityCapabilityMu     sync.RWMutex
 	antigravityCapabilityCache  = make(map[string]antigravityCapabilityCacheEntry)
 	antigravityAuthFailureCache = make(map[string]antigravityFailureState)
@@ -98,7 +99,16 @@ func (s *Service) antigravityCapabilityKey(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	return antigravityCapabilityKeyForRoute(auth, antigravityModelBaseURLs(auth)[0], s.antigravityModelFetchProxyURL(auth), antigravityModelUserAgent())
+	return antigravityCapabilityKeyForRoute(auth, antigravityModelBaseURLs(auth)[0], s.antigravityModelFetchProxyURL(auth), s.antigravityModelFetchProfile(auth).UserAgent)
+}
+
+func (s *Service) antigravityModelFetchProfile(auth *coreauth.Auth) misc.AntigravityDeviceProfile {
+	if s == nil {
+		return antigravityModelProfile(nil, auth)
+	}
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return antigravityModelProfile(s.cfg, auth)
 }
 
 func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy, userAgent string) string {
@@ -116,7 +126,7 @@ func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCa
 		return antigravityModelCapabilityHints{}
 	}
 	endpoint := antigravityModelBaseURLs(auth)[0]
-	key := antigravityCapabilityKeyForRoute(auth, endpoint, s.antigravityModelFetchProxyURL(auth), antigravityModelUserAgent())
+	key := antigravityCapabilityKeyForRoute(auth, endpoint, s.antigravityModelFetchProxyURL(auth), s.antigravityModelFetchProfile(auth).UserAgent)
 	return s.cachedAntigravityHintsForKey(auth, endpoint, key)
 }
 
@@ -248,8 +258,8 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 		ctx = context.Background()
 	}
 	baseURLs, proxyURL := antigravityModelBaseURLs(auth), s.antigravityModelFetchProxyURL(auth)
-	userAgent := antigravityModelUserAgent()
-	cacheKey := antigravityCapabilityKeyForRoute(auth, baseURLs[0], proxyURL, userAgent)
+	profile := s.antigravityModelFetchProfile(auth)
+	cacheKey := antigravityCapabilityKeyForRoute(auth, baseURLs[0], proxyURL, profile.UserAgent)
 	accessToken, _ := auth.Metadata["access_token"].(string)
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" || ctx.Err() != nil {
@@ -308,7 +318,7 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 			return hints, nil
 		}
 		defer func() { <-antigravityProbeSlots }()
-		hints, status := s.probeAntigravityModelCapabilityHints(ctx, auth, baseURLs, proxyURL, accessToken, userAgent)
+		hints, status := s.probeAntigravityModelCapabilityHints(ctx, auth, baseURLs, proxyURL, accessToken, profile)
 		antigravityCapabilityMu.Lock()
 		defer antigravityCapabilityMu.Unlock()
 		current := antigravityCapabilityCache[cacheKey]
@@ -355,7 +365,7 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 	}
 }
 
-func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth *coreauth.Auth, baseURLs []string, proxyURL, accessToken, userAgent string) (antigravityModelCapabilityHints, antigravityProbeStatus) {
+func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth *coreauth.Auth, baseURLs []string, proxyURL, accessToken string, profile misc.AntigravityDeviceProfile) (antigravityModelCapabilityHints, antigravityProbeStatus) {
 	project := ""
 	if auth != nil && auth.Metadata != nil {
 		project, _ = auth.Metadata["project_id"].(string)
@@ -365,7 +375,8 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 		ProxyURL:    proxyURL,
 		AccessToken: accessToken,
 		ProjectID:   project,
-		UserAgent:   userAgent,
+		UserAgent:   profile.UserAgent,
+		Locale:      profile.Locale,
 	})
 	return antigravityModelCapabilityHints{
 		ModelIDs:          hints.ModelIDs,

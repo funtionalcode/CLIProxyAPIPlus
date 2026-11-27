@@ -109,6 +109,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	baseURL := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	telemetryClient := httpClient
 	httpClient = reporter.TrackHTTPClient(httpClient)
 
 	// Credential retry rounds are owned by the conductor. Perform one upstream
@@ -132,13 +133,21 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if replayScope.valid() {
 		replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
 	}
-	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, true, opts.Alt, baseURL, helps.AntigravitySessionScopeFor(req, opts))
 	if errReq != nil {
 		err = errReq
 		return nil, err
 	}
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
+	telemetry := helps.BeginAntigravityTelemetry(e.cfg, auth, token, httpReq.Header, requestPayload, telemetryClient)
+	telemetryStatus := 0
+	telemetryInStream := false
+	defer func() {
+		if !telemetryInStream {
+			telemetry.Finish(telemetryStatus, err)
+		}
+	}()
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate_stream").Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -148,6 +157,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		err = errDo
 		return nil, err
 	}
+	telemetryStatus = httpResp.StatusCode
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		bodyBytes, errRead := io.ReadAll(httpResp.Body)
@@ -211,6 +221,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, replayRequestPayload)
 	out := make(chan cliproxyexecutor.StreamChunk)
 	stopDeliverySupport := usage.SupportStreamDelivery(ctx)
+	telemetryInStream = true
 	go func(resp *http.Response) {
 		defer func() {
 			if errClose := resp.Body.Close(); errClose != nil {
@@ -223,6 +234,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var streamUsage helps.StreamUsageBuffer
 		streamUsage.SetRequestPayload(requestPayload)
 		var streamErr error
+		defer func() { telemetry.Finish(telemetryStatus, streamErr) }()
 		var translatedClaudeErr error
 		var translatedErrorStopped bool
 		var pendingJSON []byte
@@ -323,6 +335,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			if payload == nil {
 				continue
 			}
+			telemetry.Observe(payload)
 			if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() {
 				statusCode := int(errorResult.Get("code").Int())
 				if statusCode < http.StatusBadRequest || statusCode > 599 {

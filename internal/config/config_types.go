@@ -284,6 +284,15 @@ type ProxyConnectionPoolConfig struct {
 
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
+	// DeviceProfile assigns a stable client platform and locale to each credential.
+	DeviceProfile AntigravityDeviceProfileConfig `yaml:"device-profile,omitempty" json:"device-profile,omitempty"`
+
+	// SystemPrompt controls the built-in compatibility instructions.
+	SystemPrompt AntigravitySystemPromptConfig `yaml:"system-prompt,omitempty" json:"system-prompt,omitempty"`
+
+	// Telemetry controls local previews and optional Google generation telemetry.
+	Telemetry AntigravityTelemetryConfig `yaml:"telemetry,omitempty" json:"telemetry,omitempty"`
+
 	// SensitiveWords is a list of words to obfuscate with invisible combining grapheme joiners in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 
@@ -302,6 +311,35 @@ type AntigravityConfig struct {
 	// credentials. Set to "0", "off", "false", "none", or
 	// "disabled" to explicitly disable the pause.
 	TOSPauseWindow string `yaml:"tos-pause-window,omitempty" json:"tos-pause-window,omitempty"`
+}
+
+type AntigravityDeviceProfileConfig struct {
+	// Enabled defaults to true. Explicit credential user_agent values take precedence.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+type AntigravitySystemPromptConfig struct {
+	// Enabled defaults to true. Image and independent web-search requests are excluded.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Text replaces the built-in template; {hub_version}, {os}, and {arch} are expanded.
+	Text string `yaml:"text,omitempty" json:"text,omitempty"`
+}
+
+type AntigravityTelemetryConfig struct {
+	// Mode is preview (default), off, or send. Preview never makes a network request.
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+}
+
+// EffectiveMode treats unknown telemetry modes as off, never as permission to send.
+func (c AntigravityTelemetryConfig) EffectiveMode() string {
+	switch strings.ToLower(strings.TrimSpace(c.Mode)) {
+	case "", "preview":
+		return "preview"
+	case "send":
+		return "send"
+	default:
+		return "off"
+	}
 }
 
 // AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.

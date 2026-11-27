@@ -109,6 +109,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	baseURL := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	telemetryClient := httpClient
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	// Credential retry rounds are owned by the conductor. Perform one upstream
 	// request per credential so request-retry is not consumed twice.
@@ -132,7 +133,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
 	}
 
-	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, false, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, false, opts.Alt, baseURL, helps.AntigravitySessionScopeFor(req, opts))
 	if errReq != nil {
 		err = errReq
 		return resp, err
@@ -140,6 +141,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
 
+	telemetry := helps.BeginAntigravityTelemetry(e.cfg, auth, token, httpReq.Header, requestPayload, telemetryClient)
+	telemetryStatus := 0
+	defer func() { telemetry.Finish(telemetryStatus, err) }()
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate").Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -150,8 +154,10 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, err
 	}
 
+	telemetryStatus = httpResp.StatusCode
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	telemetry.Observe(bodyBytes)
 	if errClose := httpResp.Body.Close(); errClose != nil {
 		log.Errorf("antigravity executor: close response body error: %v", errClose)
 	}
@@ -351,6 +357,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	baseURL := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	telemetryClient := httpClient
 	httpClient = reporter.TrackHTTPClient(httpClient)
 
 	// Credential retry rounds are owned by the conductor. Perform one upstream
@@ -374,7 +381,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	if replayScope.valid() {
 		replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
 	}
-	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, true, opts.Alt, baseURL, helps.AntigravitySessionScopeFor(req, opts))
 	if errReq != nil {
 		err = errReq
 		return resp, err
@@ -382,6 +389,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	translated = requestPayload
 	reporter.SetTranslatedRequestMetadata(requestPayload, to.String())
 
+	telemetry := helps.BeginAntigravityTelemetry(e.cfg, auth, token, httpReq.Header, requestPayload, telemetryClient)
+	telemetryStatus := 0
+	defer func() { telemetry.Finish(telemetryStatus, err) }()
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "generate").Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -391,6 +401,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		err = errDo
 		return resp, err
 	}
+	telemetryStatus = httpResp.StatusCode
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		bodyBytes, errRead := io.ReadAll(httpResp.Body)
@@ -489,6 +500,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		if payload == nil {
 			continue
 		}
+		telemetry.Observe(payload)
 		// A mid-stream error frame can still carry the TOS_VIOLATION signature on
 		// HTTP 200; surface it as a terminal credential error before it degrades
 		// into a generic empty-output failure so the credential is deactivated

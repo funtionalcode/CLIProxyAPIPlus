@@ -98,7 +98,7 @@ func TestPayloadBarrierCodexImageFilter(t *testing.T) {
 func TestPayloadBarrierAntigravityRebuiltAttempts(t *testing.T) {
 	cfg := &config.Config{Payload: config.PayloadConfig{
 		Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "gemini-*"}}, Params: map[string]any{"generationConfig.maxOutputTokens": 123, "toolConfig.functionCallingConfig.mode": "CUSTOM"}}},
-		Filter:   []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "gemini-*"}}, Params: []string{"sessionId", "contents.0"}}},
+		Filter:   []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "gemini-*"}}, Params: []string{"sessionId", "labels", "contents.0"}}},
 	}}
 	req := cliproxyexecutor.Request{Model: "gemini-3.1-pro-preview"}
 	body := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"first"}]},{"role":"user","parts":[{"text":"second"}]}]}}`)
@@ -106,7 +106,7 @@ func TestPayloadBarrierAntigravityRebuiltAttempts(t *testing.T) {
 	executor := NewAntigravityExecutor(cfg)
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-test"}}
 	for attempt := 0; attempt < 2; attempt++ {
-		request, errBuild := executor.buildRequest(ctx, auth, "token", req.Model, body, attempt == 1, "", "https://example.invalid", "injected-session")
+		request, errBuild := executor.buildRequest(ctx, auth, "token", req.Model, body, attempt == 1, "", "https://example.invalid", helps.AntigravitySessionScope{Conversation: "injected-session"})
 		if errBuild != nil {
 			t.Fatal(errBuild)
 		}
@@ -120,11 +120,43 @@ func TestPayloadBarrierAntigravityRebuiltAttempts(t *testing.T) {
 		if ojson.GetBytes(wire, "request.generationConfig.maxOutputTokens").Int() != 123 {
 			t.Fatalf("built-in cleanup undid override: %s", wire)
 		}
-		if ojson.GetBytes(wire, "request.sessionId").Exists() {
-			t.Fatalf("session reinjected: %s", wire)
+		if ojson.GetBytes(wire, "request.sessionId").Exists() || ojson.GetBytes(wire, "request.labels").Exists() {
+			t.Fatalf("session or labels reinjected: %s", wire)
 		}
 		if got := ojson.GetBytes(wire, "request.contents.#").Int(); got != 1 {
 			t.Fatalf("filter applied more than once: %s", wire)
+		}
+	}
+}
+
+func TestPayloadBarrierAntigravityHubMetadataOverrides(t *testing.T) {
+	cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+		Models: []config.PayloadModelRule{{Name: "*", Protocol: "antigravity"}},
+		Params: map[string]any{"sessionId": "configured-session", "labels.trajectory_id": "configured-trajectory", "labels.last_step_index": "configured-step"},
+	}}}}
+	executor := NewAntigravityExecutor(cfg)
+	auth := &cliproxyauth.Auth{ID: "account", Metadata: map[string]any{"project_id": "project-test"}}
+	for _, model := range []string{"gemini-3.6-flash-high", "claude-sonnet-4-6", "gemini-3.1-flash-image"} {
+		for _, stream := range []bool{false, true} {
+			body := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+			req := cliproxyexecutor.Request{Model: model, Payload: body}
+			ctx := helps.WithPayloadFinalizer(context.Background(), helps.NewPayloadFinalizer(cfg, "antigravity", model, "antigravity", "request", body, req, cliproxyexecutor.Options{}))
+			request, errBuild := executor.buildRequest(ctx, auth, "token", model, body, stream, "", "https://example.invalid", helps.AntigravitySessionScope{Conversation: "session"})
+			if errBuild != nil {
+				t.Fatal(errBuild)
+			}
+			wire, errRead := io.ReadAll(request.Body)
+			if errClose := request.Body.Close(); errClose != nil {
+				t.Fatal(errClose)
+			}
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if ojson.GetBytes(wire, "request.sessionId").String() != "configured-session" ||
+				ojson.GetBytes(wire, "request.labels.trajectory_id").String() != "configured-trajectory" ||
+				ojson.GetBytes(wire, "request.labels.last_step_index").String() != "configured-step" {
+				t.Fatalf("%s stream=%v: Hub metadata overwrote payload configuration: %s", model, stream, wire)
+			}
 		}
 	}
 }

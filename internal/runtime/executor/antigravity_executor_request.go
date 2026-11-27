@@ -11,10 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/MoeForge/moego/ojson"
-	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -23,13 +21,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, error) {
+func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string, scopes ...helps.AntigravitySessionScope) (*http.Request, error) {
 	doc := ojson.NewDoc(payload)
-	httpReq, _, err := e.buildRequestDoc(ctx, auth, token, modelName, doc, stream, alt, baseURL, derivedSessionIDs...)
+	httpReq, _, err := e.buildRequestDoc(ctx, auth, token, modelName, doc, stream, alt, baseURL, scopes...)
 	return httpReq, err
 }
 
-func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, doc *ojson.Doc, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, []byte, error) {
+func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, doc *ojson.Doc, stream bool, alt, baseURL string, scopes ...helps.AntigravitySessionScope) (*http.Request, []byte, error) {
 	if token == "" {
 		return nil, nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
@@ -64,7 +62,25 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	if errProject != nil {
 		return nil, nil, errProject
 	}
-	geminiToAntigravityDoc(doc, modelName, projectID, derivedSessionIDs...)
+	var scope helps.AntigravitySessionScope
+	if len(scopes) > 0 {
+		scope = scopes[0]
+	}
+	geminiToAntigravityDoc(doc, modelName, projectID)
+	e.sessions.ApplyDoc(auth, modelName, scope, doc)
+	profile := helps.AntigravityProfile(e.cfg, auth)
+	// Resolve custom headers once before rendering the profile into the prompt.
+	headerTemplate := (&http.Request{Header: make(http.Header), Host: resolveHost(base)}).WithContext(ctx)
+	headerTemplate.Header.Set("Content-Type", "application/json")
+	headerTemplate.Header.Set("Authorization", "Bearer "+token)
+	profile.ApplyHeaders(headerTemplate.Header)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(headerTemplate, attrs)
+	profile = misc.ParseAntigravityDeviceProfile(headerTemplate.Header.Get("User-Agent"))
+	helps.ApplyAntigravitySystemPromptDoc(e.cfg, profile, modelName, doc)
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
@@ -108,17 +124,10 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	// Connection header and keeps its HTTP/1.1 connections alive, so forcing
 	// "Connection: close" would both deviate from that fingerprint and defeat the
 	// shared connection pool by discarding every established TCP + TLS session.
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	if host := resolveHost(base); host != "" {
-		httpReq.Host = host
+	httpReq.Header = headerTemplate.Header
+	if headerTemplate.Host != "" {
+		httpReq.Host = headerTemplate.Host
 	}
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -670,31 +679,6 @@ func resolveHost(base string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 }
 
-func resolveUserAgent(auth *cliproxyauth.Auth) string {
-	return misc.AntigravityRequestUserAgent(antigravityConfiguredUserAgent(auth))
-}
-
-func resolveLoadCodeAssistUserAgent(auth *cliproxyauth.Auth) string {
-	return misc.AntigravityLoadCodeAssistUserAgent(antigravityConfiguredUserAgent(auth))
-}
-
-func antigravityConfiguredUserAgent(auth *cliproxyauth.Auth) string {
-	raw := ""
-	if auth != nil {
-		if auth.Attributes != nil {
-			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
-				raw = ua
-			}
-		}
-		if raw == "" && auth.Metadata != nil {
-			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
-				raw = strings.TrimSpace(ua)
-			}
-		}
-	}
-	return raw
-}
-
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -715,13 +699,7 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte, projectID string, derivedSessionIDs ...string) []byte {
-	doc := ojson.NewDoc(payload)
-	geminiToAntigravityDoc(doc, modelName, projectID, derivedSessionIDs...)
-	return doc.Bytes()
-}
-
-func geminiToAntigravityDoc(doc *ojson.Doc, modelName string, projectID string, derivedSessionIDs ...string) {
+func geminiToAntigravityDoc(doc *ojson.Doc, modelName string, projectID string) {
 	if doc == nil {
 		return
 	}
@@ -745,33 +723,11 @@ func geminiToAntigravityDoc(doc *ojson.Doc, modelName string, projectID string, 
 		_ = doc.Delete("project")
 	}
 
-	if isImageModel {
-		_ = doc.Set("requestId", generateImageGenRequestID())
-	} else if reqType != "web_search" {
-		_ = doc.Set("requestId", generateRequestID())
-		sessionID := strings.TrimSpace(doc.Get("request.sessionId").String())
-		if sessionID == "" && len(derivedSessionIDs) > 0 {
-			sessionID = strings.TrimSpace(derivedSessionIDs[0])
-		}
-		if sessionID == "" {
-			sessionID = generateStableSessionIDDoc(doc)
-		}
-		_ = doc.Set("request.sessionId", sessionID)
-	}
-
 	_ = doc.Delete("request.safetySettings")
 	if toolConfig := doc.Get("toolConfig"); toolConfig.Exists() && !doc.Get("request.toolConfig").Exists() {
 		_ = doc.SetRawBytes("request.toolConfig", []byte(toolConfig.Raw))
 		_ = doc.Delete("toolConfig")
 	}
-}
-
-func generateRequestID() string {
-	return "agent-" + uuid.NewString()
-}
-
-func generateImageGenRequestID() string {
-	return fmt.Sprintf("image_gen/%d/%s/12", time.Now().UnixMilli(), uuid.NewString())
 }
 
 func generateSessionID() string {

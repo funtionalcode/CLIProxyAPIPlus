@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -67,6 +68,19 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, errThinking
 	}
 	e.obfuscateSensitiveWordsDoc(doc)
+	profile := helps.AntigravityProfile(e.cfg, auth)
+	base := resolveAntigravityRequestBaseURL(auth)
+	headerTemplate := (&http.Request{Header: make(http.Header), Host: resolveHost(base)}).WithContext(ctx)
+	headerTemplate.Header.Set("Content-Type", "application/json")
+	headerTemplate.Header.Set("Authorization", "Bearer "+token)
+	profile.ApplyHeaders(headerTemplate.Header)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(headerTemplate, attrs)
+	profile = misc.ParseAntigravityDeviceProfile(headerTemplate.Header.Get("User-Agent"))
+	helps.ApplyAntigravitySystemPromptDoc(e.cfg, profile, baseModel, doc)
 	helps.PrepareAntigravityClaudeStructuredOutputDoc(baseModel, doc)
 	sanitizeAntigravityGeminiRequestSignaturesDoc(baseModel, doc)
 	if _, errReplay := prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {
@@ -81,7 +95,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	_ = doc.Delete("request.labels")
 	_ = doc.Delete("request.sessionId")
 
-	base := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	var authID, authLabel, authType, authValue string
@@ -107,17 +120,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, errReq
 	}
 	// No httpReq.Close: keep the shared Antigravity connection pool usable.
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	if host := resolveHost(base); host != "" {
-		httpReq.Host = host
+	httpReq.Header = headerTemplate.Header
+	if headerTemplate.Host != "" {
+		httpReq.Host = headerTemplate.Host
 	}
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       requestURL.String(),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -173,13 +175,14 @@ func TestAntigravityBuildRequest_UsesRouteModelWhenPayloadContainsDifferentModel
 	}
 }
 
-func TestAntigravityBuildRequestUsesDerivedSessionIDAndPreservesExplicit(t *testing.T) {
+func TestAntigravityBuildRequestSeparatesInstallationAndConversation(t *testing.T) {
 	t.Parallel()
 
 	executor := &AntigravityExecutor{}
-	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	auth := &cliproxyauth.Auth{ID: "account-1", Metadata: map[string]any{"project_id": "project-1"}}
 	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
-	req, err := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", payload, false, "", "https://example.com", "-123456789")
+	scope := helps.AntigravitySessionScope{Caller: "caller-1", Conversation: "conversation-1"}
+	req, err := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", payload, false, "", "https://example.com", scope)
 	if err != nil {
 		t.Fatalf("buildRequest error: %v", err)
 	}
@@ -188,12 +191,13 @@ func TestAntigravityBuildRequestUsesDerivedSessionIDAndPreservesExplicit(t *test
 	if !ok {
 		t.Fatalf("request missing or invalid: %v", body["request"])
 	}
-	if got := request["sessionId"]; got != "-123456789" {
-		t.Fatalf("request.sessionId = %v, want -123456789", got)
+	installation, ok := request["sessionId"].(string)
+	if !ok || !strings.HasPrefix(installation, "-") {
+		t.Fatalf("request.sessionId = %v, want negative installation ID", request["sessionId"])
 	}
 
 	explicitPayload := []byte(`{"request":{"sessionId":"-987654321","contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
-	explicitReq, errExplicit := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", explicitPayload, false, "", "https://example.com", "-123456789")
+	explicitReq, errExplicit := executor.buildRequest(context.Background(), auth, "token", "gemini-3.1-pro", explicitPayload, true, "", "https://example.com", scope)
 	if errExplicit != nil {
 		t.Fatalf("buildRequest explicit error: %v", errExplicit)
 	}
@@ -202,8 +206,97 @@ func TestAntigravityBuildRequestUsesDerivedSessionIDAndPreservesExplicit(t *test
 	if !ok {
 		t.Fatalf("explicit request missing or invalid: %v", explicitBody["request"])
 	}
-	if got := explicitRequest["sessionId"]; got != "-987654321" {
-		t.Fatalf("explicit request.sessionId = %v, want -987654321", got)
+	if got := explicitRequest["sessionId"]; got != installation || got == "-987654321" {
+		t.Fatalf("request.sessionId = %v, want stable installation ID %s", got, installation)
+	}
+	firstLabels := request["labels"].(map[string]any)
+	nextLabels := explicitRequest["labels"].(map[string]any)
+	if firstLabels["trajectory_id"] != nextLabels["trajectory_id"] || nextLabels["last_step_index"] != "1" {
+		t.Fatalf("stream continuation lost trajectory or step: %v -> %v", firstLabels, nextLabels)
+	}
+}
+
+func TestAntigravityExecuteUsesScopedHubSessions(t *testing.T) {
+	for _, model := range []string{"gemini-3.6-flash-high", "claude-sonnet-4-6", "gemini-3.1-flash-image"} {
+		for _, stream := range []bool{false, true} {
+			name := model + "/unary"
+			if stream {
+				name = model + "/stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				captured := make(chan []byte, 3)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Error(errRead)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					captured <- body
+					response := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
+					if strings.Contains(r.URL.Path, "streamGenerateContent") {
+						w.Header().Set("Content-Type", "text/event-stream")
+						response = "data: " + response + "\n\n"
+					} else {
+						w.Header().Set("Content-Type", "application/json")
+					}
+					_, _ = io.WriteString(w, response)
+				}))
+				defer server.Close()
+				executor := NewAntigravityExecutor(&config.Config{})
+				auth := &cliproxyauth.Auth{ID: t.Name(), Provider: "antigravity", Attributes: map[string]string{"base_url": server.URL}, Metadata: map[string]any{
+					"access_token": "token", "project_id": "project", "expired": time.Now().Add(time.Hour).Format(time.RFC3339),
+				}}
+				req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini, Stream: stream, Headers: http.Header{"Session-Id": {"explicit-session"}}}
+				var first *ojson.Doc
+				for attempt := 0; attempt < 3; attempt++ {
+					caller := "caller-a"
+					if attempt == 2 {
+						caller = "caller-b"
+					}
+					opts.Metadata = map[string]any{cliproxyexecutor.CallerScopeMetadataKey: caller}
+					if stream {
+						result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+						if errStream != nil {
+							t.Fatal(errStream)
+						}
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								t.Fatal(chunk.Err)
+							}
+						}
+					} else if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					wire := ojson.NewDoc(<-captured)
+					if strings.Contains(model, "image") {
+						if wire.Get("request.labels").Exists() || wire.Get("request.sessionId").Exists() || !strings.HasPrefix(wire.Get("requestId").String(), "image_gen/") {
+							t.Fatalf("image envelope contains agent metadata: %s", wire.String())
+						}
+						continue
+					}
+					if first == nil {
+						first = wire
+						if !wire.Get("request.labels.trajectory_id").Exists() || wire.Get("request.labels.last_step_index").String() != "0" {
+							t.Fatalf("missing Hub trajectory: %s", wire.String())
+						}
+						continue
+					}
+					if wire.Get("request.sessionId").String() != first.Get("request.sessionId").String() {
+						t.Fatal("account installation changed across requests")
+					}
+					sameTrajectory := wire.Get("request.labels.trajectory_id").String() == first.Get("request.labels.trajectory_id").String()
+					wantStep := "0"
+					if attempt == 1 {
+						wantStep = "1"
+					}
+					if sameTrajectory != (attempt == 1) || wire.Get("request.labels.last_step_index").String() != wantStep {
+						t.Fatalf("caller scope or continuation lost: %s", wire.String())
+					}
+				}
+			})
+		}
 	}
 }
 

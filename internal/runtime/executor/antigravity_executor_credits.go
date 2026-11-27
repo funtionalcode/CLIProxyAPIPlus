@@ -600,7 +600,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		return
 	}
 
-	userAgent := resolveLoadCodeAssistUserAgent(auth)
+	profile := helps.AntigravityProfile(e.cfg, auth)
 	loadReqBody, errMarshal := json.Marshal(map[string]any{
 		"metadata": map[string]string{
 			"ideType": "ANTIGRAVITY",
@@ -619,7 +619,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", userAgent)
+	profile.ApplyHeaders(httpReq.Header)
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "credits_query").Do(httpReq)
