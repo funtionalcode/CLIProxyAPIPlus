@@ -1,6 +1,8 @@
 package helps
 
 import (
+	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -8,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestAntigravitySystemPromptPreservesCallerContract(t *testing.T) {
@@ -76,5 +79,108 @@ func TestAntigravityProfileUnaffectedByTokenRotation(t *testing.T) {
 	auth.Attributes = map[string]string{"user_agent": "custom-client/1.0"}
 	if got := AntigravityProfile(nil, auth); got.UserAgent != "custom-client/1.0" {
 		t.Fatalf("explicit UA ignored: %#v", got)
+	}
+}
+
+func TestAntigravityClientNamesOnlyRewriteCallerSystem(t *testing.T) {
+	doc := ojson.NewDocString(`{"request":{"systemInstruction":{"role":"system","parts":[{"text":"Claude Code, CLAUDE AGENT SDK, Codex CLI, Codex, Cursor and Windsurf."},{"inlineData":{"mimeType":"text/plain","data":"Codex"}}]},"contents":[{"role":"user","parts":[{"text":"Use Codex"},{"functionCall":{"name":"Codex","args":{"client":"Cursor"}}}]}],"tools":[{"functionDeclarations":[{"name":"Codex","description":"Cursor"}]}],"generationConfig":{"responseJsonSchema":{"properties":{"Codex":{"const":"Cursor"}}}}}}`)
+	before := ojson.NewDoc(doc.Bytes())
+	cfg := &config.Config{}
+	cfg.Antigravity.SystemPrompt.Text = "Claude Code baseline is not caller input."
+	cfg.Antigravity.SystemPrompt.ClientFilter.Rules = map[string]string{"cLaUdE aGeNt SdK": "", "CURSOR": "Editor"}
+	ApplyAntigravitySystemPromptDoc(cfg, misc.AntigravityDeviceProfile{}, "gemini", doc)
+	want := "Antigravity, , Antigravity, Antigravity, Editor and Antigravity."
+	if got := doc.Get("request.systemInstruction.parts.1.text").String(); got != want {
+		t.Fatalf("caller text = %q, want %q", got, want)
+	}
+	if got := doc.Get("request.systemInstruction.parts.0.text").String(); got != cfg.Antigravity.SystemPrompt.Text {
+		t.Fatalf("baseline was rewritten: %q", got)
+	}
+	for _, path := range []string{"request.contents", "request.tools", "request.generationConfig"} {
+		if doc.Get(path).Raw != before.Get(path).Raw {
+			t.Fatalf("rewrote non-system path %s", path)
+		}
+	}
+	if !reflect.DeepEqual(doc.Get("request.systemInstruction.parts.2").Value(), before.Get("request.systemInstruction.parts.1").Value()) {
+		t.Fatal("rewrote non-text system part")
+	}
+	once := doc.String()
+	ApplyAntigravitySystemPromptDoc(cfg, misc.AntigravityDeviceProfile{}, "gemini", doc)
+	if doc.String() != once {
+		t.Fatal("repeated preparation changed output")
+	}
+}
+
+func TestAntigravityClientFilterIndependentSwitches(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		filter config.AntigravityClientFilterConfig
+		want   string
+	}{
+		{"default", config.AntigravityClientFilterConfig{}, "Antigravity MyClient"},
+		{"disabled", config.AntigravityClientFilterConfig{Enabled: new(false)}, "Codex MyClient"},
+		{"custom-only", config.AntigravityClientFilterConfig{Builtins: new(false), Rules: map[string]string{"MyClient": "Antigravity"}}, "Codex Antigravity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Antigravity.SystemPrompt.Enabled = new(false)
+			cfg.Antigravity.SystemPrompt.ClientFilter = tc.filter
+			doc := ojson.NewDocString(`{"request":{"system_instruction":"Codex MyClient"}}`)
+			ApplyAntigravitySystemPromptDoc(cfg, misc.AntigravityDeviceProfile{}, "gemini", doc)
+			if got := doc.Get("request.system_instruction.parts.0.text").String(); got != tc.want {
+				t.Fatalf("text = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAntigravityClientFilterBlockDoesNotMutate(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Antigravity.SystemPrompt.ClientFilter.Mode = "block"
+	cfg.Antigravity.SystemPrompt.ClientFilter.Rules = map[string]string{"Codex": "Codex"}
+	doc := ojson.NewDocString(`{"request":{"systemInstruction":"Use Codex"}}`)
+	before := doc.String()
+	if err := ApplyAntigravitySystemPromptDoc(cfg, misc.AntigravityDeviceProfile{}, "gemini", doc); err == nil {
+		t.Fatal("block mode accepted a matching request")
+	}
+	if doc.String() != before {
+		t.Fatal("blocked request was partially rewritten")
+	}
+}
+
+func TestAntigravityPromptTextModesAndRole(t *testing.T) {
+	source := "Write a response.\n```go\nvar name = `Codex`\n```\nOutput JSON only: {\"name\":\"Codex\"}\nUse /workspace/main.go\n"
+	protected := antigravityEncodeCallerText(source, "protected")
+	if !strings.HasPrefix(protected, "Wr173 4 r35p0n53.") || !strings.Contains(protected, source[strings.Index(source, "```go"):]) {
+		t.Fatalf("protected mode lost literal spans: %s", protected)
+	}
+	for _, enabled := range []bool{false, true} {
+		cfg := &config.Config{}
+		cfg.Antigravity.SystemPrompt.Enabled = &enabled
+		cfg.Antigravity.SystemPrompt.AsUser = true
+		cfg.Antigravity.SystemPrompt.TextMode = "leet"
+		doc := ojson.NewDocString(`{"request":{"systemInstruction":"Write a response.","contents":[{"role":"user","parts":[{"text":"original task"}]}]}}`)
+		if err := ApplyAntigravitySystemPromptDoc(cfg, misc.AntigravityDeviceProfile{}, "gemini", doc); err != nil {
+			t.Fatal(err)
+		}
+		if doc.Get("request.contents.0.role").String() != "user" || doc.Get("request.contents.0.parts.1.text").String() != "Wr173 4 r35p0n53." || doc.Get("request.contents.1.parts.0.text").String() != "original task" {
+			t.Fatalf("role conversion lost history or guidance: %s", doc.String())
+		}
+		if !strings.Contains(doc.Get("request.systemInstruction.parts").Raw, "leet spelling") {
+			t.Fatal("missing decoding guidance")
+		}
+	}
+}
+
+func TestAntigravityPromptPayloadRulesRemainFinal(t *testing.T) {
+	cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "gemini"}}, Params: map[string]any{"systemInstruction.parts.0.text": "Codex user override"}}}}}
+	doc := ojson.NewDocString(`{"request":{"systemInstruction":"Codex caller"}}`)
+	finalize := NewPayloadFinalizer(cfg, "antigravity", "gemini", "antigravity", "request", nil, cliproxyexecutor.Request{Model: "gemini"}, cliproxyexecutor.Options{})
+	if err := ApplyAntigravitySystemPromptDoc(cfg, misc.AntigravityDeviceProfile{}, "gemini", doc); err != nil {
+		t.Fatal(err)
+	}
+	FinalizePayloadDoc(WithPayloadFinalizer(context.Background(), finalize), doc)
+	if got := doc.Get("request.systemInstruction.parts.0.text").String(); got != "Codex user override" {
+		t.Fatalf("payload override lost: %q", got)
 	}
 }

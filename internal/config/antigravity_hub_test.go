@@ -8,8 +8,8 @@ import (
 
 func TestAntigravityHubConfigRoundTrip(t *testing.T) {
 	for _, raw := range []string{
-		"antigravity:\n  device-profile: {enabled: false}\n  system-prompt: {enabled: false, text: 'Custom {os}/{arch}'}\n  telemetry: {mode: preview}\n",
-		"config-version: 8\noauth:\n  providers:\n    antigravity:\n      device-profile: {enabled: false}\n      system-prompt: {enabled: false, text: 'Custom {os}/{arch}'}\n      telemetry: {mode: preview}\n",
+		"antigravity:\n  device-profile: {enabled: false}\n  system-prompt: {enabled: false, text: 'Custom {os}/{arch}', text-mode: protected, as-user: true, client-filter: {enabled: true, builtins: false, mode: rewrite, rules: {Codex: Antigravity}}}\n  telemetry: {mode: preview}\n",
+		"config-version: 8\noauth:\n  providers:\n    antigravity:\n      device-profile: {enabled: false}\n      system-prompt: {enabled: false, text: 'Custom {os}/{arch}', text-mode: protected, as-user: true, client-filter: {enabled: true, builtins: false, mode: rewrite, rules: {Codex: Antigravity}}}\n      telemetry: {mode: preview}\n",
 	} {
 		cfg, errParse := ParseConfigBytes([]byte(raw))
 		if errParse != nil {
@@ -20,11 +20,17 @@ func TestAntigravityHubConfigRoundTrip(t *testing.T) {
 			if c.Antigravity.DeviceProfile.Enabled == nil || *c.Antigravity.DeviceProfile.Enabled || c.Antigravity.SystemPrompt.Enabled == nil || *c.Antigravity.SystemPrompt.Enabled || c.Antigravity.SystemPrompt.Text != "Custom {os}/{arch}" || c.Antigravity.Telemetry.EffectiveMode() != "preview" {
 				t.Fatalf("Antigravity settings lost: %#v", c.Antigravity)
 			}
+			prompt := c.Antigravity.SystemPrompt
+			filter := prompt.ClientFilter
+			if prompt.TextMode != "protected" || !prompt.AsUser || filter.Enabled == nil || !*filter.Enabled || filter.Builtins == nil || *filter.Builtins || filter.Mode != "rewrite" || filter.Rules["Codex"] != "Antigravity" {
+				t.Fatalf("prompt processing settings lost: %#v", prompt)
+			}
 		}
 		check(cfg)
 		clone := cfg.CloneForRuntime()
 		*cfg.Antigravity.SystemPrompt.Enabled = true
 		*cfg.Antigravity.DeviceProfile.Enabled = true
+		cfg.Antigravity.SystemPrompt.ClientFilter.Rules["Codex"] = "changed"
 		check(clone)
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		if errWrite := os.WriteFile(path, []byte(raw), 0600); errWrite != nil {

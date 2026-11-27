@@ -80,7 +80,9 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 	util.ApplyCustomHeadersFromAttrs(headerTemplate, attrs)
 	profile = misc.ParseAntigravityDeviceProfile(headerTemplate.Header.Get("User-Agent"))
-	helps.ApplyAntigravitySystemPromptDoc(e.cfg, profile, baseModel, doc)
+	if errPrompt := helps.ApplyAntigravitySystemPromptDoc(e.cfg, profile, baseModel, doc); errPrompt != nil {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: errPrompt.Error()}
+	}
 	helps.PrepareAntigravityClaudeStructuredOutputDoc(baseModel, doc)
 	sanitizeAntigravityGeminiRequestSignaturesDoc(baseModel, doc)
 	if _, errReplay := prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {

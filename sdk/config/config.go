@@ -26,6 +26,7 @@ type CodexOAuthConfig = internalconfig.CodexOAuthConfig
 type AntigravityConfig = internalconfig.AntigravityConfig
 type AntigravityDeviceProfileConfig = internalconfig.AntigravityDeviceProfileConfig
 type AntigravitySystemPromptConfig = internalconfig.AntigravitySystemPromptConfig
+type AntigravityClientFilterConfig = internalconfig.AntigravityClientFilterConfig
 type AntigravityTelemetryConfig = internalconfig.AntigravityTelemetryConfig
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type OAuthAuthModelAlias = internalconfig.OAuthAuthModelAlias

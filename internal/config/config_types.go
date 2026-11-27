@@ -323,6 +323,22 @@ type AntigravitySystemPromptConfig struct {
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Text replaces the built-in template; {hub_version}, {os}, and {arch} are expanded.
 	Text string `yaml:"text,omitempty" json:"text,omitempty"`
+	// ClientFilter rewrites client names in caller system text only.
+	ClientFilter AntigravityClientFilterConfig `yaml:"client-filter,omitempty" json:"client-filter,omitempty"`
+	// TextMode is off (default), leet, or protected. It affects caller system text only.
+	TextMode string `yaml:"text-mode,omitempty" json:"text-mode,omitempty"`
+	// AsUser moves caller guidance to the first user turn. Defaults to false.
+	AsUser bool `yaml:"as-user,omitempty" json:"as-user,omitempty"`
+}
+
+type AntigravityClientFilterConfig struct {
+	// Enabled and Builtins default to true. User payload rules remain authoritative.
+	Enabled  *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Builtins *bool `yaml:"builtins,omitempty" json:"builtins,omitempty"`
+	// Mode is rewrite (default) or block. Block rejects matching requests locally.
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	// Rules override built-in names case-insensitively; an empty value deletes a name.
+	Rules map[string]string `yaml:"rules,omitempty" json:"rules,omitempty"`
 }
 
 type AntigravityTelemetryConfig struct {

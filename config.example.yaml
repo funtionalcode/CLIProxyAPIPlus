@@ -656,6 +656,15 @@ codex:
 #   system-prompt:
 #     enabled: true             # prepend compatibility guidance while retaining caller instructions
 #     text: ""                  # optional replacement template: {hub_version}, {os}, {arch}
+#     text-mode: "off"          # off, leet, protected (preserves code/paths/contract-bearing lines)
+#     as-user: false            # opt-in: move caller system guidance to a lower-priority user turn
+#     client-filter:
+#       enabled: true           # rewrite caller system text only; user messages/tools are preserved
+#       mode: "rewrite"         # rewrite or block (reject matching requests locally with HTTP 400)
+#       builtins: true          # Claude Code, Claude Agent SDK, Codex, Cursor, Windsurf, Cline, Roo Code, Kilo Code
+#       rules:                  # case-insensitive, longest match first; custom rules override builtins
+#         "Claude Code": "Antigravity"
+#         "Claude Agent SDK": "" # empty replacement deletes the matching name
 #   telemetry:
 #     mode: "preview"           # default: local metadata-only logs; off disables; send explicitly enables delivery
 # sensitive-words:              # optional: words to obfuscate with combining grapheme joiners (U+034F) in system instructions

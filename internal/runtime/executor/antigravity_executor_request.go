@@ -80,7 +80,9 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	}
 	util.ApplyCustomHeadersFromAttrs(headerTemplate, attrs)
 	profile = misc.ParseAntigravityDeviceProfile(headerTemplate.Header.Get("User-Agent"))
-	helps.ApplyAntigravitySystemPromptDoc(e.cfg, profile, modelName, doc)
+	if errPrompt := helps.ApplyAntigravitySystemPromptDoc(e.cfg, profile, modelName, doc); errPrompt != nil {
+		return nil, nil, statusErr{code: http.StatusBadRequest, msg: errPrompt.Error()}
+	}
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
